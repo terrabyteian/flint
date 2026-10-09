@@ -132,11 +132,12 @@ S3 redirect support will be an optional extra interface that the read path check
 The metadata store is an ordered key-value map in which every change is a durable, sequenced log entry.
 It is a hand-written append-only write-ahead log, an in-memory index, and periodic snapshots.
 
-- **Log.** Each committed batch is one log record: a length, a CRC-32C checksum, the sequence number, a record format version, and the encoded operations. Segments rotate by size.
+- **Log.** Each committed batch is one log record: a length, a CRC-32C checksum, the sequence number, a record format version, the commit timestamp, the encoded origin, and the encoded operations. Segments rotate by size.
+- **Commit timestamp.** The single log writer assigns each record its commit timestamp when it appends it, never going backwards (the later of the clock and the previous record's timestamp). Everything time-dependent about applying a batch, such as a `Deadline` precondition, is evaluated against that recorded timestamp, never against the clock of the node applying it, so replay and replication apply every record identically.
 - **Index.** An in-memory ordered index of all live keys. Ordered iteration serves prefix scans and paginated listings (tags, catalog, package files). The index is copy-on-write (for example a persistent B-tree with path copying), so a read view is a root pointer: views are consistent and cheap, and long scans such as garbage-collection marking or backup never block writers.
-- **Snapshots.** In the background, the store writes the index as of some sequence number to a temp file, fsyncs it, and renames it into place. Snapshots hold only the index, not batch origins.
-- **Segment retention.** A log segment is deleted only when it is BOTH wholly covered by the latest snapshot AND wholly at or below the checkpoint of every registered durable consumer. A durable consumer is a reader that must see every batch, origins included: the audit log (M4) and, later, Raft replication. Each consumer registers by name and durably advances its checkpoint after it has processed batches; the lowest checkpoint is the retention floor. An unregistered consumer no longer holds segments back.
-- **Startup.** Load the latest valid snapshot, then replay the log after its sequence number. A torn record at the log's tail (a crash mid-write) fails its checksum and is truncated; it was never acknowledged.
+- **Snapshots.** In the background, the store writes the index as of some sequence number to a temp file, fsyncs it, renames it into place, and fsyncs `meta/snapshots/`. Snapshots hold only the index, not batch origins.
+- **Segment retention.** A log segment is deleted only when it is BOTH wholly covered by the latest snapshot AND wholly at or below the checkpoint of every registered durable consumer. A durable consumer is a reader that must see every batch, origins included: the audit log (M4) and, later, Raft replication. Each consumer registers by name and durably advances its checkpoint after it has processed batches (temp file, fsync, rename into `meta/consumers/`, fsync the directory); the lowest checkpoint is the retention floor. An unregistered consumer no longer holds segments back. No segment is deleted until the snapshot and checkpoints that allow it are durable, including their directory entries.
+- **Startup.** Load the latest valid snapshot, then replay the log after its sequence number. A torn record at the log's tail (a crash mid-write) fails its checksum and is truncated; it was never acknowledged. The retained log must continue the snapshot without a gap: if the first record after the snapshot's sequence number is not the next sequence number, or a registered consumer's checkpoint is older than the oldest retained record, startup fails with the corruption error. It never silently falls back to an older snapshot whose segments have been deleted.
 - **Durability and group commit.** A commit returns only after its log record is fsynced. A single writer goroutine drains all pending batches, appends them, issues one fsync, then acknowledges them all, so concurrent writers share fsync cost.
 - **Versioned records.** Log records carry a format version, and values written by format packages start with their own schema version byte, so encodings can evolve while old logs and snapshots still load.
 - **Preconditions.** A batch can require that a key is absent or still at a given version, and it fails atomically if not. This implements immutable tags, never-reusable PyPI filenames, and safe concurrent updates without locks held across requests.
@@ -153,7 +154,7 @@ Illustrative v1 key space:
 | `oci\0manifest\0<repo>\0<name>\0<digest>` | manifest record (media type, size, subject, referenced digests) | `internal/oci` |
 | `oci\0tag\0<repo>\0<name>\0<tag>` | manifest digest | `internal/oci` |
 | `pypi\0file\0<repo>\0<filename>` | file record, kept as a tombstone after delete | `internal/pypi` |
-| `gc\0digest\0<digest>` | per-digest link guard: live, doomed while the sweep deletes the blob, or gone (with the time it went); deleted once gone longer than the grace period | `internal/gc` |
+| `gc\0digest\0<digest>` | per-digest link guard: live, doomed while the sweep deletes the blob, or gone (gone since the record's commit timestamp); deleted once gone longer than the grace period | `internal/gc` |
 | `auth\0user\0<username>` | user record | `internal/auth` |
 | `auth\0token\0<token-id>` | token record with hashed secret | `internal/auth` |
 
@@ -163,7 +164,7 @@ An index on disk can later replace the in-memory one behind the same interface i
 
 HA is deferred, but nothing in v1 may block it:
 
-- The metadata log is a sequence of deterministic batches with preconditions. In HA mode, the log becomes a Raft-replicated log: `Commit` proposes the batch, and every node applies committed entries in order to its index. Snapshots become Raft snapshots. Replication registers as a durable log consumer, so the same retention floor keeps segments that a lagging follower still needs.
+- The metadata log is a sequence of deterministic batches with preconditions. In HA mode, the log becomes a Raft-replicated log: `Commit` proposes the batch, the leader assigns its commit timestamp, and every node applies committed entries in order to its index. Snapshots become Raft snapshots. Replication registers as a durable log consumer, so the same retention floor keeps segments that a lagging follower still needs.
 - Blob storage moves to shared S3 (or replicated filesystems); content addressing makes concurrent writers of the same blob harmless.
 - Keys, values, and paths contain no node identity, so a v1 data directory becomes the initial state of a cluster without migration.
 
@@ -207,6 +208,7 @@ type Store interface {
 // Entry is one committed batch as read back from the log.
 type Entry struct {
 	Seq    Seq
+	Time   time.Time // commit timestamp assigned by the log writer
 	Origin Origin
 	Ops    []Op
 }
@@ -232,7 +234,8 @@ type View interface {
 // Record is a stored value. Value is owned by the store and must not be modified.
 type Record struct {
 	Value   []byte
-	Version Seq // the sequence number of the batch that last wrote the key
+	Version Seq       // the sequence number of the batch that last wrote the key
+	Time    time.Time // that batch's commit timestamp
 }
 
 // Batch is a set of operations committed atomically.
@@ -242,7 +245,7 @@ func (b *Batch) Put(key, value []byte)
 func (b *Batch) Delete(key []byte)
 // Require adds a precondition: key must be at version v, where 0 means absent.
 func (b *Batch) Require(key []byte, v Seq)
-// Deadline makes the batch fail with ErrConflict if it would be applied after t.
+// Deadline makes the batch fail with ErrConflict if its commit timestamp is after t.
 func (b *Batch) Deadline(t time.Time)
 // SetOrigin records who made the change, why, and to what. The audit log consumer copies
 // the origin and the batch's keys to the audit stream; it never copies values.
@@ -254,7 +257,6 @@ type Origin struct {
 	Actor  string // user or token identity, or "system"
 	Action string // e.g. "oci.tag.put"
 	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
-	Time   time.Time
 }
 
 // Open opens or creates the store in dir, loading the latest snapshot and replaying the log.
@@ -430,15 +432,15 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - **Configuration.** One JSON file. Repositories and permissions declared in config are read-only through the API; repositories created through the API or UI are also allowed and live in the metadata store. Users and tokens are runtime data. The Helm chart renders YAML values to the JSON config.
 - **TLS.** Served from certificate files, reloaded when they change. flint is proxy-aware: forwarded headers are trusted only from a configured trusted-proxy list. Built-in ACME comes after v1.
 - **UI.** A small server-rendered UI (`html/template` plus hand-written JavaScript, no npm build chain) to browse repositories, tags, packages, layers, and signatures, and to manage one's own tokens. Administration is through the API and config.
-- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that writes one record per batch to its own append-only stream under `audit/`, holding the batch's sequence number, its origin (actor, action, target, time), and the keys it touched, but never operation values, so password hashes, token hashes, and other values never reach the audit stream. The stream is retained separately (retention configurable, keep forever by default), so audit history never depends on log segment lifetime. OpenTelemetry is deferred.
+- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that writes one record per batch to its own append-only stream under `audit/`, holding the batch's sequence number, its commit timestamp, its origin (actor, action, target), and the keys it touched, but never operation values, so password hashes, token hashes, and other values never reach the audit stream. The stream is retained separately (retention configurable, keep forever by default), so audit history never depends on log segment lifetime. OpenTelemetry is deferred.
 - **Releases.** Static binaries for linux and darwin on amd64 and arm64; a multi-arch `FROM scratch` image and a Helm chart on `ghcr.io/terrabyteian`; cosign signatures and an SBOM produced in CI. The chart lives in this repository. flint's own image and chart stay on ghcr.io permanently, so a broken flint can always be redeployed without depending on itself.
 
 ## Cleanup and data safety
 
 - **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping deletes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads.
   - **Pinned views.** Long-running readers that need blobs to stay put, such as a backup in progress, hand the garbage collector the `View` handle itself, because the store cannot reopen a view at an older sequence number. The view is released only when both the reader and the garbage collector are done with it. Marking walks the oldest pinned view (or a fresh view if none is pinned), so the sweep never deletes a blob that any live pinned view still references. Links committed after that view are protected by the link guard below.
-  - **Link guard.** A concurrent link of an old, unreferenced blob (a cross-repository mount, or a re-push of identical content whose upload reused the existing blob) must not race the sweep, so both sides carry a precondition on the per-digest key `gc\0digest\0<digest>`. A link reads that key before it calls `Upload.Commit` (or, for a mount, before it checks the source repository); if the key is doomed the link fails, and otherwise its batch writes the key as live with `Require` at the version it read and with `Deadline` set to the read time plus the link deadline. To delete a blob, the sweep commits a batch that marks the key doomed with `Require` at the version seen in the marked view, deletes the blob, then commits a batch that marks the key gone and records when. Every link and every sweep step changes the key's version, so a concurrent link and a sweep cannot both succeed: if the link commits first, the sweep's doom batch fails and the blob is kept; if the sweep dooms first, the link fails, and the push returns a retryable error (a mount falls back to a normal upload) so the client uploads the content again, which recreates the blob after the sweep marks it gone.
-  - **Bounded guard keys.** The link deadline is a fixed duration, at most the request timeout and always strictly shorter than the grace period; config validation rejects any other setting at startup. A link past its deadline aborts with a retryable error. The sweep deletes a gone key once it has been gone longer than the grace period, so guard keys do not accumulate. This is safe: a link that read the key before the sweep doomed it had to commit or abort within the link deadline of that read, which is before the key went gone plus the grace period. If it committed, the key was already doomed or gone at a newer version, so its `Require` failed. A stale read of the key, including "absent", can therefore never match after the key is deleted.
+  - **Link guard.** A concurrent link of an old, unreferenced blob (a cross-repository mount, or a re-push of identical content whose upload reused the existing blob) must not race the sweep, so both sides carry a precondition on the per-digest key `gc\0digest\0<digest>`. A link reads that key before it calls `Upload.Commit` (or, for a mount, before it checks the source repository); if the key is doomed the link fails, and otherwise its batch writes the key as live with `Require` at the version it read and with `Deadline` set to the read time plus the link deadline. To delete a blob, the sweep commits a batch that marks the key doomed with `Require` at the version seen in the marked view, deletes the blob, then commits a batch that marks the key gone; the gone time is that batch's commit timestamp (`Record.Time`). Every link and every sweep step changes the key's version, so a concurrent link and a sweep cannot both succeed: if the link commits first, the sweep's doom batch fails and the blob is kept; if the sweep dooms first, the link fails, and the push returns a retryable error (a mount falls back to a normal upload) so the client uploads the content again, which recreates the blob after the sweep marks it gone.
+  - **Bounded guard keys.** The link deadline is a fixed duration, at most the request timeout and always strictly shorter than the grace period; config validation rejects any other setting at startup. A link past its deadline aborts with a retryable error. The sweep deletes a gone key, with `Require` at its gone version, once the key's commit timestamp is older than the grace period, so guard keys do not accumulate. This is safe: a link that read the key before the sweep doomed it had to commit or abort by its `Deadline`, the read time plus the link deadline, which is checked against the link's own commit timestamp and is earlier than the gone batch's commit timestamp plus the grace period. If it committed, the key was already doomed or gone at a newer version, so its `Require` failed. A stale read of the key, including "absent", can therefore never match after the key is deleted.
   - **Finishing doomed keys.** A doomed key blocks links of its digest, so it never outlives the sweep that created it. If deleting the blob or committing the gone batch fails, the sweep retries promptly; if the blob is still present and cannot be deleted, it rolls the key back to live instead. On startup, before serving, the server finishes every doomed key the same way; the `LOCK` file guarantees no other sweeper is running. While a key is doomed no link can succeed, so finishing it is always safe.
 - **Deletes** hide immediately in metadata; garbage collection reclaims space later.
 - **Retention policies** (for example, keep the last N tags matching a pattern, or delete untagged manifests older than X) are designed now and built shortly after v1. They are the only mechanism that deletes untagged manifests in hosted repositories.
