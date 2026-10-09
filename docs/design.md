@@ -90,7 +90,7 @@ The format packages translate protocol requests into blob and metadata operation
   meta/wal/<seq>.log           write-ahead log segments, named by first sequence number
   meta/snapshots/<seq>.snap    index snapshots, named by the last sequence number they contain
   meta/consumers/<name>        durable checkpoint of each registered log consumer
-  audit/                       append-only audit stream, retained separately from the log (M4)
+  audit/                       append-only audit stream of batch origins and touched keys, never values (M4)
 ```
 
 Paths contain no node identity, so a later HA deployment can reuse the layout unchanged.
@@ -153,7 +153,7 @@ Illustrative v1 key space:
 | `oci\0manifest\0<repo>\0<name>\0<digest>` | manifest record (media type, size, subject, referenced digests) | `internal/oci` |
 | `oci\0tag\0<repo>\0<name>\0<tag>` | manifest digest | `internal/oci` |
 | `pypi\0file\0<repo>\0<filename>` | file record, kept as a tombstone after delete | `internal/pypi` |
-| `gc\0digest\0<digest>` | per-digest link guard: live, doomed while the sweep deletes the blob, or gone; never deleted | `internal/gc` |
+| `gc\0digest\0<digest>` | per-digest link guard: live, doomed while the sweep deletes the blob, or gone (with the time it went); deleted once gone longer than the grace period | `internal/gc` |
 | `auth\0user\0<username>` | user record | `internal/auth` |
 | `auth\0token\0<token-id>` | token record with hashed secret | `internal/auth` |
 
@@ -242,13 +242,18 @@ func (b *Batch) Put(key, value []byte)
 func (b *Batch) Delete(key []byte)
 // Require adds a precondition: key must be at version v, where 0 means absent.
 func (b *Batch) Require(key []byte, v Seq)
-// SetOrigin records who made the change and why; the audit log consumer copies it to the audit stream.
+// Deadline makes the batch fail with ErrConflict if it would be applied after t.
+func (b *Batch) Deadline(t time.Time)
+// SetOrigin records who made the change, why, and to what. The audit log consumer copies
+// the origin and the batch's keys to the audit stream; it never copies values.
 func (b *Batch) SetOrigin(o Origin)
 
-// Origin describes the actor and action behind a batch.
+// Origin describes the actor, action, and target behind a batch.
+// It must not contain secrets: it is kept in the audit stream.
 type Origin struct {
 	Actor  string // user or token identity, or "system"
 	Action string // e.g. "oci.tag.put"
+	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
 	Time   time.Time
 }
 
@@ -320,8 +325,8 @@ Errors: `ErrNotFound`, `ErrDigestMismatch`, `ErrUploadUnknown`.
 Both stores ship crash tests in M0.
 They must prove the durability contract: a write is acknowledged only after it is fsynced, so it survives a power loss.
 
-- **Filesystem interface.** The write-ahead log and the blob store perform their write-path file operations (create, write, fsync, rename, directory fsync, remove) through a small internal filesystem interface. Production uses the `os` package directly. The blob read path keeps direct `*os.File` access, so `sendfile` is unaffected.
-- **Simulated power loss.** Tests add a strict in-memory implementation of that interface. On a simulated crash it discards every write not yet fsynced, and every create, rename, or remove whose parent directory was not fsynced afterwards. Crash tests run the stores against it under concurrent load, crash at random points, reopen, and check that every acknowledged write is present and no partial state is visible. A missing file or directory fsync fails these tests.
+- **Filesystem interface.** The write-ahead log and the blob store perform every file operation through a small internal filesystem interface: the write path (create, write, fsync, rename, directory fsync, remove) and everything recovery, reopen, and reads use (open for read, read, list a directory, stat, truncate a torn tail), so log and snapshot loading, blob `Walk`, `Stat`, and `Open` all see the same filesystem. Production implements it with the `os` package, and its open returns the `*os.File` itself, which the blob store's `Open` hands out unwrapped, so `sendfile` is unaffected.
+- **Simulated power loss.** Tests add a strict in-memory implementation of that interface. On a simulated crash it discards every write not yet fsynced, and every create, rename, or remove whose parent directory was not fsynced afterwards. Crash tests run the stores against it under concurrent load, crash at random points, reopen against the simulated post-crash state, and check that every acknowledged write is present and no partial state is visible. A missing file or directory fsync fails these tests.
 - **Process crashes.** The tests also run each store in a child process, kill it with SIGKILL at random points under concurrent load, reopen it, and apply the same checks. The kernel page cache survives SIGKILL, so these tests cover process-level crashes and recovery logic, not missing fsyncs.
 - **Fault injection.** Tests cover short writes, failed fsyncs, and torn log tails.
 
@@ -425,17 +430,19 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - **Configuration.** One JSON file. Repositories and permissions declared in config are read-only through the API; repositories created through the API or UI are also allowed and live in the metadata store. Users and tokens are runtime data. The Helm chart renders YAML values to the JSON config.
 - **TLS.** Served from certificate files, reloaded when they change. flint is proxy-aware: forwarded headers are trusted only from a configured trusted-proxy list. Built-in ACME comes after v1.
 - **UI.** A small server-rendered UI (`html/template` plus hand-written JavaScript, no npm build chain) to browse repositories, tags, packages, layers, and signatures, and to manage one's own tokens. Administration is through the API and config.
-- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that copies each batch's origin and operations to its own append-only stream under `audit/`, retained separately (retention configurable, keep forever by default), so audit history never depends on log segment lifetime. OpenTelemetry is deferred.
+- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that writes one record per batch to its own append-only stream under `audit/`, holding the batch's sequence number, its origin (actor, action, target, time), and the keys it touched, but never operation values, so password hashes, token hashes, and other values never reach the audit stream. The stream is retained separately (retention configurable, keep forever by default), so audit history never depends on log segment lifetime. OpenTelemetry is deferred.
 - **Releases.** Static binaries for linux and darwin on amd64 and arm64; a multi-arch `FROM scratch` image and a Helm chart on `ghcr.io/terrabyteian`; cosign signatures and an SBOM produced in CI. The chart lives in this repository. flint's own image and chart stay on ghcr.io permanently, so a broken flint can always be redeployed without depending on itself.
 
 ## Cleanup and data safety
 
 - **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping deletes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads.
-  - **Pinned views.** Long-running readers that need blobs to stay put, such as a backup in progress, register their view's sequence number with the garbage collector for as long as they run. Marking walks the oldest registered view (or a fresh view if none is registered), so the sweep never deletes a blob that any live pinned view still references. Links committed after that view are protected by the link guard below.
-  - **Link guard.** A concurrent link of an old, unreferenced blob (a cross-repository mount, or a re-push of identical content whose upload reused the existing blob) must not race the sweep, so both sides carry a precondition on the per-digest key `gc\0digest\0<digest>`. A link reads that key before it calls `Upload.Commit` (or, for a mount, before it checks the source repository); if the key is doomed the link fails, and otherwise its batch writes the key as live with `Require` at the version it read. To delete a blob, the sweep commits a batch that marks the key doomed with `Require` at the version seen in the marked view, deletes the blob, then commits a batch that marks the key gone. The key is never deleted, so its version only grows and a stale read can never match again. Every link and every sweep step changes the key's version, so a concurrent link and a sweep cannot both succeed: if the link commits first, the sweep's doom batch fails and the blob is kept; if the sweep dooms first, the link fails, and the push returns a retryable error (a mount falls back to a normal upload) so the client uploads the content again, which recreates the blob after the sweep marks it gone. A key left doomed by an interrupted sweep is finished by the next run, which is safe because no link can succeed while it is doomed.
+  - **Pinned views.** Long-running readers that need blobs to stay put, such as a backup in progress, hand the garbage collector the `View` handle itself, because the store cannot reopen a view at an older sequence number. The view is released only when both the reader and the garbage collector are done with it. Marking walks the oldest pinned view (or a fresh view if none is pinned), so the sweep never deletes a blob that any live pinned view still references. Links committed after that view are protected by the link guard below.
+  - **Link guard.** A concurrent link of an old, unreferenced blob (a cross-repository mount, or a re-push of identical content whose upload reused the existing blob) must not race the sweep, so both sides carry a precondition on the per-digest key `gc\0digest\0<digest>`. A link reads that key before it calls `Upload.Commit` (or, for a mount, before it checks the source repository); if the key is doomed the link fails, and otherwise its batch writes the key as live with `Require` at the version it read and with `Deadline` set to the read time plus the link deadline. To delete a blob, the sweep commits a batch that marks the key doomed with `Require` at the version seen in the marked view, deletes the blob, then commits a batch that marks the key gone and records when. Every link and every sweep step changes the key's version, so a concurrent link and a sweep cannot both succeed: if the link commits first, the sweep's doom batch fails and the blob is kept; if the sweep dooms first, the link fails, and the push returns a retryable error (a mount falls back to a normal upload) so the client uploads the content again, which recreates the blob after the sweep marks it gone.
+  - **Bounded guard keys.** The link deadline is a fixed duration, at most the request timeout and always strictly shorter than the grace period; config validation rejects any other setting at startup. A link past its deadline aborts with a retryable error. The sweep deletes a gone key once it has been gone longer than the grace period, so guard keys do not accumulate. This is safe: a link that read the key before the sweep doomed it had to commit or abort within the link deadline of that read, which is before the key went gone plus the grace period. If it committed, the key was already doomed or gone at a newer version, so its `Require` failed. A stale read of the key, including "absent", can therefore never match after the key is deleted.
+  - **Finishing doomed keys.** A doomed key blocks links of its digest, so it never outlives the sweep that created it. If deleting the blob or committing the gone batch fails, the sweep retries promptly; if the blob is still present and cannot be deleted, it rolls the key back to live instead. On startup, before serving, the server finishes every doomed key the same way; the `LOCK` file guarantees no other sweeper is running. While a key is doomed no link can succeed, so finishing it is always safe.
 - **Deletes** hide immediately in metadata; garbage collection reclaims space later.
 - **Retention policies** (for example, keep the last N tags matching a pattern, or delete untagged manifests older than X) are designed now and built shortly after v1. They are the only mechanism that deletes untagged manifests in hosted repositories.
-- **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup pins its metadata view with the garbage collector until it finishes copying, so every blob its snapshot references is still present when it is copied.
+- **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup hands its metadata `View` to the garbage collector as a pinned view and releases it only after it finishes copying and the garbage collector is done with it, so every blob its snapshot references is still present when it is copied.
 
 ## Roadmap
 
