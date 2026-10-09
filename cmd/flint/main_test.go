@@ -15,7 +15,6 @@ func TestRun(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "flint dev\n"},
-		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "usage: flint"},
 		{name: "no args", args: nil, wantCode: 2, wantStderr: "usage: flint"},
 		{name: "unimplemented", args: []string{"serve"}, wantCode: 2, wantStderr: `subcommand "serve" is not implemented`},
 	}

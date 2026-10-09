@@ -10,7 +10,7 @@ flint is an artifact registry: a self-hosted replacement for JFrog Artifactory, 
 
 - Serve container images and OCI artifacts, and Python packages, from one server.
 - Host first-party artifacts and cache upstream registries (Docker Hub, ghcr.io, quay.io, PyPI) behind the same endpoint.
-- Be efficient: one static binary plus a data directory, low memory per artifact, streaming I/O, zero-copy reads.
+- Be efficient: one static binary plus a data directory, low memory per artifact, streaming I/O, and zero-copy `sendfile` reads over plain HTTP/1.1 (for example behind a TLS-terminating trusted proxy).
 - Be safe with data: an acknowledged write survives a crash, and nothing is ever deleted silently.
 - Be product quality. flint starts as a personal homelab registry, but its design must hold up for an open-source product used by large-ish enterprises: multi-terabyte storage and a few hundred concurrent clients on one server.
 
@@ -53,7 +53,7 @@ CI may run real clients (docker, crane, oras, pip, uv, twine) and the official O
 Both were viable.
 Go won because of the zero-dependency rule.
 Rust's standard library has no HTTP, TLS, or cryptography, so zero-dependency Rust would mean hand-writing TLS, which is unacceptable for a security-sensitive server.
-Go's standard library covers the whole protocol stack, cross-compiles static binaries trivially, and gives `sendfile` reads through plain `io.Copy`.
+Go's standard library covers the whole protocol stack, cross-compiles static binaries trivially, and gives `sendfile` reads through plain `io.Copy` on plain HTTP/1.1 connections.
 The trade-off is garbage-collector cost for a large in-memory index; the metadata store keeps that in check with compact, pointer-light encodings (see [Metadata store](#metadata-store)).
 
 ## Architecture overview
@@ -89,6 +89,8 @@ The format packages translate protocol requests into blob and metadata operation
   uploads/                     in-progress uploads; must be on the same filesystem as blobs/
   meta/wal/<seq>.log           write-ahead log segments, named by first sequence number
   meta/snapshots/<seq>.snap    index snapshots, named by the last sequence number they contain
+  meta/consumers/<name>        durable checkpoint of each registered log consumer
+  audit/                       append-only audit stream, retained separately from the log (M4)
 ```
 
 Paths contain no node identity, so a later HA deployment can reuse the layout unchanged.
@@ -111,11 +113,13 @@ It holds bytes only; it does not know about repositories, formats, or access con
 A crash between steps 5 and 7 leaves an unlinked blob.
 That is safe: garbage collection reclaims it after its grace period.
 A cross-repository blob mount is only step 7: a new link record, no data copied.
+Before linking, a mount checks that the blob is linked in the `from` repository and that the caller has read permission on that repository; if either check fails, it falls back to a normal upload, as the OCI spec allows.
+Every link batch, whether from an upload or a mount, carries the garbage-collection precondition described in [Cleanup and data safety](#cleanup-and-data-safety).
 
 ### Read path
 
 1. The caller checks the per-repository link record in the metadata store. A blob that exists only for another repository is a 404: digests are not secrets, and possession of one must not grant access.
-2. The blob is opened and streamed. The filesystem store returns the `*os.File` itself, unwrapped, so `net/http`'s copy path can use `sendfile` and bytes never pass through user space.
+2. The blob is opened and streamed. The filesystem store returns the `*os.File` itself, unwrapped, so `net/http`'s copy path can use `sendfile`. That zero-copy path applies only to plain HTTP/1.1, for example when TLS is terminated by a trusted proxy in front of flint. When flint serves TLS itself, or the connection is HTTP/2, blob bytes are read and encrypted in user space.
 
 ### Storage interface
 
@@ -130,7 +134,8 @@ It is a hand-written append-only write-ahead log, an in-memory index, and period
 
 - **Log.** Each committed batch is one log record: a length, a CRC-32C checksum, the sequence number, a record format version, and the encoded operations. Segments rotate by size.
 - **Index.** An in-memory ordered index of all live keys. Ordered iteration serves prefix scans and paginated listings (tags, catalog, package files). The index is copy-on-write (for example a persistent B-tree with path copying), so a read view is a root pointer: views are consistent and cheap, and long scans such as garbage-collection marking or backup never block writers.
-- **Snapshots.** In the background, the store writes the index as of some sequence number to a temp file, fsyncs it, and renames it into place. Log segments wholly covered by the latest snapshot are then deleted.
+- **Snapshots.** In the background, the store writes the index as of some sequence number to a temp file, fsyncs it, and renames it into place. Snapshots hold only the index, not batch origins.
+- **Segment retention.** A log segment is deleted only when it is BOTH wholly covered by the latest snapshot AND wholly at or below the checkpoint of every registered durable consumer. A durable consumer is a reader that must see every batch, origins included: the audit log (M4) and, later, Raft replication. Each consumer registers by name and durably advances its checkpoint after it has processed batches; the lowest checkpoint is the retention floor. An unregistered consumer no longer holds segments back.
 - **Startup.** Load the latest valid snapshot, then replay the log after its sequence number. A torn record at the log's tail (a crash mid-write) fails its checksum and is truncated; it was never acknowledged.
 - **Durability and group commit.** A commit returns only after its log record is fsynced. A single writer goroutine drains all pending batches, appends them, issues one fsync, then acknowledges them all, so concurrent writers share fsync cost.
 - **Versioned records.** Log records carry a format version, and values written by format packages start with their own schema version byte, so encodings can evolve while old logs and snapshots still load.
@@ -148,6 +153,7 @@ Illustrative v1 key space:
 | `oci\0manifest\0<repo>\0<name>\0<digest>` | manifest record (media type, size, subject, referenced digests) | `internal/oci` |
 | `oci\0tag\0<repo>\0<name>\0<tag>` | manifest digest | `internal/oci` |
 | `pypi\0file\0<repo>\0<filename>` | file record, kept as a tombstone after delete | `internal/pypi` |
+| `gc\0digest\0<digest>` | per-digest link guard: live, doomed while the sweep deletes the blob, or gone; never deleted | `internal/gc` |
 | `auth\0user\0<username>` | user record | `internal/auth` |
 | `auth\0token\0<token-id>` | token record with hashed secret | `internal/auth` |
 
@@ -157,7 +163,7 @@ An index on disk can later replace the in-memory one behind the same interface i
 
 HA is deferred, but nothing in v1 may block it:
 
-- The metadata log is a sequence of deterministic batches with preconditions. In HA mode, the log becomes a Raft-replicated log: `Commit` proposes the batch, and every node applies committed entries in order to its index. Snapshots become Raft snapshots.
+- The metadata log is a sequence of deterministic batches with preconditions. In HA mode, the log becomes a Raft-replicated log: `Commit` proposes the batch, and every node applies committed entries in order to its index. Snapshots become Raft snapshots. Replication registers as a durable log consumer, so the same retention floor keeps segments that a lagging follower still needs.
 - Blob storage moves to shared S3 (or replicated filesystems); content addressing makes concurrent writers of the same blob harmless.
 - Keys, values, and paths contain no node identity, so a v1 data directory becomes the initial state of a cluster without migration.
 
@@ -183,8 +189,33 @@ type Store interface {
 	// Views are cheap; they must be released.
 	View() View
 
+	// RegisterConsumer registers a durable log consumer under name, or reopens it,
+	// and returns its checkpoint. A new consumer starts at the oldest retained batch.
+	// Log segments above a registered consumer's checkpoint are never deleted.
+	RegisterConsumer(name string) (Seq, error)
+	// UnregisterConsumer removes a consumer so it no longer holds segments back.
+	UnregisterConsumer(name string) error
+	// Checkpoint durably records that consumer name has processed every batch up to and including s.
+	Checkpoint(name string, s Seq) error
+	// ReadLog calls fn, in order, for each committed batch with a sequence number greater than after.
+	ReadLog(ctx context.Context, after Seq, fn func(Entry) error) error
+
 	// Close flushes and closes the log. Pending commits fail with ErrClosed.
 	Close() error
+}
+
+// Entry is one committed batch as read back from the log.
+type Entry struct {
+	Seq    Seq
+	Origin Origin
+	Ops    []Op
+}
+
+// Op is one operation in a committed batch.
+type Op struct {
+	Delete bool
+	Key    []byte
+	Value  []byte // nil for a delete
 }
 
 // View is a consistent, read-only, point-in-time view of the store.
@@ -211,7 +242,7 @@ func (b *Batch) Put(key, value []byte)
 func (b *Batch) Delete(key []byte)
 // Require adds a precondition: key must be at version v, where 0 means absent.
 func (b *Batch) Require(key []byte, v Seq)
-// SetOrigin records who made the change and why; the audit log is derived from it.
+// SetOrigin records who made the change and why; the audit log consumer copies it to the audit stream.
 func (b *Batch) SetOrigin(o Origin)
 
 // Origin describes the actor and action behind a batch.
@@ -225,7 +256,7 @@ type Origin struct {
 func Open(dir string, opts Options) (Store, error)
 ```
 
-Errors: `ErrConflict`, `ErrClosed`, and a corruption error that names the segment and offset when a record other than the torn tail fails its checksum.
+Errors: `ErrConflict`, `ErrClosed`, `ErrUnknownConsumer`, and a corruption error that names the segment and offset when a record other than the torn tail fails its checksum.
 
 ### `internal/blob`
 
@@ -287,8 +318,14 @@ Errors: `ErrNotFound`, `ErrDigestMismatch`, `ErrUploadUnknown`.
 ### Crash testing
 
 Both stores ship crash tests in M0.
-The tests run the store in a child process, kill it with SIGKILL at random points under concurrent load, reopen it, and check that every acknowledged write is present and no partial state is visible.
-Fault-injection tests cover short writes, failed fsyncs, and torn log tails.
+They must prove the durability contract: a write is acknowledged only after it is fsynced, so it survives a power loss.
+
+- **Filesystem interface.** The write-ahead log and the blob store perform their write-path file operations (create, write, fsync, rename, directory fsync, remove) through a small internal filesystem interface. Production uses the `os` package directly. The blob read path keeps direct `*os.File` access, so `sendfile` is unaffected.
+- **Simulated power loss.** Tests add a strict in-memory implementation of that interface. On a simulated crash it discards every write not yet fsynced, and every create, rename, or remove whose parent directory was not fsynced afterwards. Crash tests run the stores against it under concurrent load, crash at random points, reopen, and check that every acknowledged write is present and no partial state is visible. A missing file or directory fsync fails these tests.
+- **Process crashes.** The tests also run each store in a child process, kill it with SIGKILL at random points under concurrent load, reopen it, and apply the same checks. The kernel page cache survives SIGKILL, so these tests cover process-level crashes and recovery logic, not missing fsyncs.
+- **Fault injection.** Tests cover short writes, failed fsyncs, and torn log tails.
+
+Power-cut testing on a VM or with dm-flakey is out of scope for now.
 
 ## Package layout
 
@@ -388,15 +425,17 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - **Configuration.** One JSON file. Repositories and permissions declared in config are read-only through the API; repositories created through the API or UI are also allowed and live in the metadata store. Users and tokens are runtime data. The Helm chart renders YAML values to the JSON config.
 - **TLS.** Served from certificate files, reloaded when they change. flint is proxy-aware: forwarded headers are trusted only from a configured trusted-proxy list. Built-in ACME comes after v1.
 - **UI.** A small server-rendered UI (`html/template` plus hand-written JavaScript, no npm build chain) to browse repositories, tags, packages, layers, and signatures, and to manage one's own tokens. Administration is through the API and config.
-- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins. OpenTelemetry is deferred.
+- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that copies each batch's origin and operations to its own append-only stream under `audit/`, retained separately (retention configurable, keep forever by default), so audit history never depends on log segment lifetime. OpenTelemetry is deferred.
 - **Releases.** Static binaries for linux and darwin on amd64 and arm64; a multi-arch `FROM scratch` image and a Helm chart on `ghcr.io/terrabyteian`; cosign signatures and an SBOM produced in CI. The chart lives in this repository. flint's own image and chart stay on ghcr.io permanently, so a broken flint can always be redeployed without depending on itself.
 
 ## Cleanup and data safety
 
-- **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping deletes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads. A concurrent link of an old, unreferenced blob (a cross-repository mount, or a re-push of identical content) must not race the sweep; metadata preconditions make that safe, for example by having every link batch also write a per-digest key whose version the sweep requires to be unchanged when it marks the blob for deletion.
+- **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping deletes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads.
+  - **Pinned views.** Long-running readers that need blobs to stay put, such as a backup in progress, register their view's sequence number with the garbage collector for as long as they run. Marking walks the oldest registered view (or a fresh view if none is registered), so the sweep never deletes a blob that any live pinned view still references. Links committed after that view are protected by the link guard below.
+  - **Link guard.** A concurrent link of an old, unreferenced blob (a cross-repository mount, or a re-push of identical content whose upload reused the existing blob) must not race the sweep, so both sides carry a precondition on the per-digest key `gc\0digest\0<digest>`. A link reads that key before it calls `Upload.Commit` (or, for a mount, before it checks the source repository); if the key is doomed the link fails, and otherwise its batch writes the key as live with `Require` at the version it read. To delete a blob, the sweep commits a batch that marks the key doomed with `Require` at the version seen in the marked view, deletes the blob, then commits a batch that marks the key gone. The key is never deleted, so its version only grows and a stale read can never match again. Every link and every sweep step changes the key's version, so a concurrent link and a sweep cannot both succeed: if the link commits first, the sweep's doom batch fails and the blob is kept; if the sweep dooms first, the link fails, and the push returns a retryable error (a mount falls back to a normal upload) so the client uploads the content again, which recreates the blob after the sweep marks it gone. A key left doomed by an interrupted sweep is finished by the next run, which is safe because no link can succeed while it is doomed.
 - **Deletes** hide immediately in metadata; garbage collection reclaims space later.
 - **Retention policies** (for example, keep the last N tags matching a pattern, or delete untagged manifests older than X) are designed now and built shortly after v1. They are the only mechanism that deletes untagged manifests in hosted repositories.
-- **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental.
+- **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup pins its metadata view with the garbage collector until it finishes copying, so every blob its snapshot references is still present when it is copied.
 
 ## Roadmap
 

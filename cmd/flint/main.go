@@ -34,9 +34,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "version":
 		fmt.Fprintf(stdout, "flint %s\n", version)
 		return 0
-	case "help", "-h", "-help", "--help":
-		fmt.Fprint(stdout, usage)
-		return 0
 	default:
 		fmt.Fprintf(stderr, "flint: subcommand %q is not implemented\n\n%s", args[0], usage)
 		return 2
