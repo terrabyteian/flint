@@ -151,8 +151,7 @@ The store must meet these guarantees:
 5. The audit stream holds each batch's sequence number, commit time, origin (actor, action, target), and touched keys, never values.
 
 The garbage-collection guarantees are in [Cleanup and data safety](#cleanup-and-data-safety).
-The metadata store task defines how the final group-commit write is identified.
-The metadata store task defines and tests the algorithms that meet these guarantees.
+The algorithms that meet these guarantees, including how recovery identifies the final group-commit write, are described in the `internal/meta` package documentation and proven by its crash tests.
 
 The store does not interpret keys or values.
 Each package owns a key namespace, and keys use `0x00` as a separator so a prefix scan is unambiguous even though OCI repository names contain `/`.
@@ -201,9 +200,15 @@ type Store interface {
 	// View returns a consistent read-only view as of the latest fsynced batch.
 	// Views are cheap; they must be released.
 	View() View
+	// PinView is View, and also registers the view as pinned until it is released, in one step.
+	// Garbage collection reads the pinned views.
+	PinView() View
+	// PinnedViews returns a new view on each currently pinned view; each must be released.
+	PinnedViews() []View
 
 	// RegisterConsumer registers a durable log consumer under name, or reopens it,
 	// and returns its checkpoint. Log segments above its checkpoint are kept.
+	// A new consumer starts at the latest fsynced batch.
 	RegisterConsumer(name string) (Seq, error)
 	// UnregisterConsumer removes a consumer so it no longer holds segments back.
 	UnregisterConsumer(name string) error
@@ -212,6 +217,11 @@ type Store interface {
 	Checkpoint(name string, s Seq) error
 	// ReadLog calls fn, in order, for each fsynced batch with a sequence number greater than after.
 	ReadLog(ctx context.Context, after Seq, fn func(Entry) error) error
+
+	// Snapshot writes a snapshot now and deletes the log segments it makes unnecessary.
+	Snapshot() error
+	// Stats reports counters and health (including a write failure) for metrics.
+	Stats() Stats
 
 	// Close flushes and closes the log. Pending commits fail with ErrClosed.
 	Close() error
@@ -267,11 +277,13 @@ type Origin struct {
 	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
 }
 
-// Open opens or creates the store in dir, loading the latest snapshot and replaying the log.
+// Open opens or creates the store in dir (the data directory's meta/),
+// loading the latest valid snapshot and replaying the log.
+// Options sets the filesystem, segment size, snapshot interval, batch size limit, and logger.
 func Open(dir string, opts Options) (Store, error)
 ```
 
-Errors: `ErrConflict`, `ErrClosed`, `ErrUnknownConsumer`, `ErrUnknownOutcome` and `ErrPoisoned` (a failed log write or fsync), and a startup corruption error that names the segment and offset.
+Errors: `ErrConflict`, `ErrClosed`, `ErrUnknownConsumer`, `ErrUnknownOutcome` and `ErrPoisoned` (a failed log write or fsync), `ErrCompacted` (`ReadLog` asked for deleted segments), `ErrBatchTooLarge`, and `*CorruptionError` (matching `ErrCorrupt`), which names the file and offset of corruption found at startup or by `ReadLog`.
 
 ### `internal/blob`
 
