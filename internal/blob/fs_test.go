@@ -686,15 +686,20 @@ func TestReadFromUsesUpload(t *testing.T) {
 }
 
 func TestReadFromSourceError(t *testing.T) {
-	e := newEnv(t, fsys.NewMem(), "/data", nil)
-	u, _ := e.store.NewUpload(ctx)
-	boom := errors.New("client went away")
-	_, err := io.Copy(u, io.MultiReader(strings.NewReader("partial"), errReader{boom}))
-	if !errors.Is(err, boom) {
-		t.Fatalf("io.Copy = %v, want the source's error", err)
-	}
-	if u.Size() != int64(len("partial")) {
-		t.Fatalf("Size = %d after a failed copy, want the bytes that arrived", u.Size())
+	// A truncated HTTP body reports io.ErrUnexpectedEOF, which must not
+	// pass for the end of the stream.
+	for _, boom := range []error{errors.New("client went away"), io.ErrUnexpectedEOF} {
+		t.Run(boom.Error(), func(t *testing.T) {
+			e := newEnv(t, fsys.NewMem(), "/data", nil)
+			u, _ := e.store.NewUpload(ctx)
+			_, err := io.Copy(u, io.MultiReader(strings.NewReader("partial"), errReader{boom}))
+			if !errors.Is(err, boom) {
+				t.Fatalf("io.Copy = %v, want the source's error", err)
+			}
+			if u.Size() != int64(len("partial")) {
+				t.Fatalf("Size = %d after a failed copy, want the bytes that arrived", u.Size())
+			}
+		})
 	}
 }
 
@@ -724,6 +729,39 @@ func TestNewFSIdempotentAndDurable(t *testing.T) {
 	}
 	if got := get(t, s, FromBytes([]byte("survivor"))); string(got) != "survivor" {
 		t.Fatalf("committed blob after crash = %q", got)
+	}
+}
+
+func TestNewFSMakesExistingLayoutDurable(t *testing.T) {
+	data := []byte("survivor")
+	cases := map[string]struct {
+		dir     string
+		prepare func(mem *fsys.Mem)
+	}{
+		"missing ancestors": {"/a/b/data", func(*fsys.Mem) {}},
+		// A process killed during NewFS left the layout created but unsynced.
+		"unsynced layout": {"/srv/data", func(mem *fsys.Mem) {
+			mem.MkdirAll("/srv", 0o755)
+			mem.SyncDir("/")
+			mem.MkdirAll("/srv/data/blobs/sha256/"+FromBytes(data).Hex()[:2], 0o755)
+			mem.MkdirAll("/srv/data/uploads", 0o755)
+		}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			mem := fsys.NewMem()
+			c.prepare(mem)
+			e := newEnv(t, mem, c.dir, nil)
+			put(t, e.store, data)
+			after := mem.Restart(nil)
+			s, err := NewFS(c.dir, Options{FS: after})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := get(t, s, FromBytes(data)); !bytes.Equal(got, data) {
+				t.Fatalf("committed blob after crash = %q", got)
+			}
+		})
 	}
 }
 

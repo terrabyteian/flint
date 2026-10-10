@@ -81,15 +81,24 @@ func NewFS(dir string, opts Options) (Store, error) {
 // directories, and makes it durable. Creating the fan-out directories up
 // front keeps directory creation, and its parent fsync, out of commits.
 func (s *fsStore) init(dir string) error {
-	if _, err := s.fs.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		if err := s.fs.MkdirAll(dir, 0o755); err != nil {
+	// dir's entry lives in its parent; each ancestor MkdirAll creates
+	// needs its own parent synced too.
+	parents := []string{filepath.Dir(dir)}
+	for p := parents[0]; p != filepath.Dir(p); p = filepath.Dir(p) {
+		if _, err := s.fs.Stat(p); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
-		if err := s.fs.SyncDir(filepath.Dir(dir)); err != nil {
-			return err
-		}
-	} else if err != nil {
+		parents = append(parents, filepath.Dir(p))
+	}
+	if err := s.fs.MkdirAll(dir, 0o755); err != nil {
 		return err
+	}
+	for _, p := range parents {
+		if err := s.fs.SyncDir(p); err != nil {
+			return err
+		}
 	}
 	if err := s.mkdirs(dir, "blobs", "uploads"); err != nil {
 		return err
@@ -105,14 +114,12 @@ func (s *fsStore) init(dir string) error {
 }
 
 // mkdirs creates the named subdirectories of parent that do not exist yet
-// and, if it created any, syncs parent.
+// and syncs parent.
 func (s *fsStore) mkdirs(parent string, names ...string) error {
-	created := false
 	for _, name := range names {
 		err := s.fs.Mkdir(filepath.Join(parent, name), 0o755)
 		switch {
 		case err == nil:
-			created = true
 		case errors.Is(err, fs.ErrExist):
 			if fi, err := s.fs.Stat(filepath.Join(parent, name)); err != nil {
 				return err
@@ -123,10 +130,7 @@ func (s *fsStore) mkdirs(parent string, names ...string) error {
 			return err
 		}
 	}
-	if created {
-		return s.fs.SyncDir(parent)
-	}
-	return nil
+	return s.fs.SyncDir(parent)
 }
 
 func (s *fsStore) fanoutDir(d Digest) string { return filepath.Join(s.blobs, d.Hex()[:2]) }
@@ -500,7 +504,7 @@ func (u *upload) ReadFrom(r io.Reader) (int64, error) {
 	defer copyBufs.Put(buf)
 	var total int64
 	for {
-		n, rerr := io.ReadFull(r, buf[:])
+		n, rerr := r.Read(buf[:])
 		if n > 0 {
 			w, err := u.Write(buf[:n])
 			total += int64(w)
@@ -508,11 +512,10 @@ func (u *upload) ReadFrom(r io.Reader) (int64, error) {
 				return total, err
 			}
 		}
-		switch rerr {
-		case nil:
-		case io.EOF, io.ErrUnexpectedEOF:
+		if rerr == io.EOF {
 			return total, nil
-		default:
+		}
+		if rerr != nil {
 			return total, rerr
 		}
 	}
