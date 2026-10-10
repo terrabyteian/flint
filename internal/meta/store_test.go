@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -332,6 +333,29 @@ func TestSnapshotAndRetention(t *testing.T) {
 	}
 }
 
+func TestSnapshotLargeEntry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 65 MiB value")
+	}
+	m := fsys.NewMem()
+	opts := Options{MaxBatchBytes: 128 << 20, SnapshotBytes: -1}
+	s := openStore(t, m, opts)
+	big := strings.Repeat("v", 65<<20)
+	commit(t, s, "big", big)
+	commit(t, s, "small", "x")
+	if err := s.Snapshot(); err != nil {
+		t.Fatal(err)
+	}
+	s = reopen(t, s, m, opts)
+	if st := s.Stats(); st.SnapshotSeq != 2 {
+		t.Fatalf("SnapshotSeq after reopen = %d; want 2", st.SnapshotSeq)
+	}
+	if v, ver, ok := get(s, "big"); !ok || ver != 1 || v != big {
+		t.Fatalf("big value after reopen: ok %v, version %d, %d bytes", ok, ver, len(v))
+	}
+	wantGet(t, s, "small", "x", 2)
+}
+
 func TestBackgroundSnapshot(t *testing.T) {
 	m := fsys.NewMem()
 	s := openStore(t, m, Options{SegmentSize: 1 << 10, SnapshotBytes: 4 << 10})
@@ -437,7 +461,15 @@ func TestClose(t *testing.T) {
 	}
 	closed := make(chan error)
 	go func() { closed <- s.Close() }()
-	time.Sleep(10 * time.Millisecond)
+	for {
+		s.(*store).qmu.Lock()
+		c := s.(*store).closing
+		s.(*store).qmu.Unlock()
+		if c {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	close(release)
 	if err := <-closed; err != nil {
 		t.Fatalf("Close: %v", err)
@@ -532,8 +564,10 @@ func TestConsumers(t *testing.T) {
 	opts := Options{SegmentSize: 300, SnapshotBytes: -1}
 	s := openStore(t, m, opts)
 	commit(t, s, "a", "1")
-	if _, err := s.RegisterConsumer("Bad/Name"); err == nil {
-		t.Fatal("invalid consumer name accepted")
+	for _, name := range []string{"Bad/Name", "audit.tmp"} {
+		if _, err := s.RegisterConsumer(name); err == nil {
+			t.Fatalf("invalid consumer name %q accepted", name)
+		}
 	}
 	cp, err := s.RegisterConsumer("audit")
 	if err != nil || cp != 1 {

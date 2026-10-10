@@ -27,7 +27,11 @@ const (
 	snapFormat     = 1
 	snapHeaderSize = 28
 	snapBlockSize  = 256 << 10
-	maxSnapBlock   = 64 << 20
+	// A block is flushed once it reaches snapBlockSize, so it holds at most
+	// that much plus one entry: a length prefix, a key length, a key and
+	// value that fit in one record body, and a version.
+	maxSnapEntry = 2*binary.MaxVarintLen64 + maxBodySize + 8
+	maxSnapBlock = snapBlockSize + maxSnapEntry
 )
 
 func snapName(seq Seq) string { return fmt.Sprintf("%020d.snap", seq) }

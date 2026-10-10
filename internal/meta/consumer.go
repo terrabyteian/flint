@@ -26,7 +26,7 @@ const (
 )
 
 func validConsumerName(name string) bool {
-	if name == "" || len(name) > 64 {
+	if name == "" || len(name) > 64 || strings.HasSuffix(name, ".tmp") {
 		return false
 	}
 	for i, c := range name {
