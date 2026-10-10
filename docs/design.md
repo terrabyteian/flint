@@ -149,6 +149,7 @@ The store must meet these guarantees:
 5. The audit stream holds each batch's sequence number, commit time, origin (actor, action, target), and touched keys, never values.
 
 The garbage-collection guarantees are in [Cleanup and data safety](#cleanup-and-data-safety).
+Meeting guarantee 2 requires the log to tell an unsynced final write apart from a corrupted acknowledged record, for example with a sync marker or per-group trailer in the record format; the metadata store task chooses that mechanism and proves it with the strict crash tests.
 The metadata store task defines and tests the algorithms that meet these guarantees.
 
 The store does not interpret keys or values.
