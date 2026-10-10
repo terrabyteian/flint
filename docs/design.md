@@ -114,7 +114,7 @@ A crash between steps 5 and 7 leaves an unlinked blob.
 That is safe: garbage collection reclaims it after its grace period.
 A cross-repository blob mount is only step 7: a new link record, no data copied.
 Before linking, a mount checks that the blob is linked in the `from` repository and that the caller has read permission on that repository; if either check fails, it falls back to a normal upload, as the OCI spec allows.
-Every link batch, whether from an upload or a mount, carries the garbage-collection precondition described in [Cleanup and data safety](#cleanup-and-data-safety).
+Every link batch, whether from an upload or a mount, carries the garbage-collection precondition on the GC epoch, which it reads before its blob-existence check (`Upload.Commit` or the mount's source check), as described in [Cleanup and data safety](#cleanup-and-data-safety).
 
 ### Read path
 
@@ -142,14 +142,14 @@ It is a hand-written append-only write-ahead log, an in-memory index, and period
 
 The store must meet these guarantees:
 
-1. A write is acknowledged only after its log record is fsynced, and acknowledged data is never silently lost. Views and snapshots contain only fsynced batches.
-2. At startup only an unsynced final write may be discarded. Corruption of any acknowledged record, or a gap in the log, is a startup error naming the segment and offset, never a silent truncation.
+1. A write is acknowledged only after its log record is fsynced, so acknowledged data survives a crash. Views and snapshots contain only fsynced batches.
+2. At startup, a corrupted record followed by any intact later write, or a gap in the log, is a startup error naming the segment and offset, never a silent truncation. Only a bad region confined to the final group-commit write may be truncated; as in any write-ahead log without a second fsync, rot confined to that last group cannot be told apart from an unsynced write.
 3. A log segment is deleted only once it is covered by the latest snapshot and by the checkpoint of every registered durable consumer (the audit log in M4, Raft replication later). The active segment is never deleted.
 4. On a log write or fsync failure the store rejects writes with a clear error, keeps serving reads from fsynced state, stays ready, and reports the fault through a metric and logs. A restart after fixing the cause recovers.
 5. The audit stream holds each batch's sequence number, commit time, origin (actor, action, target), and touched keys, never values.
 
 The garbage-collection guarantees are in [Cleanup and data safety](#cleanup-and-data-safety).
-Meeting guarantee 2 requires the log to tell an unsynced final write apart from a corrupted acknowledged record, for example with a sync marker or per-group trailer in the record format; the metadata store task chooses that mechanism and proves it with the strict crash tests.
+The metadata store task defines how the final group-commit write is identified.
 The metadata store task defines and tests the algorithms that meet these guarantees.
 
 The store does not interpret keys or values.
@@ -336,7 +336,7 @@ They must prove the durability contract: a write is acknowledged only after it i
 - **Filesystem interface.** The write-ahead log and the blob store perform every file operation through a small internal filesystem interface: the write path (create, write, fsync, rename, directory fsync, remove) and everything recovery, reopen, and reads use (open for read, read, list a directory, stat, truncate), so log and snapshot loading, blob `Walk`, `Stat`, and `Open` all see the same filesystem. Production implements it with the `os` package, and its open returns the `*os.File` itself, which the blob store's `Open` hands out unwrapped, so `sendfile` is unaffected.
 - **Simulated power loss.** Tests add a strict in-memory implementation of that interface. On a simulated crash it discards every write not yet fsynced (or keeps an arbitrary subset of unsynced pages), and every create, rename, or remove whose parent directory was not fsynced afterwards. Crash tests run the stores against it under concurrent load, crash at random points, reopen against the simulated post-crash state, and check that every acknowledged write is present and no partial state is visible. A missing file or directory fsync fails these tests.
 - **Process crashes.** The tests also run each store in a child process, kill it with SIGKILL at random points under concurrent load, reopen it, and apply the same checks. The kernel page cache survives SIGKILL, so these tests cover process-level crashes and recovery logic, not missing fsyncs.
-- **Fault injection.** Tests cover short writes, failed fsyncs, torn log tails, and corrupted acknowledged records. A failed log write or fsync must make later writes fail while views keep serving, and a corrupted acknowledged record must fail startup with the corruption error.
+- **Fault injection.** Tests cover short writes, failed fsyncs, torn log tails, and corrupted acknowledged records. A failed log write or fsync must make later writes fail while views keep serving, and a corrupted acknowledged record followed by later writes must fail startup with the corruption error.
 
 Power-cut testing on a VM or with dm-flakey is out of scope for now.
 
@@ -443,10 +443,10 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 
 ## Cleanup and data safety
 
-- **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping deletes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads. The sweep uses a GC epoch counter (`gc\0epoch`): its start batch bumps the epoch and records the doomed set (`gc\0doomed\0<digest>`), and its end batch clears the doomed set. A link of an existing blob (a cross-repository mount, or a re-push whose upload reused the blob) commits with a `Require` on the epoch it read, and fails with a retryable error if a sweep started in between or the blob is doomed; a mount then falls back to a normal upload. The sweep never deletes a blob still referenced by a view pinned with the garbage collector, such as a running backup's. The garbage-collection task defines and tests the algorithms that meet these guarantees.
+- **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping removes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads. The sweep uses a GC epoch counter (`gc\0epoch`): its start batch bumps the epoch and records the doomed set (`gc\0doomed\0<digest>`), and its end batch clears the doomed set. A link of an existing blob (a cross-repository mount, or a re-push whose upload reused the blob) commits with a `Require` on the epoch it read, and fails with a retryable error if the blob is doomed or the precondition fails; a mount then falls back to a normal upload. Two guarantees make a concurrent link and sweep unable to both succeed: the sweep deletes only doomed blobs that are unreferenced in a view taken after its start batch and in every view pinned with the garbage collector (such as a running backup's), and a link reads the epoch before its blob-existence check (`Upload.Commit` or the mount's source check), so any sweep that overlaps the link makes its precondition fail. The garbage-collection task defines and tests the algorithms that meet these guarantees.
 - **Deletes** hide immediately in metadata; garbage collection reclaims space later.
 - **Retention policies** (for example, keep the last N tags matching a pattern, or delete untagged manifests older than X) are designed now and built shortly after v1. They are the only mechanism that deletes untagged manifests in hosted repositories.
-- **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup pins its metadata view with the garbage collector until it finishes copying, so every blob its snapshot references is still present when it is copied.
+- **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup takes and pins its metadata view with the garbage collector in one step and holds it until it finishes copying, so the sweep's deletion check covers it and every blob its snapshot references is still present when it is copied.
 
 ## Roadmap
 
