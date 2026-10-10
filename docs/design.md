@@ -86,7 +86,7 @@ The format packages translate protocol requests into blob and metadata operation
 <data>/
   LOCK                         flock held by the running server; a second process refuses to start
   blobs/sha256/<2 hex>/<64 hex> committed blobs, fanned out by the first two hex characters
-  uploads/                     in-progress uploads; must be on the same filesystem as blobs/
+  uploads/<id>[.state]         in-progress uploads and their suspended hash state; same filesystem as blobs/
   meta/wal/<seq>.log           write-ahead log segments, named by first sequence number
   meta/snapshots/<seq>.snap    index snapshots, named by the last sequence number they contain
   meta/consumers/<name>        durable checkpoint of each registered log consumer
@@ -104,11 +104,13 @@ It holds bytes only; it does not know about repositories, formats, or access con
 
 1. A new upload creates a temp file under `uploads/`.
 2. Bytes stream into the temp file while a SHA-256 hash is updated incrementally. Nothing is buffered in memory beyond a copy buffer.
-3. An upload can span several requests (OCI chunked uploads). Between requests the upload's hash state is persisted with the hash's `encoding.BinaryMarshaler` implementation, so resuming does not re-read the data.
+3. An upload can span several requests (OCI chunked uploads). Between requests the upload's hash state is persisted with the hash's `encoding.BinaryMarshaler` implementation, so resuming does not re-read the data. Suspending fsyncs the staged bytes before it durably writes the state file (written to a temp file, fsynced, and renamed), so after a crash a state never describes bytes that were lost, and a resumed upload never commits content its hash state did not see. Resuming drops any staged bytes past the size the state records.
 4. On commit the computed digest is checked against the digest the client claimed; a mismatch discards the upload.
-5. The temp file is fsynced, renamed atomically to `blobs/sha256/<ab>/<digest>`, and the fan-out directory is fsynced so the rename is durable.
-6. If the blob already exists, the temp file is dropped and the existing blob is reused. Identical content is stored once.
+5. The temp file's modification time is set to the commit time, the file is fsynced, renamed atomically to `blobs/sha256/<ab>/<digest>`, and the fan-out directory is fsynced so the rename is durable. All 256 fan-out directories are created, and their parent fsynced, when the store opens, so commits never create directories.
+6. If the blob already exists, the temp file is dropped and the existing blob is reused, after an fsync of its fan-out directory in case a concurrent commit renamed it into place but has not made that durable yet. Identical content is stored once. An existing file whose size does not match is a damaged copy, and the verified upload replaces it.
 7. Only after the blob is durable does the caller write the metadata **link record** that makes the blob visible in a repository.
+
+Abandoned uploads are removed by `PurgeUploads`: uploads a previous process left without ever suspending them (they can never be resumed), and suspended uploads not suspended again since a cutoff time. Uploads open in the running process are never removed.
 
 A crash between steps 5 and 7 leaves an unlinked blob.
 That is safe: garbage collection reclaims it after its grace period.
@@ -285,6 +287,7 @@ type Store interface {
 	// NewUpload starts an upload whose bytes are hashed as they are written.
 	NewUpload(ctx context.Context) (Upload, error)
 	// ResumeUpload reopens a suspended upload, e.g. for the next chunk of an OCI chunked upload.
+	// It returns ErrUploadUnknown if there is no such upload and ErrUploadBusy if it is already open.
 	ResumeUpload(ctx context.Context, id string) (Upload, error)
 	// Open returns the blob's content. The filesystem store returns an *os.File.
 	Open(ctx context.Context, d Digest) (Reader, error)
@@ -293,6 +296,10 @@ type Store interface {
 	Delete(ctx context.Context, d Digest) error
 	// Walk calls fn for every committed blob, for the GC sweep and backup.
 	Walk(ctx context.Context, fn func(Info) error) error
+	// PurgeUploads removes abandoned uploads: those left by an earlier process that were
+	// never suspended, and those last suspended before the given time. Uploads open in
+	// this process are never removed. It returns the number of uploads removed.
+	PurgeUploads(ctx context.Context, before time.Time) (int, error)
 }
 
 // Upload is an in-progress, hashed, staged write.
@@ -304,7 +311,8 @@ type Upload interface {
 	// makes the blob durable and visible under its digest, and ends the upload.
 	// If the blob already exists, the staged data is discarded.
 	Commit(ctx context.Context, want Digest) (Info, error)
-	// Suspend persists the hash state and closes the upload so ResumeUpload can continue it.
+	// Suspend makes the staged bytes and the hash state durable and closes the upload
+	// so ResumeUpload can continue it, also after a crash.
 	Suspend() error
 	// Cancel discards the upload.
 	Cancel() error
@@ -322,19 +330,29 @@ type Info struct {
 	ModTime time.Time // commit time; GC uses it for the grace period
 }
 
-// NewFS returns a filesystem Store rooted at dir.
-func NewFS(dir string) (Store, error)
+// Options configures a filesystem store. The zero value uses the os package and time.Now.
+type Options struct {
+	FS  fsys.FS          // the filesystem; nil means fsys.OS
+	Now func() time.Time // the source of commit times; nil means time.Now
+}
+
+// NewFS returns a filesystem Store rooted at dir, normally the data directory.
+func NewFS(dir string, opts Options) (Store, error)
 ```
 
-Errors: `ErrNotFound`, `ErrDigestMismatch`, `ErrUploadUnknown`.
+`ParseDigest` follows the OCI digest grammar: a well-formed digest with any algorithm other than sha256 is `ErrDigestUnsupported`, and anything else that is not `sha256:` plus 64 lowercase hex characters is `ErrDigestInvalid`.
+`FromBytes` computes a digest, and `Hex` and `IsZero` complete the type; digests are comparable with `==`.
+
+Errors: `ErrNotFound`, `ErrDigestMismatch`, `ErrDigestInvalid`, `ErrDigestUnsupported`, `ErrUploadUnknown`, `ErrUploadBusy` (the upload is open in another request), and `ErrUploadClosed` (the upload was already committed, suspended, or cancelled).
+Any failed `Commit` or `Suspend` discards the upload.
 
 ### Crash testing
 
 Both stores ship crash tests in M0.
 They must prove the durability contract: a write is acknowledged only after it is fsynced, so it survives a power loss.
 
-- **Filesystem interface.** The write-ahead log and the blob store perform every file operation through a small internal filesystem interface: the write path (create, write, fsync, rename, directory fsync, remove) and everything recovery, reopen, and reads use (open for read, read, list a directory, stat, truncate), so log and snapshot loading, blob `Walk`, `Stat`, and `Open` all see the same filesystem. Production implements it with the `os` package, and its open returns the `*os.File` itself, which the blob store's `Open` hands out unwrapped, so `sendfile` is unaffected.
-- **Simulated power loss.** Tests add a strict in-memory implementation of that interface. On a simulated crash it discards every write not yet fsynced (or keeps an arbitrary subset of unsynced pages), and every create, rename, or remove whose parent directory was not fsynced afterwards. Crash tests run the stores against it under concurrent load, crash at random points, reopen against the simulated post-crash state, and check that every acknowledged write is present and no partial state is visible. A missing file or directory fsync fails these tests.
+- **Filesystem interface.** The write-ahead log and the blob store perform every file operation through a small internal filesystem interface, `internal/fsys`: the write path (create, write, fsync, rename, directory fsync, remove, mkdir, and setting a modification time) and everything recovery, reopen, and reads use (open for read, read, list a directory, stat, truncate), so log and snapshot loading, blob `Walk`, `Stat`, and `Open` all see the same filesystem. Production implements it with the `os` package (`fsys.OS`), and its open returns the `*os.File` itself, which the blob store's `Open` hands out unwrapped, so `sendfile` is unaffected.
+- **Simulated power loss.** Tests add a strict in-memory implementation of that interface (`fsys.Mem`). On a simulated crash it discards every write not yet fsynced (or keeps an arbitrary subset of unsynced pages), and every create, rename, remove, or mkdir whose parent directory was not fsynced afterwards. It can crash after a chosen number of mutating operations and inject a failure into any operation. Crash tests run the stores against it under concurrent load, crash at random points, reopen against the simulated post-crash state, and check that every acknowledged write is present and no partial state is visible. A missing file or directory fsync fails these tests.
 - **Process crashes.** The tests also run each store in a child process, kill it with SIGKILL at random points under concurrent load, reopen it, and apply the same checks. The kernel page cache survives SIGKILL, so these tests cover process-level crashes and recovery logic, not missing fsyncs.
 - **Fault injection.** Tests cover short writes, failed fsyncs, torn log tails, and corrupted acknowledged records. A failed log write or fsync must make later writes fail while views keep serving, and a corrupted acknowledged record followed by later group commits must fail startup with the corruption error.
 
