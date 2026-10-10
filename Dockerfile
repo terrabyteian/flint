@@ -10,6 +10,9 @@
 #
 # Data volume: flint keeps its state in /var/lib/flint, owned by the non-root
 # user 65532:65532 that the image runs as. Mount a persistent volume there.
+#
+# The builder image's Go version must match the toolchain line in go.mod, which
+# CI and the release binaries build with; bump the two together.
 
 FROM --platform=$BUILDPLATFORM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS build
 

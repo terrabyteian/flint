@@ -13,7 +13,7 @@ The [release workflow](../.github/workflows/release.yml) builds and publishes ev
 | Static binaries `flint-{linux,darwin}-{amd64,arm64}` | assets of the GitHub release for the tag |
 | `SHA256SUMS` and its cosign bundle `SHA256SUMS.sigstore.json` | assets of the GitHub release |
 | The same SBOM, `flint-<tag>.spdx.json` | asset of the GitHub release |
-| Helm chart | `oci://ghcr.io/terrabyteian/charts/flint` once the chart lands; the workflow's `chart` job is a placeholder until then |
+| Helm chart | `oci://ghcr.io/terrabyteian/charts/flint` once the chart lands; the release workflow does not publish a chart yet |
 
 Every binary, and the binary inside the image, reports the tag from `flint version`.
 Tags containing a hyphen, such as `v0.2.0-rc.1`, produce a GitHub pre-release.
@@ -38,9 +38,9 @@ flint's own image and chart stay on ghcr.io permanently, so a broken flint can a
 4. **First release only:** new ghcr.io packages are private.
    In the repository's *Packages* settings, open the `flint` package and change its visibility to public so clusters can pull it without credentials.
 
-To re-run a release, for example after a transient failure, either re-run the failed jobs from the Actions tab, or dispatch the **Release** workflow manually and choose the tag (not a branch) under *Use workflow from*.
-A dispatch on a branch fails immediately.
-Re-running rebuilds and re-pushes the image tag and replaces the release assets of the existing release.
+Pushing a tag is the only way to start a release.
+To recover from a failed run, for example after a transient failure, open the run in the Actions tab and choose *Re-run failed jobs*.
+Re-running the GitHub release job replaces the assets of a release that already exists.
 
 ## Verifying a release
 
