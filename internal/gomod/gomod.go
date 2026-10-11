@@ -26,7 +26,6 @@
 package gomod
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,7 +34,6 @@ import (
 	"time"
 
 	"github.com/terrabyteian/flint/internal/auth"
-	"github.com/terrabyteian/flint/internal/blob"
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
@@ -68,9 +66,6 @@ func (AllowAll) AuthorizeVirtual(http.ResponseWriter, *http.Request, string, str
 
 // Options configures a Handler.
 type Options struct {
-	// Meta and Blobs are the stores. Required.
-	Meta  meta.Store
-	Blobs blob.Store
 	// Repositories are the configured repositories; those with format
 	// "go" are served.
 	Repositories []config.Repository
@@ -80,18 +75,11 @@ type Options struct {
 	// clients, such as the user agent.
 	Upstream upstream.Options
 	// Paths is the path-cache engine shared with other formats' proxy
-	// repositories; nil means a new one over Fetcher, Docs, Space, and
-	// ProxyMetrics, which RunProxy runs. With it, Docs and ProxyMetrics
-	// are required.
-	Paths *upstream.PathCache
-	// Docs is the document cache Paths uses, through which the handler
-	// reads documents; nil means a new one, which RunProxy prunes.
-	Docs *upstream.DocCache
-	// Fetcher, Space, and ProxyMetrics are the shared fetcher, free-space
-	// watcher, and proxy metrics; nil means a new fetcher, no watcher,
-	// and metrics registered on Metrics.
-	Fetcher      *upstream.Fetcher
-	Space        *upstream.Space
+	// repositories, and Docs the document cache it uses, through which
+	// the handler reads documents; whoever made them runs them. ProxyMetrics
+	// are the proxy metrics they count in. Required.
+	Paths        *upstream.PathCache
+	Docs         *upstream.DocCache
 	ProxyMetrics *upstream.Metrics
 	// VirtualMetrics are the virtual repository metrics shared with other
 	// formats; nil registers them on Metrics.
@@ -103,7 +91,7 @@ type Options struct {
 	// Actor names the principal behind a request in the origin of the
 	// metadata batches it writes; nil names the client address.
 	Actor func(*http.Request) string
-	// Now is the clock; nil means time.Now.
+	// Now is the clock of the upstream clients; nil means time.Now.
 	Now func() time.Time
 }
 
@@ -116,60 +104,34 @@ type repository struct {
 
 // Handler serves Go repositories.
 type Handler struct {
-	repos    map[string]*repository
-	auth     Authorizer
-	paths    *upstream.PathCache
-	ownPaths bool // paths is this handler's own, which RunProxy runs
-	docs     *upstream.DocCache
-	ownDocs  bool
-	pm       *upstream.Metrics
-	log      *slog.Logger
-	actor    func(*http.Request) string
-	window   time.Duration // the longest revalidation window
+	repos map[string]*repository
+	auth  Authorizer
+	paths *upstream.PathCache
+	docs  *upstream.DocCache
+	pm    *upstream.Metrics
+	log   *slog.Logger
+	actor func(*http.Request) string
 }
 
 // New returns a Handler.
 func New(opts Options) (*Handler, error) {
-	if opts.Authorizer == nil {
-		return nil, errors.New("gomod: an Authorizer is required")
-	}
-	if opts.Paths != nil && (opts.Docs == nil || opts.ProxyMetrics == nil) {
-		return nil, errors.New("gomod: Docs and ProxyMetrics are required with Paths")
+	if opts.Authorizer == nil || opts.Paths == nil || opts.Docs == nil || opts.ProxyMetrics == nil {
+		return nil, errors.New("gomod: an Authorizer, Paths, Docs, and ProxyMetrics are required")
 	}
 	h := &Handler{repos: map[string]*repository{}, auth: opts.Authorizer, paths: opts.Paths, docs: opts.Docs,
-		pm: opts.ProxyMetrics, log: opts.Logger, actor: opts.Actor, window: sumdbRevalidate}
+		pm: opts.ProxyMetrics, log: opts.Logger, actor: opts.Actor}
 	if h.log == nil {
 		h.log = slog.Default()
 	}
 	if h.actor == nil {
 		h.actor = clientActor
 	}
-	reg := opts.Metrics
-	if reg == nil {
-		reg = metrics.NewRegistry() // unexposed; keeps the counters usable
-	}
-	if h.paths == nil {
-		if opts.Meta == nil || opts.Blobs == nil {
-			return nil, errors.New("gomod: Meta and Blobs are required without Paths")
-		}
-		fetcher := opts.Fetcher
-		if fetcher == nil {
-			fetcher = upstream.NewFetcher(opts.Blobs, 0)
-		}
-		if h.pm == nil {
-			h.pm = upstream.NewMetrics(reg, fetcher, opts.Space)
-		}
-		if h.docs == nil {
-			h.docs = upstream.NewDocCache(upstream.DocCacheOptions{Meta: opts.Meta, Blobs: opts.Blobs, Space: opts.Space,
-				Metrics: h.pm, Logger: h.log, Now: opts.Now})
-			h.ownDocs = true
-		}
-		h.paths = upstream.NewPathCache(upstream.PathCacheOptions{Meta: opts.Meta, Blobs: opts.Blobs, Fetcher: fetcher,
-			Docs: h.docs, Space: opts.Space, Metrics: h.pm, Logger: h.log, Now: opts.Now})
-		h.ownPaths = true
-	}
 	vm := opts.VirtualMetrics
 	if vm == nil {
+		reg := opts.Metrics
+		if reg == nil {
+			reg = metrics.NewRegistry() // unexposed; keeps the counters usable
+		}
 		vm = repo.NewMetrics(reg)
 	}
 	upOpts := opts.Upstream
@@ -194,7 +156,6 @@ func New(opts Options) (*Handler, error) {
 				return nil, err
 			}
 			r.proxy = p
-			h.window = max(h.window, p.path.Revalidate)
 		case config.TypeVirtual:
 			v, err := repo.NewVirtual(rc, opts.Repositories, repo.VirtualOptions{Logger: h.log, Metrics: vm})
 			if err != nil {
@@ -212,17 +173,6 @@ func New(opts Options) (*Handler, error) {
 // Register mounts the handler at /go/ on a server.
 func (h *Handler) Register(s interface{ Handle(string, http.Handler) }) {
 	s.Handle(repo.Prefix(config.FormatGo), h)
-}
-
-// RunProxy does the background work of the handler's own path cache and
-// document cache, if it has them, until ctx is done.
-func (h *Handler) RunProxy(ctx context.Context) {
-	if h.ownDocs {
-		go h.docs.Run(ctx, h.window)
-	}
-	if h.ownPaths {
-		h.paths.Run(ctx)
-	}
 }
 
 // request is a parsed request below a repository.
