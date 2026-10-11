@@ -726,3 +726,40 @@ func TestVirtualSignUpstreamImage(t *testing.T) {
 	want(t, ve.pushImage("all/library/nginx", "custom", local), http.StatusCreated, "")
 	want(t, ve.do("GET", "/v2/all/library/nginx/manifests/1.27", nil), http.StatusNotFound, codeManifestUnknown)
 }
+
+// TestVirtualSignUpstreamImageTagSchema checks the sequence of signing an
+// upstream image through a virtual repository as cosign does by default,
+// with a manifest without a subject tagged sha256-<hex>.sig: the
+// signature lands in the publishTo member without making it own the name,
+// so the image is still pulled from the upstream, by tag and by digest,
+// and the signature's tag is pulled from the publishTo member.
+func TestVirtualSignUpstreamImageTagSchema(t *testing.T) {
+	ve := newVirtualEnv(t)
+	img := ve.hub.PutImage("library/nginx", "1.27", []byte("nginx layer"))
+	ve.pullImage("all/library/nginx", "1.27", img)
+
+	sigTag := strings.Replace(img.Digest, ":", "-", 1) + ".sig"
+	sig := newImage("cosign signature", nil)
+	want(t, ve.pushImage("all/library/nginx", sigTag, sig), http.StatusCreated, "")
+	ve.pullLocal("local/library/nginx", sigTag, sig)
+
+	ve.pullImage("all/library/nginx", "1.27", img)
+	ve.pullImage("all/library/nginx", img.Digest, img)
+	ve.pullLocal("all/library/nginx", sigTag, sig)
+	if got, _ := ve.tags("all/library/nginx/tags/list"); !slices.Equal(got, []string{"1.27", sigTag}) {
+		t.Errorf("tags = %v, want the upstream's and the signature's", got)
+	}
+
+	// The same signature under any other tag makes the hosted member own
+	// the name, as does a tag that only resembles the schema.
+	for _, tag := range []string{"sha256-" + strings.Repeat("A", 64) + ".sig", "signed"} {
+		ve := newVirtualEnv(t)
+		img := ve.hub.PutImage("library/nginx", "1.27", []byte("nginx layer"))
+		ve.pullImage("all/library/nginx", "1.27", img)
+		want(t, ve.pushImage("all/library/nginx", sigTag, sig), http.StatusCreated, "")
+		want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/"+tag, sig.manifest, "Content-Type", mtOCIManifest), http.StatusCreated, "")
+		if w := ve.do("GET", "/v2/all/library/nginx/manifests/1.27", nil); w.Code != http.StatusNotFound {
+			t.Errorf("with the signature also tagged %s, the upstream image was served: %d", tag, w.Code)
+		}
+	}
+}

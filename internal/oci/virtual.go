@@ -32,8 +32,10 @@ import (
 //     holding a tag of it or a manifest of it without a subject, the
 //     proxy members are not asked about it, so an upstream image never
 //     shadows a first-party one. A referrer, such as a signature or an
-//     attestation, does not own the name, so attaching one to an upstream
-//     image through the virtual repository leaves the image pullable.
+//     attestation, does not own the name, nor does a tag of the signature
+//     tag schema (sha256-<hex>.sig, .att, .sbom) or a manifest only such
+//     tags point to, so signing an upstream image through the virtual
+//     repository leaves the image pullable.
 //   - A manifest by tag follows the members' order, so the first member's
 //     tag wins. Content addressed by digest is the same whichever member
 //     serves it, so a manifest by digest or a blob is asked first of the
@@ -305,8 +307,7 @@ func (h *Handler) virtualSources(r *http.Request, rn *repoName) ([]repo.Member, 
 }
 
 // sourcesOf returns the members of virtual repository rn that may serve
-// its image name; a hosted member owns the name once it holds a tag of it
-// or a manifest of it without a subject.
+// its image name; a hosted member owns the name as ownsName says.
 func (h *Handler) sourcesOf(rn *repoName) []repo.Member {
 	v := h.view()
 	defer v.Release()
@@ -317,23 +318,53 @@ func (h *Handler) sourcesOf(rn *repoName) []repo.Member {
 
 // ownsName reports whether rn holds a tag or a manifest without a
 // subject. A manifest with a subject, a referrer, does not own the name,
-// so a signature of an upstream image does not hide the image. A manifest
-// record that cannot be read owns it.
+// so a signature of an upstream image does not hide the image. Neither
+// does a tag of the signature tag schema, nor a manifest only such tags
+// point to, so cosign's tag-schema signatures do not hide the image
+// either. A record that cannot be read owns it.
 func ownsName(v meta.View, rn *repoName) bool {
 	found := false
-	v.Scan(prefix(nsTag, rn), nil, func([]byte, meta.Record) bool {
-		found = true
-		return false
+	signatures := map[string]bool{}
+	pfx := prefix(nsTag, rn)
+	v.Scan(pfx, nil, func(key []byte, rec meta.Record) bool {
+		if !signatureTag(string(key[len(pfx):])) {
+			found = true
+			return false
+		}
+		d, err := decodeTag(rec.Value)
+		if err != nil {
+			found = true
+			return false
+		}
+		signatures[d.String()] = true
+		return true
 	})
 	if found {
 		return true
 	}
-	v.Scan(prefix(nsManifest, rn), nil, func(_ []byte, rec meta.Record) bool {
+	pfx = prefix(nsManifest, rn)
+	v.Scan(pfx, nil, func(key []byte, rec meta.Record) bool {
 		m, err := decodeManifest(rec.Value)
-		found = err != nil || m.Subject.IsZero()
+		found = err != nil || m.Subject.IsZero() && !signatures[string(key[len(pfx):])]
 		return !found
 	})
 	return found
+}
+
+// signatureTag reports whether tag follows the signature tag schema,
+// sha256-<hex digest>.sig, .att, or .sbom, under which cosign stores the
+// signatures, attestations and SBOMs of the image with that digest.
+func signatureTag(tag string) bool {
+	hex, ok := strings.CutPrefix(tag, "sha256-")
+	if !ok {
+		return false
+	}
+	i := strings.LastIndexByte(hex, '.')
+	if i < 0 || !slices.Contains([]string{".sig", ".att", ".sbom"}, hex[i:]) {
+		return false
+	}
+	hex = hex[:i]
+	return len(hex) == 64 && strings.Trim(hex, "0123456789abcdef") == ""
 }
 
 // byDigest orders members for content addressed by digest: first those
