@@ -134,7 +134,7 @@ func TestValidation(t *testing.T) {
 		{"tls empty", `{"dataDir": "/d", "tls": {}}`, []string{"tls.certFile: is required", "tls.keyFile: is required"}},
 		{"bad proxy", `{"dataDir": "/d", "trustedProxies": ["10.0.0.0/8", "10.0.0.300", "fe80::/129"]}`,
 			[]string{`trustedProxies[1]: "10.0.0.300"`, `trustedProxies[2]: "fe80::/129"`}},
-		{"zero shutdown", `{"dataDir": "/d", "shutdownTimeout": "0s"}`, nil}, // zero means the default
+		{"zero shutdown", `{"dataDir": "/d", "shutdownTimeout": "0s"}`, []string{"shutdownTimeout: must be positive"}},
 		{"negative shutdown", `{"dataDir": "/d", "shutdownTimeout": "-1s"}`, []string{"shutdownTimeout: must be positive"}},
 		{"bad level", `{"dataDir": "/d", "log": {"level": "verbose"}}`, []string{`log.level: "verbose" is not one of`}},
 		{"repo bad name", `{"dataDir": "/d", "repositories": [{"name": "Docker", "format": "oci", "type": "hosted"}]}`,

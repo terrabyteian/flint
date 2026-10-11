@@ -165,7 +165,7 @@ func Load(path string) (*Config, error) {
 // Parse decodes and validates a configuration file's contents, and fills
 // in defaults.
 func Parse(b []byte) (*Config, error) {
-	var c Config
+	c := Config{ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout}}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
@@ -187,9 +187,6 @@ func (c *Config) setDefaults() {
 	}
 	if c.Log.Level == "" {
 		c.Log.Level = DefaultLogLevel
-	}
-	if c.ShutdownTimeout == (Duration{}) {
-		c.ShutdownTimeout = Duration{Duration: DefaultShutdownTimeout}
 	}
 }
 

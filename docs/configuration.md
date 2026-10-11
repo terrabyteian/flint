@@ -71,7 +71,7 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `tls.certFile` | string | required with `tls` | PEM certificate chain, leaf first. |
 | `tls.keyFile` | string | required with `tls` | PEM private key for the certificate. |
 | `trustedProxies` | array of strings | `[]` | IP addresses or CIDR prefixes of proxies whose forwarded headers are believed. |
-| `shutdownTimeout` | duration string | `"25s"` | How long a graceful shutdown waits for in-flight requests before closing their connections. |
+| `shutdownTimeout` | duration string | `"25s"` | How long a graceful shutdown waits for in-flight requests before closing their connections. Must be positive. |
 | `log.level` | string | `"info"` | Minimum log level: `debug`, `info`, `warn`, or `error`. |
 | `repositories` | array | `[]` | Repositories declared in configuration; see below. |
 | `auth.permissions` | array | `[]` | Permission grants; see below. |
