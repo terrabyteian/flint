@@ -172,7 +172,7 @@ func (l *Limits) Flush(ctx context.Context) error {
 			for _, k := range chunk {
 				b.Put(l.pulledKey([]byte(k)), EncodePulled(dirty[k]))
 			}
-			b.SetOrigin(meta.Origin{Actor: "system", Action: l.format + ".proxy.pulled", Target: c.Repo()})
+			b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: l.format + ".proxy.pulled", Target: c.Repo()})
 			if _, err := l.meta.Commit(ctx, &b); err != nil {
 				c.MarkDirty(chunk)
 				c.MarkDirty(keys)
@@ -227,7 +227,7 @@ func (l *Limits) evict(ctx context.Context, c *CacheTracker, keys []string) erro
 	if len(gone) == len(keys) {
 		return nil
 	}
-	b.SetOrigin(meta.Origin{Actor: "system", Action: l.format + ".proxy.evict",
+	b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: l.format + ".proxy.evict",
 		Target: c.Repo() + ": least recently pulled content over the size limit"})
 	if _, err := l.meta.Commit(ctx, &b); err != nil {
 		if errors.Is(err, meta.ErrConflict) {

@@ -238,7 +238,7 @@ func TestPathCacheVerifierMismatch(t *testing.T) {
 	if rec, _ := e.pc.Lookup(e.repos["remote"], "pkg.tgz"); rec != nil {
 		t.Error("content that failed verification was cached")
 	}
-	bad := data[:len(data)-1:len(data)-1]
+	bad := data[: len(data)-1 : len(data)-1]
 	bad = append(bad, data[len(data)-1]^1)
 	if _, err := e.blobs.Stat(ctx, blob.FromBytes(bad)); err == nil {
 		t.Error("content that failed verification entered the blob store")

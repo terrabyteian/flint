@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"cmp"
 	"container/list"
 	"context"
 	"errors"
@@ -130,6 +131,12 @@ type DocRequest struct {
 	// Revalidate is the repository's revalidation window; zero means
 	// the document is revalidated on every request.
 	Revalidate time.Duration
+	// RevalidateTimeout and FetchTimeout bound the wait for the
+	// upstream's answer, when a cached copy could be served instead and
+	// when none could; zero means DefaultRevalidateTimeout and
+	// DefaultDocFetchTimeout. The body then streams with the cache's idle
+	// timeout between reads, so a large document is not cut off.
+	RevalidateTimeout, FetchTimeout time.Duration
 	// MaxSize bounds the document; zero means DefaultMaxDocSize.
 	MaxSize int64
 	// MaxMemory bounds a document held in memory because it cannot be
@@ -236,6 +243,9 @@ func (c *DocCache) resolve(ctx context.Context, req *DocRequest, cached *DocReco
 	case err == nil:
 		return doc, nil
 	case Answered(err):
+		if !errors.Is(err, ErrNotFound) {
+			c.countError(req)
+		}
 		return nil, err
 	case cached != nil:
 		return stale(err)
@@ -259,9 +269,9 @@ func (c *DocCache) fetch(ctx context.Context, req *DocRequest, cached *DocRecord
 	// idle timeout between reads, so a large document is not cut off.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	timeout := DefaultDocFetchTimeout
+	timeout := cmp.Or(req.FetchTimeout, DefaultDocFetchTimeout)
 	if cached != nil {
-		timeout = DefaultRevalidateTimeout
+		timeout = cmp.Or(req.RevalidateTimeout, DefaultRevalidateTimeout)
 	}
 	watchdog := time.AfterFunc(timeout, cancel)
 	defer watchdog.Stop()
@@ -506,6 +516,21 @@ func (d *Doc) MediaType() string {
 // Prune forgets confirmations older than window, the longest
 // revalidation window of any repository.
 func (c *DocCache) Prune(window time.Duration) { c.fresh.Prune(window) }
+
+// Run prunes confirmations older than window, the longest revalidation
+// window of any repository, every PullFlushInterval until ctx is done.
+func (c *DocCache) Run(ctx context.Context, window time.Duration) {
+	t := time.NewTicker(PullFlushInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c.Prune(window)
+		}
+	}
+}
 
 // Forget drops the confirmation of repo's document key, so the next
 // request revalidates it.

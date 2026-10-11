@@ -22,7 +22,9 @@ import (
 //	pypi\0name\0<repo>\0<normalized filename>       hosted file name, by its normalized form (see
 //	                                                normalFilename): the name as uploaded; kept forever
 //	pypi\0metadata\0<repo>\0<filename>              core-metadata file a proxy repository cached
-//	pypi\0page\0<repo>\0<project>                   project page a proxy repository cached
+//	pypi\0page\0<repo>\0<project>                   project page a proxy repository cached before
+//	                                                pages moved to the shared document cache
+//	                                                (cache\0doc\0<repo>\0<project>); deleted at startup
 //	pypi\0pulled\0file\0<repo>\0<filename>          last pull of a file cached by a size-limited proxy
 //	pypi\0pulled\0metadata\0<repo>\0<filename>      last pull of a core-metadata file, likewise
 //
@@ -61,7 +63,6 @@ func projectKey(repo, project string) []byte     { return key(nsProject, repo, p
 func fileKey(repo, filename string) []byte       { return key(nsFile, repo, filename) }
 func metadataKey(repo, filename string) []byte   { return key(nsMetadata, repo, filename) }
 func nameKey(repo, normal string) []byte         { return key(nsName, repo, normal) }
-func pageKey(repo, project string) []byte        { return key(nsPage, repo, project) }
 func indexPrefix(repo, project string) []byte    { return append(key(nsIndex, repo, project), 0) }
 func indexKey(repo, project, file string) []byte { return key(nsIndex, repo, project, file) }
 
@@ -295,34 +296,13 @@ func decodeFile(b []byte) (*fileRecord, error) {
 	return f, nil
 }
 
-// pageRecord is a project page a proxy repository cached: a blob holding
-// the page in flint's own form (see pageDoc), and the upstream's ETag for
-// a conditional revalidation.
-type pageRecord struct {
-	Digest  blob.Digest
-	Size    int64
-	ETag    string
-	Fetched time.Time
-}
-
-func (p *pageRecord) encode() []byte {
-	return newEnc().digest(p.Digest).uvarint(uint64(p.Size)).str(p.ETag).time(p.Fetched)
-}
-
-func decodePage(b []byte) (*pageRecord, error) {
-	d := newDec(b)
-	p := &pageRecord{Digest: d.digest(), Size: int64(d.uvarint()), ETag: d.str(), Fetched: d.time()}
-	if err := d.done(); err != nil {
-		return nil, err
-	}
-	return p, nil
-}
-
 // References calls fn, until it returns an error, with the digest of each
 // blob that v links into a PyPI repository: every hosted file and its
-// core metadata, and every file, core-metadata file, and project page a
-// proxy repository cached. A tombstone links none. A digest linked in
-// several places is reported once for each.
+// core metadata, and every file and core-metadata file a proxy
+// repository cached. A tombstone links none. A digest linked in several
+// places is reported once for each. Project pages a proxy repository
+// cached are documents of the shared proxy cache, which
+// upstream.References reports.
 func References(v meta.View, fn func(blob.Digest) error) error {
 	var err error
 	report := func(ds ...blob.Digest) bool {
@@ -351,13 +331,5 @@ func References(v meta.View, fn func(blob.Digest) error) error {
 			return err
 		}
 	}
-	v.Scan([]byte(nsPage), nil, func(k []byte, rec meta.Record) bool {
-		p, derr := decodePage(rec.Value)
-		if derr != nil {
-			err = fmt.Errorf("pypi: metadata key %q: %w", k, derr)
-			return false
-		}
-		return report(p.Digest)
-	})
-	return err
+	return nil
 }

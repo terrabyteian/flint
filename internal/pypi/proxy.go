@@ -2,7 +2,6 @@ package pypi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -106,189 +105,77 @@ type pageResult struct {
 	result string // upstream.ResultHit and so on
 }
 
-// cachedPage returns the record of rp's cached page of project, or nil.
-func (h *Handler) cachedPage(rp *repository, project string) (*pageRecord, error) {
-	v := h.view()
-	defer v.Release()
-	rec, ok := v.Get(pageKey(rp.name, project))
-	if !ok {
-		return nil, nil
-	}
-	return decodePage(rec.Value)
-}
-
-// proxyProject returns rp's page of project: from the cache while the
-// upstream confirmed it within the revalidation window, and from the
-// upstream otherwise, falling back to the cached page if the upstream
-// cannot be reached.
+// proxyProject returns rp's page of project, through the shared document
+// cache: from the cache while the upstream confirmed it within the
+// revalidation window, and from the upstream otherwise, falling back to
+// the cached page if the upstream cannot be reached. The upstream's page
+// is stored verbatim and read into flint's form when served.
 func (h *Handler) proxyProject(ctx context.Context, actor string, rp *repository, project string) (*pageResult, error) {
 	p := rp.proxy
-	fk := rp.name + "\x00" + project
-	cached, err := h.cachedPage(rp, project)
+	d, err := h.docs.Get(ctx, &upstream.DocRequest{
+		Repo:       rp.name,
+		Key:        project,
+		Client:     p.client,
+		URL:        p.index + project + "/",
+		Header:     http.Header{"Accept": {upstreamAccept}},
+		Revalidate: p.revalidate,
+		// Read at request time, so tests can shorten them.
+		RevalidateTimeout: revalidateTimeout,
+		FetchTimeout:      fetchTimeout,
+		MaxSize:           maxPageSize,
+		MaxMemory:         maxPageSize,
+		Actor:             actor,
+		Action:            "pypi.proxy.cache",
+		// A page flint cannot read never replaces the cached one.
+		Validate: func(ctx context.Context, d *upstream.Doc) error {
+			_, err := h.loadPage(ctx, rp, project, d)
+			return err
+		},
+	})
+	if err != nil {
+		// The document cache counted the failure.
+		if !errors.Is(err, upstream.ErrNotFound) {
+			h.log.WarnContext(ctx, "proxy upstream request failed", "repository", rp.name,
+				"upstream", p.client.Host(), "err", err)
+		}
+		return nil, h.upstreamError(rp, "project "+project, err)
+	}
+	doc, err := h.loadPage(ctx, rp, project, d)
 	if err != nil {
 		return nil, err
 	}
-	if cached != nil && h.fresh.Fresh(fk, p.revalidate) {
-		if doc, err := h.loadPage(ctx, rp, cached); err == nil {
-			return &pageResult{doc, upstream.ResultHit}, nil
-		}
-	}
-	return h.pageCalls.Do(ctx, fk, func(gctx context.Context) (*pageResult, error) {
-		timeout := fetchTimeout
-		if cached != nil {
-			timeout = revalidateTimeout
-		}
-		ctx, cancel := context.WithTimeout(gctx, timeout)
-		defer cancel()
-		stale := func(cause error) (*pageResult, error) {
-			doc, err := h.loadPage(gctx, rp, cached)
-			if err != nil {
-				return nil, h.upstreamFailure(gctx, rp, "project "+project, cause)
-			}
-			return &pageResult{doc, upstream.ResultStale}, nil
-		}
-		if cached != nil && p.client.Offline() {
-			return stale(&upstream.Error{Op: "GET " + project, Err: upstream.ErrUnavailable})
-		}
-		etag := ""
-		if cached != nil {
-			etag = cached.ETag
-		}
-		doc, tag, notModified, err := h.fetchPage(ctx, rp, project, etag)
-		if err == nil && notModified {
-			if doc, err := h.loadPage(ctx, rp, cached); err == nil {
-				h.fresh.Confirm(fk)
-				return &pageResult{doc, upstream.ResultRevalidated}, nil
-			}
-			doc, tag, _, err = h.fetchPage(ctx, rp, project, "")
-		}
-		if err != nil {
-			if cached == nil || upstream.Answered(err) {
-				return nil, h.upstreamFailure(ctx, rp, "project "+project, err)
-			}
-			h.pm.UpstreamErrors.With(rp.name).Inc()
-			h.log.WarnContext(ctx, "serving a cached project page the upstream could not confirm", "repository", rp.name,
-				"project", project, "upstream", p.client.Host(), "err", err)
-			return stale(err)
-		}
-		result := upstream.ResultFetched
-		if cached != nil && blob.FromBytes(mustJSON(doc)) == cached.Digest {
-			result = upstream.ResultRevalidated
-		}
-		// Only a page now in the cache counts as confirmed; one that
-		// could not be stored is fetched again next time, rather than the
-		// older cached page being served for a whole window.
-		if h.storePage(ctx, actor, rp, project, doc, tag, cached) {
-			h.fresh.Confirm(fk)
-		}
-		return &pageResult{doc, result}, nil
-	})
+	return &pageResult{doc, d.Result}, nil
 }
 
-// fetchPage fetches rp's upstream page of project, conditionally on etag
-// if it is not empty; notModified reports a 304 answer.
-func (h *Handler) fetchPage(ctx context.Context, rp *repository, project, etag string) (doc *projectDoc, tag string, notModified bool, err error) {
-	p := rp.proxy
-	hdr := http.Header{"Accept": {upstreamAccept}}
-	if etag != "" {
-		hdr.Set("If-None-Match", etag)
-	}
-	resp, err := p.client.GetURL(ctx, p.index+project+"/", hdr)
-	if err != nil {
-		return nil, "", false, err
-	}
-	defer resp.Body.Close()
-	op := "GET " + p.index + project + "/"
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusNotModified:
-		return nil, etag, true, nil
-	default:
-		return nil, "", false, &upstream.Error{Op: op, Status: resp.StatusCode, Err: errors.New("unexpected status " + resp.Status)}
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPageSize+1))
-	if err != nil {
-		return nil, "", false, &upstream.Error{Op: op, Err: errors.Join(upstream.ErrUnavailable, err)}
-	}
-	if len(body) > maxPageSize {
-		return nil, "", false, &upstream.Error{Op: op, Err: upstream.ErrTooLarge}
-	}
-	doc, err = parsePage(body, resp.Header.Get("Content-Type"), resp.Request.URL, project)
-	if err != nil {
-		return nil, "", false, &upstream.Error{Op: op, Err: err}
-	}
-	for _, f := range doc.Files {
-		f.src = rp
-	}
-	return doc, resp.Header.Get("ETag"), false, nil
-}
-
-func mustJSON(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return b
-}
-
-// storePage caches a project page fetched from the upstream, unless it is
-// unchanged, and reports whether the cache now holds it. A page that
-// cannot be stored is still served.
-func (h *Handler) storePage(ctx context.Context, actor string, rp *repository, project string, doc *projectDoc, etag string, cached *pageRecord) bool {
-	body := mustJSON(doc)
-	d := blob.FromBytes(body)
-	if cached != nil && cached.Digest == d && cached.ETag == etag {
-		return true
-	}
-	release, ok := h.reserve(int64(len(body)))
-	if !ok {
-		return false
-	}
-	defer release()
-	if _, err := h.putBlob(ctx, body); err != nil {
-		h.log.WarnContext(ctx, "caching a project page failed", "repository", rp.name, "project", project, "err", err)
-		return false
-	}
-	rec := &pageRecord{Digest: d, Size: int64(len(body)), ETag: etag, Fetched: h.now().UTC()}
-	err := h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) {
-		b.Put(pageKey(rp.name, project), rec.encode())
-		b.SetOrigin(meta.Origin{Actor: actor, Action: "pypi.proxy.cache", Target: rp.name + "/" + project})
-	})
-	if err != nil {
-		h.log.WarnContext(ctx, "caching a project page failed", "repository", rp.name, "project", project, "err", err)
-		return false
-	}
-	h.pm.UpstreamBytes.With(rp.name).Add(float64(len(body)))
-	h.pages.put(rp.name+"\x00"+d.String(), doc, rec.Size)
-	return true
-}
-
-// loadPage reads a cached project page.
-func (h *Handler) loadPage(ctx context.Context, rp *repository, rec *pageRecord) (*projectDoc, error) {
-	if rec == nil {
-		return nil, errors.New("pypi: no cached page")
-	}
-	ck := rp.name + "\x00" + rec.Digest.String()
+// loadPage reads an upstream project page the document cache resolved
+// into flint's form, which is kept in memory by the page's digest.
+func (h *Handler) loadPage(ctx context.Context, rp *repository, project string, d *upstream.Doc) (*projectDoc, error) {
+	ck := rp.name + "\x00" + project + "\x00" + d.Digest.String() + "\x00" + d.ContentType + "\x00" + d.URL
 	if doc := h.pages.get(ck); doc != nil {
 		return doc, nil
 	}
-	f, err := h.blobs.Open(ctx, rec.Digest)
+	base, err := url.Parse(d.URL)
+	if err != nil {
+		return nil, &upstream.Error{Op: "GET " + d.URL, Err: errBadPage}
+	}
+	f, err := h.docs.Open(ctx, d)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	var doc projectDoc
-	if err := json.NewDecoder(io.LimitReader(f, maxPageSize)).Decode(&doc); err != nil {
+	body, err := io.ReadAll(io.LimitReader(f, maxPageSize))
+	if err != nil {
 		return nil, err
 	}
-	if doc.Format != pageFormat {
-		return nil, errors.New("pypi: a cached page has an unknown format")
+	doc, err := parsePage(body, d.ContentType, base, project)
+	if err != nil {
+		return nil, &upstream.Error{Op: "GET " + d.URL, Err: err}
 	}
 	for _, f := range doc.Files {
 		f.src = rp
 	}
-	h.pages.put(ck, &doc, rec.Size)
-	return &doc, nil
+	h.pages.put(ck, doc, d.Size)
+	return doc, nil
 }
 
 // commitLink commits a batch that links the blobs ds, under the

@@ -89,6 +89,9 @@ type Options struct {
 	// ProxyMetrics are the proxy metrics shared with other formats; nil
 	// registers them on Metrics.
 	ProxyMetrics *upstream.Metrics
+	// Docs caches project pages, shared with other formats' proxy
+	// repositories; nil means a new one, which RunProxy prunes.
+	Docs *upstream.DocCache
 	// Logger receives failures; nil means slog.Default().
 	Logger *slog.Logger
 	// Metrics, if set, receives the PyPI metrics.
@@ -127,11 +130,11 @@ type Handler struct {
 	fetcher   *upstream.Fetcher
 	space     *upstream.Space
 	pm        *upstream.Metrics
-	fresh     *upstream.Freshness
-	pageCalls upstream.Group[*pageResult]
+	docs      *upstream.DocCache
+	ownDocs   bool // docs is this handler's own, which it prunes
+	limits    *upstream.Limits
 	metaCalls upstream.Group[[]byte]
 	pages     pageCache
-	evictKick chan struct{}
 }
 
 // New returns a Handler.
@@ -143,16 +146,16 @@ func New(opts Options) (*Handler, error) {
 		return nil, errors.New("pypi: an Authorizer is required")
 	}
 	h := &Handler{
-		meta:      opts.Meta,
-		blobs:     opts.Blobs,
-		repos:     map[string]*repository{},
-		auth:      opts.Authorizer,
-		log:       opts.Logger,
-		actor:     opts.Actor,
-		now:       opts.Now,
-		fetcher:   opts.Fetcher,
-		space:     opts.Space,
-		evictKick: make(chan struct{}, 1),
+		meta:    opts.Meta,
+		blobs:   opts.Blobs,
+		repos:   map[string]*repository{},
+		auth:    opts.Authorizer,
+		log:     opts.Logger,
+		actor:   opts.Actor,
+		now:     opts.Now,
+		fetcher: opts.Fetcher,
+		space:   opts.Space,
+		docs:    opts.Docs,
 	}
 	if h.log == nil {
 		h.log = slog.Default()
@@ -166,7 +169,6 @@ func New(opts Options) (*Handler, error) {
 	if h.fetcher == nil {
 		h.fetcher = upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout)
 	}
-	h.fresh = upstream.NewFreshness(h.now)
 	upOpts := opts.Upstream
 	if upOpts.Logger == nil {
 		upOpts.Logger = h.log
@@ -217,6 +219,16 @@ func New(opts Options) (*Handler, error) {
 			space = nil
 		}
 		h.pm = upstream.NewMetrics(reg, h.fetcher, space)
+	}
+	if h.docs == nil {
+		h.docs = upstream.NewDocCache(upstream.DocCacheOptions{Meta: h.meta, Blobs: h.blobs, Space: h.space,
+			Metrics: h.pm, Logger: h.log, Now: h.now})
+		h.ownDocs = true
+	}
+	h.limits = upstream.NewLimits(upstream.LimitsOptions{Meta: h.meta, Metrics: h.pm, Format: "pypi",
+		PulledKey: pulledKey, Now: h.now})
+	if err := h.dropPageRecords(context.Background()); err != nil {
+		return nil, err
 	}
 	if err := h.loadTrackers(); err != nil {
 		return nil, err

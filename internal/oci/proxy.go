@@ -614,21 +614,14 @@ func (h *Handler) cacheManifest(ctx context.Context, actor string, rn *repoName,
 // validatedWithin reports whether the upstream confirmed tag key within
 // the window.
 func (h *Handler) validatedWithin(key []byte, window time.Duration) bool {
-	h.validatedMu.Lock()
-	defer h.validatedMu.Unlock()
-	t, ok := h.validated[string(key)]
-	return ok && h.now().Sub(t) < window
+	return h.validated.Fresh(string(key), window)
 }
 
-func (h *Handler) markValidated(key []byte) {
-	h.validatedMu.Lock()
-	defer h.validatedMu.Unlock()
-	h.validated[string(key)] = h.now()
-}
+func (h *Handler) markValidated(key []byte) { h.validated.Confirm(string(key)) }
 
 // pruneValidated forgets confirmations older than every revalidation
-// window, which no lookup would trust anyway, so the map stays as small
-// as the set of recently pulled tags.
+// window, which no lookup would trust anyway, so the memory they take
+// stays as small as the set of recently pulled tags.
 func (h *Handler) pruneValidated() {
 	var window time.Duration
 	for _, rc := range h.repos {
@@ -636,14 +629,7 @@ func (h *Handler) pruneValidated() {
 			window = max(window, rc.proxy.revalidate)
 		}
 	}
-	h.validatedMu.Lock()
-	defer h.validatedMu.Unlock()
-	now := h.now()
-	for k, t := range h.validated {
-		if now.Sub(t) >= window {
-			delete(h.validated, k)
-		}
-	}
+	h.validated.Prune(window)
 }
 
 // listing is an upstream tag list or referrers index, cached in memory.

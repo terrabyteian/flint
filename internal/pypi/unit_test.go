@@ -184,10 +184,6 @@ func TestRecords(t *testing.T) {
 	if _, err := decodeFile(append((&fileRecord{Kind: kindCached, Digest: d}).encode(), 0)); err == nil {
 		t.Error("trailing bytes decoded")
 	}
-	pr := &pageRecord{Digest: d, Size: 5, ETag: `"e"`, Fetched: now}
-	if got, err := decodePage(pr.encode()); err != nil || *got != *pr {
-		t.Errorf("page record %+v, %v", got, err)
-	}
 	if got, err := decodeProject((&projectRecord{Name: "P", Created: now}).encode()); err != nil || got.Name != "P" || !got.Created.Equal(now) {
 		t.Errorf("project record %+v, %v", got, err)
 	}
