@@ -202,7 +202,20 @@ type Proxy struct {
 	// it is exceeded, the least recently pulled content is evicted.
 	// Without it, everything is cached forever.
 	SizeLimit ByteSize `json:"sizeLimit,omitzero"`
+	// MaxConcurrent bounds the requests the repository has in flight to
+	// its upstream at once; further requests wait. Default 64.
+	MaxConcurrent int `json:"maxConcurrent,omitempty"`
+	// AllowHosts are hosts besides the upstream's own that the repository
+	// may fetch from when upstream metadata or a redirect points at them:
+	// a host name or IP address, optionally with a port, or
+	// "*.example.com" for every subdomain of example.com. Unlike hosts
+	// only upstream content leads to, they may be internal addresses.
+	AllowHosts []string `json:"allowHosts,omitempty"`
 }
+
+// DefaultMaxConcurrent is a proxy repository's default bound on its
+// concurrent upstream requests.
+const DefaultMaxConcurrent = 64
 
 // Roles a permission grant can give.
 const (
@@ -642,6 +655,38 @@ func validateProxy(v *validator, path, format string, p *Proxy) {
 	} else if s.set && s.Bytes <= 0 {
 		v.addf(path+".sizeLimit", "must be positive")
 	}
+	if p.MaxConcurrent < 0 {
+		v.addf(path+".maxConcurrent", "must be positive")
+	}
+	for i, h := range p.AllowHosts {
+		if err := checkHostPattern(h); err != nil {
+			v.addf(fmt.Sprintf("%s.allowHosts[%d]", path, i), "%v", err)
+		}
+	}
+}
+
+// checkHostPattern checks an allowHosts entry: a host name or IP
+// address, optionally with a port, or "*." and a domain.
+func checkHostPattern(s string) error {
+	if s == "" || strings.ContainsAny(s, "/?#@ \t") {
+		return fmt.Errorf("%q is not a host name or address, optionally with a port", s)
+	}
+	host := s
+	if h, port, err := net.SplitHostPort(s); err == nil {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("%q has an invalid port", s)
+		}
+		host = h
+	} else if strings.Count(s, ":") > 1 {
+		host = strings.Trim(s, "[]")
+	} else if strings.Contains(s, ":") {
+		return fmt.Errorf("%q has an invalid port", s)
+	}
+	host = strings.TrimPrefix(host, "*.")
+	if host == "" || strings.Contains(host, "*") {
+		return fmt.Errorf("%q is not a host name or address; a wildcard is allowed only as a leading \"*.\"", s)
+	}
+	return nil
 }
 
 // checkUpstreamURL checks an upstream's URL: a registry's base URL for

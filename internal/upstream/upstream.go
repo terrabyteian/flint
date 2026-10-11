@@ -66,6 +66,10 @@ var (
 	ErrDigestMismatch = errors.New("upstream content does not match its digest")
 	// ErrTooLarge means a response exceeded the size the caller accepts.
 	ErrTooLarge = errors.New("upstream response too large")
+	// ErrGone means the upstream answered 410: the content existed and
+	// was removed. It wraps ErrNotFound, so callers that do not
+	// distinguish the two treat it as not found.
+	ErrGone = fmt.Errorf("%w: gone", ErrNotFound)
 )
 
 // Error describes a failed upstream request.
@@ -92,6 +96,8 @@ const (
 	DefaultAttempts   = 3
 	DefaultBackoff    = 250 * time.Millisecond
 	DefaultOfflineFor = 30 * time.Second
+	// DefaultMaxConcurrent bounds a Client's concurrent requests.
+	DefaultMaxConcurrent = 64
 	// maxRetryAfter bounds how long a Retry-After header may delay a
 	// retry; a longer one, such as a rate limit's, ends the retries.
 	maxRetryAfter = 5 * time.Second
@@ -107,9 +113,18 @@ type Options struct {
 	// newline is ignored.
 	Username     string
 	PasswordFile string
-	// HTTPClient sends the requests; nil means a client with
-	// NewTransport and no overall timeout.
+	// HTTPClient sends the requests; nil means a client with a transport
+	// like NewTransport's that also enforces Policy's address rule, and
+	// no overall timeout. A given client's redirects are still checked
+	// against Policy, but its transport is used as it is.
 	HTTPClient *http.Client
+	// Policy decides which hosts besides the upstream's own the client
+	// may fetch from; the zero Policy allows none.
+	Policy Policy
+	// MaxConcurrent bounds the requests the client has in flight at
+	// once, each from its first byte sent until its response body is
+	// closed; zero means DefaultMaxConcurrent. Further requests wait.
+	MaxConcurrent int
 	// UserAgent is sent with every request.
 	UserAgent string
 	// Attempts bounds how often a transiently failing request is sent;
@@ -140,6 +155,8 @@ type Client struct {
 	offlineFor   time.Duration
 	log          *slog.Logger
 	now          func() time.Time
+	pol          *policy
+	slots        chan struct{} // one per request in flight
 
 	mu            sync.Mutex
 	tokens        map[string]token // by scope
@@ -178,9 +195,24 @@ func New(opts Options) (*Client, error) {
 		now:          opts.Now,
 		tokens:       map[string]token{},
 	}
-	if c.hc == nil {
-		c.hc = &http.Client{Transport: NewTransport()}
+	if c.pol, err = compilePolicy(u, opts.Policy); err != nil {
+		return nil, err
 	}
+	if c.hc == nil {
+		t := NewTransport()
+		t.Proxy = c.pol.proxyFunc()
+		t.DialContext = c.pol.dialContext(newDialer())
+		c.hc = &http.Client{Transport: t}
+	} else {
+		hc := *c.hc
+		c.hc = &hc
+	}
+	c.hc.CheckRedirect = c.pol.checkRedirect
+	n := opts.MaxConcurrent
+	if n <= 0 {
+		n = DefaultMaxConcurrent
+	}
+	c.slots = make(chan struct{}, n)
 	if c.attempts <= 0 {
 		c.attempts = DefaultAttempts
 	}
@@ -211,7 +243,7 @@ func New(opts Options) (*Client, error) {
 func NewTransport() *http.Transport {
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:           newDialer().DialContext,
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
@@ -219,6 +251,10 @@ func NewTransport() *http.Transport {
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConnsPerHost:   32,
 	}
+}
+
+func newDialer() *net.Dialer {
+	return &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 }
 
 // URL returns the upstream's base URL.
@@ -281,9 +317,10 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 
 // GetURL fetches an absolute http or https URL, such as a package file
 // that an index links to, which may be on another host, such as a
-// content delivery network. It retries and fails as Do does. Only the
-// upstream's own scheme and host are sent credentials or have their
-// authentication challenges answered; a 401 from anywhere else is
+// content delivery network, if the client's Policy allows that host;
+// otherwise it fails with ErrPolicy. It retries and fails as Do does.
+// Only the upstream's own scheme and host are sent credentials or have
+// their authentication challenges answered; a 401 from anywhere else is
 // ErrDenied.
 func (c *Client) GetURL(ctx context.Context, rawURL string, header http.Header) (*http.Response, error) {
 	u, err := url.Parse(rawURL)
@@ -291,7 +328,39 @@ func (c *Client) GetURL(ctx context.Context, rawURL string, header http.Header) 
 		return nil, &Error{Op: "GET " + rawURL, Err: fmt.Errorf("%q is not an http or https URL", rawURL)}
 	}
 	u.Fragment, u.RawFragment = "", ""
+	if err := c.pol.check(u); err != nil {
+		return nil, &Error{Op: "GET " + u.Redacted(), Err: err}
+	}
 	return c.do(ctx, http.MethodGet, u, header, "")
+}
+
+// Allowed reports whether the client's Policy allows fetching rawURL.
+func (c *Client) Allowed(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && c.pol.check(u) == nil
+}
+
+// acquire waits for a request slot and returns its release.
+func (c *Client) acquire(ctx context.Context, op string) (func(), error) {
+	select {
+	case c.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, &Error{Op: op, Err: fmt.Errorf("waiting for one of the %d concurrent upstream requests allowed: %w", cap(c.slots), ctx.Err())}
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-c.slots }) }, nil
+}
+
+// releaseBody releases a request slot when the response body is closed.
+type releaseBody struct {
+	io.ReadCloser
+	release func()
+}
+
+func (b *releaseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.release()
+	return err
 }
 
 // do sends a request for u; see Do.
@@ -299,7 +368,16 @@ func (c *Client) do(ctx context.Context, method string, u *url.URL, header http.
 	op := method + " " + u.Path
 	var lastErr error
 	for attempt := 1; ; attempt++ {
+		release, err := c.acquire(ctx, op)
+		if err != nil {
+			return nil, err
+		}
 		resp, err := c.send(ctx, method, u, header, scope)
+		if err != nil {
+			release()
+		} else {
+			resp.Body = &releaseBody{resp.Body, release}
+		}
 		retryAfter := time.Duration(0)
 		switch {
 		case err == nil && !retryable(resp.StatusCode):
@@ -368,7 +446,7 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 	}
 	resp, err := c.roundTrip(ctx, method, u.String(), header, auth)
 	if err != nil {
-		return nil, &Error{Op: op, Err: fmt.Errorf("%w: %v", ErrUnavailable, err)}
+		return nil, transportError(op, err)
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		return resp, nil
@@ -402,7 +480,7 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 	}
 	resp, err = c.roundTrip(ctx, method, u.String(), header, auth)
 	if err != nil {
-		return nil, &Error{Op: op, Err: fmt.Errorf("%w: %v", ErrUnavailable, err)}
+		return nil, transportError(op, err)
 	}
 	if ch.scheme == "basic" && resp.StatusCode == http.StatusUnauthorized {
 		drain(resp)
@@ -413,6 +491,26 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 		c.basicAccepted.Store(true)
 	}
 	return resp, nil
+}
+
+// transportError is the error of request op that failed in the
+// transport: a refusal of the fetch policy, such as a redirect to a host
+// it does not allow, or else the upstream being unavailable.
+func transportError(op string, err error) error {
+	if errors.Is(err, ErrPolicy) {
+		return &Error{Op: op, Err: fmt.Errorf("%w", unwrapURLError(err))}
+	}
+	return &Error{Op: op, Err: fmt.Errorf("%w: %v", ErrUnavailable, err)}
+}
+
+// unwrapURLError returns the error a *url.Error wraps, whose own message
+// repeats the URL the *Error already names.
+func unwrapURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 func (c *Client) roundTrip(ctx context.Context, method, u string, header http.Header, auth string) (*http.Response, error) {
@@ -449,6 +547,8 @@ func statusError(op string, resp *http.Response) error {
 	switch resp.StatusCode {
 	case http.StatusNotFound:
 		e.Err = ErrNotFound
+	case http.StatusGone:
+		e.Err = ErrGone
 	case http.StatusUnauthorized, http.StatusForbidden:
 		e.Err = ErrDenied
 	default:

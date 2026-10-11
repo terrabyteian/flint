@@ -99,6 +99,11 @@ func newProxyRepo(rc config.Repository, defaults upstream.Options) (*proxyRepo, 
 	opts := defaults
 	opts.URL = pc.URL
 	opts.Username, opts.PasswordFile = pc.Username, pc.PasswordFile
+	opts.MaxConcurrent = pc.MaxConcurrent
+	// The distribution protocol lets a registry redirect blob downloads
+	// to, and name its token service on, any host, so every public host
+	// is allowed; internal ones only if configured.
+	opts.Policy = upstream.Policy{AllowHosts: pc.AllowHosts, AnyHost: true}
 	if p.client, err = upstream.New(opts); err != nil {
 		return nil, err
 	}

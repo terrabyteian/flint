@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,6 +72,8 @@ func newProxyRepo(rc config.Repository, defaults upstream.Options) (*proxyRepo, 
 	opts := defaults
 	opts.URL = p.index
 	opts.Username, opts.PasswordFile = pc.Username, pc.PasswordFile
+	opts.MaxConcurrent = pc.MaxConcurrent
+	opts.Policy = upstream.Policy{AllowHosts: pc.AllowHosts, FormatHosts: fileHosts(p.index)}
 	var err error
 	if p.client, err = upstream.New(opts); err != nil {
 		return nil, err
@@ -79,6 +82,22 @@ func newProxyRepo(rc config.Repository, defaults upstream.Options) (*proxyRepo, 
 		p.cache = upstream.NewCacheTracker(rc.Name, pc.SizeLimit.Bytes)
 	}
 	return p, nil
+}
+
+// knownFileHosts are the hosts well-known indexes link their files on.
+var knownFileHosts = map[string][]string{
+	"pypi.org":      {"files.pythonhosted.org"},
+	"test.pypi.org": {"test-files.pythonhosted.org"},
+}
+
+// fileHosts returns the hosts besides its own that the index at
+// indexURL is known to link files on.
+func fileHosts(indexURL string) []string {
+	u, err := url.Parse(indexURL)
+	if err != nil {
+		return nil
+	}
+	return knownFileHosts[strings.ToLower(u.Hostname())]
 }
 
 // pageResult is a project page resolved through a proxy repository.
