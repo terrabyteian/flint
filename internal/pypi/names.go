@@ -146,6 +146,16 @@ func parseFilename(filename, project string) (distInfo, bool) {
 	return distInfo{PackageType: typeOther, Name: name, Version: version}, ok
 }
 
+// normalFilename returns the form of a distribution file name that every
+// spelling of it shares: the project name normalized with "_" for
+// separators, as PEP 625 and the wheel file name specification write it,
+// the version in canonical form, and the rest lowercased. d is what
+// parseFilename read from filename.
+func normalFilename(filename string, d distInfo) string {
+	rest := filename[len(d.Name)+1+len(d.Version):]
+	return strings.ReplaceAll(Normalize(d.Name), "-", "_") + "-" + canonicalVersion(d.Version) + strings.ToLower(rest)
+}
+
 // splitNameVersion splits "{name}-{version}" at the first "-" whose prefix
 // normalizes to project.
 func splitNameVersion(stem, project string) (name, version string, ok bool) {

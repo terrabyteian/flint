@@ -112,6 +112,13 @@ type upload struct {
 // that twine and uv publish use: a multipart form with the file in the
 // "content" part and its metadata in the other fields.
 func (h *Handler) serveUpload(w http.ResponseWriter, r *http.Request, rp *repository) {
+	actions := []string{ActionPull}
+	if rp.typ == config.TypeHosted {
+		actions = append(actions, ActionPush)
+	}
+	if !h.permit(w, r, rp, actions...) {
+		return
+	}
 	switch rp.typ {
 	case config.TypeProxy:
 		writeError(w, http.StatusMethodNotAllowed,
@@ -121,9 +128,6 @@ func (h *Handler) serveUpload(w http.ResponseWriter, r *http.Request, rp *reposi
 		writeError(w, http.StatusMethodNotAllowed,
 			"repository %s is a virtual repository; upload to one of its hosted members: %s",
 			rp.name, strings.Join(rp.virtual.Hosted(), ", "))
-		return
-	}
-	if !h.permit(w, r, rp, ActionPull, ActionPush) {
 		return
 	}
 	u, err := h.readUpload(r)
@@ -226,6 +230,7 @@ type checkedUpload struct {
 	name    string // as given
 	version string
 	dist    distInfo
+	normal  string      // the file name in normalized form
 	sha256  blob.Digest // as the client sent it, or zero
 	md5     []byte
 	blake   []byte
@@ -283,6 +288,7 @@ func (u *upload) check() (*checkedUpload, error) {
 		return bad("the file name %s has version %s, but the upload is version %s", u.filename, dist.Version, c.version)
 	}
 	c.dist = dist
+	c.normal = normalFilename(u.filename, dist)
 	for _, d := range []struct {
 		field string
 		size  int
@@ -314,16 +320,11 @@ func (h *Handler) storeUpload(r *http.Request, rp *repository, u *upload) (bool,
 	if err != nil {
 		return false, err
 	}
-	fk := fileKey(rp.name, u.filename)
-	// A tombstone refuses the name before the file is committed.
-	v := h.view()
-	if rec, ok := v.Get(fk); ok {
-		if f, err := decodeFile(rec.Value); err == nil && f.Kind == kindTombstone {
-			v.Release()
-			return false, reusedName(u.filename)
-		}
+	fk, nk := fileKey(rp.name, u.filename), nameKey(rp.name, c.normal)
+	// A name that is taken refuses the upload before the file is committed.
+	if _, err := h.checkName(rp, c, u.filename, blob.Digest{}); err != nil {
+		return false, err
 	}
-	v.Release()
 	md5sum, blakesum := u.md5.Sum(nil), u.blake.Sum(nil)
 	if c.md5 != nil && !bytes.Equal(c.md5, md5sum) {
 		return false, errorf(http.StatusBadRequest, "the file does not match md5_digest: its MD5 is %x", md5sum)
@@ -344,7 +345,7 @@ func (h *Handler) storeUpload(r *http.Request, rp *repository, u *upload) (bool,
 		RequiresPython: strings.TrimSpace(first(u.form, "requires_python")),
 		PackageType:    c.dist.PackageType, PythonVersion: c.dist.PythonVersion,
 	}
-	if done, err := h.existingUpload(fk, rec); done || err != nil {
+	if done, err := h.checkName(rp, c, u.filename, rec.Digest); done || err != nil {
 		return false, err
 	}
 	if err := h.storeMetadata(ctx, u, c, rec); err != nil {
@@ -353,20 +354,34 @@ func (h *Handler) storeUpload(r *http.Request, rp *repository, u *upload) (bool,
 	digests := []blob.Digest{rec.Digest, rec.Meta}
 	for attempt := 0; ; attempt++ {
 		v := h.view()
+		done, err := checkNameIn(v, rp, c, u.filename, rec.Digest)
 		var b meta.Batch
-		err := gc.Guard(v, &b, digests...)
-		if err == nil {
+		if !done && err == nil {
+			err = gc.Guard(v, &b, digests...)
+		}
+		if !done && err == nil {
 			b.Require(fk, 0)
+			b.Require(nk, 0)
 			pk := projectKey(rp.name, c.project)
-			if _, ok := v.Get(pk); !ok {
+			switch prec, ok := v.Get(pk); {
+			case !ok:
 				b.Require(pk, 0)
 				b.Put(pk, (&projectRecord{Name: c.name, Created: rec.Uploaded}).encode())
+			case c.dist.PackageType == typeSdist:
+				// A source distribution moves the project record, so two
+				// for one release cannot both pass checkNameIn.
+				b.Require(pk, prec.Version)
+				b.Put(pk, prec.Value)
 			}
 			b.Put(fk, rec.encode())
+			b.Put(nk, newEnc().str(u.filename))
 			b.Put(indexKey(rp.name, c.project, u.filename), newEnc())
 			b.SetOrigin(h.origin(r, "pypi.upload", rp.name+"/"+c.project+"/"+u.filename))
 		}
 		v.Release()
+		if done {
+			return false, err
+		}
 		if err == nil {
 			err = h.statBlobs(ctx, digests...)
 		}
@@ -381,11 +396,8 @@ func (h *Handler) storeUpload(r *http.Request, rp *repository, u *upload) (bool,
 				"file", u.filename, "digest", rec.Digest.String(), "size", rec.Size)
 			return true, nil
 		case errors.Is(err, meta.ErrConflict) && attempt < maxLinkAttempts-1:
-			// Another upload of the name, or a garbage-collection sweep,
-			// got there first.
-			if done, err := h.existingUpload(fk, rec); done || err != nil {
-				return false, err
-			}
+			// Another upload, or a garbage-collection sweep, got there
+			// first: check the name again.
 		case errors.Is(err, meta.ErrConflict), errors.Is(err, gc.ErrDoomed):
 			return false, errRetry
 		default:
@@ -402,32 +414,68 @@ const maxLinkAttempts = 4
 // writer and the client should retry.
 var errRetry = errorf(http.StatusServiceUnavailable, "the registry is busy with this content; retry the request")
 
-func reusedName(filename string) error {
-	return errorf(http.StatusConflict, "File already exists: %s was deleted, and a file name can never be used again; upload a new version", filename)
-}
-
-// existingUpload checks the upload of rec against a file already recorded
-// under its name: the same content is done, different content is
-// refused, and none lets the upload proceed.
-func (h *Handler) existingUpload(fk []byte, rec *fileRecord) (bool, error) {
+// checkName checks an upload of filename, content d, against the files
+// its repository has now; see checkNameIn.
+func (h *Handler) checkName(rp *repository, c *checkedUpload, filename string, d blob.Digest) (bool, error) {
 	v := h.view()
 	defer v.Release()
-	cur, ok := v.Get(fk)
-	if !ok {
+	return checkNameIn(v, rp, c, filename, d)
+}
+
+// checkNameIn checks an upload of filename, content d, against the files
+// of its repository in v. A file name is never used twice, in any
+// spelling, even after delete: the same file again is done, and a file
+// that shares its normalized name with another, live or deleted, is
+// refused, as is a second source distribution of a release. With d zero,
+// before the content is known, a live file of the same name is let
+// through.
+func checkNameIn(v meta.View, rp *repository, c *checkedUpload, filename string, d blob.Digest) (bool, error) {
+	if rec, ok := v.Get(nameKey(rp.name, c.normal)); ok {
+		other, err := decodeName(rec.Value)
+		if err != nil {
+			return true, err
+		}
+		if other != filename {
+			return true, errorf(http.StatusConflict, "File already exists: %s is another spelling of %s, which was uploaded before, and a file name can never be reused; upload a new version",
+				filename, other)
+		}
+	}
+	if rec, ok := v.Get(fileKey(rp.name, filename)); ok {
+		f, err := decodeFile(rec.Value)
+		switch {
+		case err != nil:
+			return true, err
+		case f.Kind == kindTombstone:
+			return true, errorf(http.StatusConflict, "File already exists: %s was deleted, and a file name can never be used again; upload a new version", filename)
+		case d.IsZero():
+			return false, nil
+		case f.Digest == d:
+			return true, nil
+		}
+		return true, errorf(http.StatusConflict, "File already exists: %s was uploaded with different content, and a file name can never be reused; upload a new version", filename)
+	}
+	if c.dist.PackageType != typeSdist {
 		return false, nil
 	}
-	f, err := decodeFile(cur.Value)
-	if err != nil {
-		return true, err
-	}
-	switch {
-	case f.Kind == kindTombstone:
-		return true, reusedName(string(fk[bytes.LastIndexByte(fk, 0)+1:]))
-	case f.Digest == rec.Digest:
-		return true, nil
-	}
-	return true, errorf(http.StatusConflict, "File already exists: %s was uploaded with different content, and a file name can never be reused; upload a new version",
-		string(fk[bytes.LastIndexByte(fk, 0)+1:]))
+	pfx := indexPrefix(rp.name, c.project)
+	want := canonicalVersion(c.version)
+	var failure error
+	v.Scan(pfx, nil, func(k []byte, _ meta.Record) bool {
+		name := string(k[len(pfx):])
+		rec, ok := v.Get(fileKey(rp.name, name))
+		if !ok {
+			return true
+		}
+		f, err := decodeFile(rec.Value)
+		switch {
+		case err != nil:
+			failure = err
+		case f.Kind == kindHosted && f.PackageType == typeSdist && canonicalVersion(f.Version) == want:
+			failure = errorf(http.StatusBadRequest, "Only one sdist may be uploaded per release: release %s of %s has %s already", c.version, c.project, name)
+		}
+		return failure == nil
+	})
+	return failure != nil, failure
 }
 
 // statBlobs checks that blobs exist, after the view that guarded the

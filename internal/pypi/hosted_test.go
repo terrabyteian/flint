@@ -3,6 +3,7 @@ package pypi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -196,6 +197,71 @@ func TestUploadRefusedOutsideHosted(t *testing.T) {
 		w := e.upload(repo, d, d.form(), false)
 		if w.Code != http.StatusMethodNotAllowed || !strings.Contains(w.Body.String(), want) {
 			t.Errorf("upload to %s: %d %q", repo, w.Code, w.Body)
+		}
+	}
+	// Without read access, the refusal does not tell the configuration.
+	e.auth.status = http.StatusUnauthorized
+	for _, repo := range []string{"remote", "all"} {
+		w := e.upload(repo, d, d.form(), false)
+		if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), e.up.URL) || strings.Contains(w.Body.String(), "local") {
+			t.Errorf("unauthenticated upload to %s: %d %q", repo, w.Code, w.Body)
+		}
+	}
+	e.auth.status = 0
+	e.auth.reset()
+	e.mustUpload("local", d)
+	if got := e.auth.reset(); !slices.Equal(got, []string{"local:pull,push"}) {
+		t.Errorf("upload authorization %q", got)
+	}
+}
+
+func TestUploadNormalizedNames(t *testing.T) {
+	e := newEnv(t)
+	respell := func(d dist, filename, version string) dist {
+		d.filename, d.version = filename, version
+		return d
+	}
+	refused := func(d dist, code int, want string) {
+		t.Helper()
+		if w := e.upload("local", d, d.form(), false); w.Code != code || !strings.Contains(w.Body.String(), want) {
+			t.Errorf("upload of %s: %d %s, want %d %q", d.filename, w.Code, w.Body, code, want)
+		}
+	}
+	a := sdist("pkg", "1.0", nil)
+	e.mustUpload("local", a)
+	changed := sdist("pkg", "1.0", metadataFor("pkg", "1.0", "Summary: changed"))
+	// Another spelling of a live file's name is the same name.
+	refused(respell(changed, "Pkg-1.0.tar.gz", "1.0"), http.StatusConflict, "another spelling of "+a.filename)
+	refused(respell(changed, "pkg-1.0.0.tar.gz", "1.0.0"), http.StatusConflict, "another spelling of "+a.filename)
+	w := wheel("pkg", "2.0", nil)
+	e.mustUpload("local", w)
+	refused(respell(wheel("pkg", "2.0", metadataFor("pkg", "2.0", "Summary: changed")), "Pkg-2.0-py3-none-any.whl", "2.0"),
+		http.StatusConflict, "another spelling of "+w.filename)
+	// A release has one source distribution.
+	zipped := dist{name: "pkg", version: "1.0", filename: "pkg-1.0.zip", body: []byte("another sdist")}
+	refused(zipped, http.StatusBadRequest, "Only one sdist")
+	// After delete, no spelling of the name comes back.
+	if r := e.do("DELETE", "/api/v1/pypi/local/projects/pkg/files/"+a.filename, nil); r.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", r.Code, r.Body)
+	}
+	refused(respell(changed, "pkg-1.0.0.tar.gz", "1.0.0"), http.StatusConflict, "another spelling of "+a.filename)
+	refused(respell(changed, "PKG-1.0.tar.gz", "1.0"), http.StatusConflict, "another spelling of "+a.filename)
+	refused(a, http.StatusConflict, "was deleted")
+	// Another source distribution, under a new name, may replace it.
+	e.mustUpload("local", zipped)
+	// Of concurrent source distributions of a release, one wins.
+	for i := range 4 {
+		version := fmt.Sprintf("3.%d", i)
+		ds := []dist{sdist("pkg", version, nil), {name: "pkg", version: version, filename: "pkg-" + version + ".zip", body: []byte("zip " + version)}}
+		codes := make([]int, len(ds))
+		var wg sync.WaitGroup
+		for j, d := range ds {
+			wg.Go(func() { codes[j] = e.upload("local", d, d.form(), false).Code })
+		}
+		wg.Wait()
+		slices.Sort(codes)
+		if !slices.Equal(codes, []int{http.StatusOK, http.StatusBadRequest}) {
+			t.Errorf("concurrent sdists of %s: %v", version, codes)
 		}
 	}
 }

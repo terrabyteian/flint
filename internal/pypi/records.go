@@ -17,6 +17,8 @@ import (
 //	pypi\0file\0<repo>\0<filename>                  hosted file, kept as a tombstone after delete;
 //	                                                or a file a proxy repository cached
 //	pypi\0index\0<repo>\0<project>\0<filename>      a hosted project's live files
+//	pypi\0name\0<repo>\0<normalized filename>       hosted file name, by its normalized form (see
+//	                                                normalFilename): the name as uploaded; kept forever
 //	pypi\0metadata\0<repo>\0<filename>              core-metadata file a proxy repository cached
 //	pypi\0page\0<repo>\0<project>                   project page a proxy repository cached
 //	pypi\0pulled\0file\0<repo>\0<filename>          last pull of a file cached by a size-limited proxy
@@ -29,6 +31,7 @@ const (
 	nsProject  = "pypi\x00project\x00"
 	nsFile     = "pypi\x00file\x00"
 	nsIndex    = "pypi\x00index\x00"
+	nsName     = "pypi\x00name\x00"
 	nsMetadata = "pypi\x00metadata\x00"
 	nsPage     = "pypi\x00page\x00"
 	nsPulled   = "pypi\x00pulled\x00"
@@ -55,6 +58,7 @@ func key(ns string, parts ...string) []byte {
 func projectKey(repo, project string) []byte     { return key(nsProject, repo, project) }
 func fileKey(repo, filename string) []byte       { return key(nsFile, repo, filename) }
 func metadataKey(repo, filename string) []byte   { return key(nsMetadata, repo, filename) }
+func nameKey(repo, normal string) []byte         { return key(nsName, repo, normal) }
 func pageKey(repo, project string) []byte        { return key(nsPage, repo, project) }
 func indexPrefix(repo, project string) []byte    { return append(key(nsIndex, repo, project), 0) }
 func indexKey(repo, project, file string) []byte { return key(nsIndex, repo, project, file) }
@@ -201,6 +205,13 @@ func decodeProject(b []byte) (*projectRecord, error) {
 	d := newDec(b)
 	p := &projectRecord{Name: d.str(), Created: d.time()}
 	return p, d.done()
+}
+
+// decodeName decodes a name record: the file name as uploaded.
+func decodeName(b []byte) (string, error) {
+	d := newDec(b)
+	s := d.str()
+	return s, d.done()
 }
 
 // File record kinds.

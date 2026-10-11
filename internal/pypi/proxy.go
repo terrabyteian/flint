@@ -31,7 +31,9 @@ import (
 //     wherever the page links, often another host, and verified against
 //     the sha256 digest the page gives before a client receives their
 //     last byte. A file whose page gives no sha256 digest is passed
-//     through without being cached.
+//     through without being cached. A file is fetched even when a blob
+//     with its digest is stored already, for another repository: a digest
+//     is not a secret, so a proxy serves only what its upstream sent it.
 //
 // Pages are stored in flint's own form (projectDoc) in the blob store,
 // with links that point back at flint. When the data directory is nearly
@@ -112,17 +114,17 @@ func (h *Handler) proxyProject(ctx context.Context, actor string, rp *repository
 			return &pageResult{doc, upstream.ResultHit}, nil
 		}
 	}
-	return h.pageCalls.Do(ctx, fk, func(ctx context.Context) (*pageResult, error) {
+	return h.pageCalls.Do(ctx, fk, func(gctx context.Context) (*pageResult, error) {
 		timeout := fetchTimeout
 		if cached != nil {
 			timeout = revalidateTimeout
 		}
-		ctx, cancel := context.WithTimeout(ctx, timeout)
+		ctx, cancel := context.WithTimeout(gctx, timeout)
 		defer cancel()
 		stale := func(cause error) (*pageResult, error) {
-			doc, err := h.loadPage(ctx, rp, cached)
+			doc, err := h.loadPage(gctx, rp, cached)
 			if err != nil {
-				return nil, h.upstreamFailure(ctx, rp, "project "+project, cause)
+				return nil, h.upstreamFailure(gctx, rp, "project "+project, cause)
 			}
 			return &pageResult{doc, upstream.ResultStale}, nil
 		}
@@ -402,20 +404,6 @@ func (h *Handler) proxyFile(w http.ResponseWriter, r *http.Request, rp *reposito
 		return
 	}
 	d, _ := blob.ParseDigest("sha256:" + f.SHA256)
-	// The page lists the file with its digest, so a blob already stored
-	// under that digest, for another repository, is the same file.
-	if info, err := h.blobs.Stat(ctx, d); err == nil && (f.Size < 0 || f.Size == info.Size) {
-		if c := rp.proxy.cache; c == nil || info.Size <= c.Limit() {
-			if err := h.linkCached(ctx, h.actor(r), rp, project, filename, false, d, info.Size); err != nil {
-				h.fail(w, r, err)
-				return
-			}
-		}
-		if h.serveBlob(w, r, d, info.Size, filename) {
-			h.pm.Requests.With(rp.name, upstream.ResultHit).Inc()
-			return
-		}
-	}
 	if r.Method == http.MethodHead {
 		setFileHeaders(w, f.SHA256, filename)
 		if f.Size >= 0 {
@@ -614,17 +602,6 @@ func (h *Handler) proxyMetadata(w http.ResponseWriter, r *http.Request, rp *repo
 		h.fail(w, r, err)
 		return
 	}
-	if body == nil {
-		v := h.view()
-		rec, _ := v.Get(mk)
-		v.Release()
-		if b, err := decodeBlobRecord(rec.Value); err == nil && h.serveBlob(w, r, b.Digest, b.Size, filename+".metadata") {
-			h.pm.Requests.With(rp.name, upstream.ResultHit).Inc()
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "the file cannot be read")
-		return
-	}
 	setFileHeaders(w, d.Hex(), filename+".metadata")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
@@ -633,17 +610,10 @@ func (h *Handler) proxyMetadata(w http.ResponseWriter, r *http.Request, rp *repo
 	}
 }
 
-// fetchMetadata returns a core-metadata file, digest d: linked from the
-// blob store if stored already (returning nil), or else fetched from
+// fetchMetadata returns a core-metadata file, digest d, fetched from
 // rawURL, verified, and cached if it may be.
 func (h *Handler) fetchMetadata(ctx context.Context, actor string, rp *repository, project, filename, rawURL string, d blob.Digest) ([]byte, error) {
 	mk := metadataKey(rp.name, filename)
-	if info, err := h.blobs.Stat(ctx, d); err == nil {
-		if err := h.linkCached(ctx, actor, rp, project, filename, true, d, info.Size); err != nil {
-			return nil, err
-		}
-		return nil, nil
-	}
 	body, err := h.metaCalls.Do(ctx, string(mk), func(ctx context.Context) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()

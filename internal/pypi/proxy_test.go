@@ -164,16 +164,65 @@ func TestProxyFiles(t *testing.T) {
 	}
 	e.get("/pypi/remote/files/pkg/nope-1.0.tar.gz", http.StatusNotFound)
 
-	// A file stored for another repository is linked without a fetch,
-	// since the page names its digest.
+	// A file stored for another repository is still fetched: a proxy
+	// serves only what its own upstream sent it.
 	e.up.took()
 	e.page("small", "pkg")
 	e.get("/pypi/small/files/pkg/"+a.filename, http.StatusOK)
-	if got := e.up.took(); len(got) != 1 || !strings.HasPrefix(got[0], "page ") {
-		t.Errorf("another proxy's request: %q", got)
+	e.settle()
+	if got := e.up.took(); len(got) != 2 || !strings.HasPrefix(got[0], "page ") || got[1] != "file /packages/"+a.filename {
+		t.Errorf("another proxy's requests: %q", got)
 	}
 	if !e.has(fileKey("small", a.filename)) {
-		t.Error("the stored file was not linked")
+		t.Error("the fetched file was not cached")
+	}
+}
+
+func TestProxyDoesNotServeForeignBlobs(t *testing.T) {
+	e := newEnv(t)
+	private := wheel("secret", "1.0", nil)
+	e.mustUpload("local", private)
+	// An upstream page names the private file's digests for a file of
+	// its own, whose bytes it does not have.
+	evil := dist{name: "evil", version: "1.0", filename: "evil-1.0-py3-none-any.whl", body: private.body, metadata: private.metadata}
+	e.up.add("evil", upFile{dist: evil, metadata: true})
+	e.up.set(func(x *index) { x.corrupt[evil.filename] = true })
+	for _, name := range []string{evil.filename, evil.filename + ".metadata"} {
+		func() {
+			defer func() {
+				if p := recover(); p != nil && p != http.ErrAbortHandler {
+					t.Errorf("%s: panic %v", name, p)
+				}
+			}()
+			w := e.do("GET", "/pypi/remote/files/evil/"+name, nil)
+			if w.Code == http.StatusOK || bytes.Equal(w.Body.Bytes(), private.body) || bytes.Equal(w.Body.Bytes(), private.metadata) {
+				t.Errorf("%s: %d, served the private bytes", name, w.Code)
+			}
+		}()
+	}
+	e.settle()
+	if e.has(fileKey("remote", evil.filename)) || e.has(metadataKey("remote", evil.filename)) {
+		t.Error("the private blobs were linked to the proxy repository")
+	}
+}
+
+func TestProxyStalePageWithHangingUpstream(t *testing.T) {
+	saved := revalidateTimeout
+	revalidateTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { revalidateTimeout = saved })
+	e := newEnv(t)
+	a := wheel("pkg", "1.0", nil)
+	e.up.add("pkg", upFile{dist: a})
+	e.page("remote", "pkg")
+	// After a restart the page is in neither memory cache, and the
+	// upstream does not answer within the revalidation timeout.
+	e.restart()
+	e.up.set(func(x *index) { x.hang = true })
+	if got := e.page("remote", "pkg").filenames(); !slices.Equal(got, []string{a.filename}) {
+		t.Errorf("with the upstream hanging: %q", got)
+	}
+	if got := e.metric(`flint_proxy_requests_total{repository="remote",result="stale"}`); got != "1" {
+		t.Errorf("stale metric %q", got)
 	}
 }
 

@@ -372,6 +372,7 @@ type index struct {
 	html     bool // serve HTML pages instead of JSON
 	noETag   bool
 	down     bool
+	hang     bool            // leave page requests unanswered until the client gives up
 	corrupt  map[string]bool // file names served with a flipped byte
 	requests []string
 }
@@ -424,6 +425,12 @@ func (x *index) servePage(w http.ResponseWriter, r *http.Request) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.requests = append(x.requests, "page "+r.URL.Path+" "+r.Header.Get("If-None-Match"))
+	if x.hang {
+		x.mu.Unlock()
+		<-r.Context().Done()
+		x.mu.Lock()
+		return
+	}
 	if x.down {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
