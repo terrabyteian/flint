@@ -33,6 +33,9 @@ config:
   # - name: docker-local
   #   format: oci
   #   type: hosted
+  #   # Also serve the Helm charts pushed here as a classic Helm chart
+  #   # repository at /helm/docker-local/.
+  #   helmIndex: true
   # - name: dockerhub
   #   format: oci
   #   type: proxy

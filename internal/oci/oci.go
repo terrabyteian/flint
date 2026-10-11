@@ -4,7 +4,9 @@
 // manifests and indexes, Docker schema 2 manifests and manifest lists),
 // the referrers API, paginated tag and catalog listings, and deletes.
 // Proxy repositories cache an upstream registry and are read-only; see
-// proxy.go.
+// proxy.go. Hosted repositories with helmIndex also serve the Helm charts
+// pushed to them as a classic Helm chart repository at /helm/; see
+// helm.go.
 //
 // Clients address an image as <repository>/<name>: the first path
 // component is a repository declared in the configuration, and the rest
@@ -119,6 +121,7 @@ type Options struct {
 type repository struct {
 	name          string
 	immutableTags bool
+	helmIndex     bool       // serve the Helm view
 	proxy         *proxyRepo // nil for a hosted repository
 }
 
@@ -147,6 +150,11 @@ type Handler struct {
 	listings      listingCache
 	evictKick     chan struct{}
 
+	// The Helm view.
+	helmMu     sync.Mutex
+	helmViews  map[string]*helmView // by repository and path; only views with charts
+	helmBuilds upstream.Group[*helmView]
+
 	proxyResults   *metrics.Counter
 	upstreamErrors *metrics.Counter
 	upstreamBytes  *metrics.Counter
@@ -174,6 +182,7 @@ func New(opts Options) (*Handler, error) {
 		fetcher:   upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout),
 		validated: map[string]time.Time{},
 		evictKick: make(chan struct{}, 1),
+		helmViews: map[string]*helmView{},
 	}
 	if h.log == nil {
 		h.log = slog.Default()
@@ -197,7 +206,7 @@ func New(opts Options) (*Handler, error) {
 		}
 		switch rc.Type {
 		case config.TypeHosted:
-			h.repos[rc.Name] = &repository{name: rc.Name, immutableTags: rc.ImmutableTags}
+			h.repos[rc.Name] = &repository{name: rc.Name, immutableTags: rc.ImmutableTags, helmIndex: rc.HelmIndex}
 		case config.TypeProxy:
 			if rc.Proxy == nil {
 				return nil, fmt.Errorf("oci: proxy repository %s has no upstream", rc.Name)
@@ -275,9 +284,11 @@ func (h *Handler) loadTrackers() error {
 	return nil
 }
 
-// Register mounts the handler at /v2/ on a server.
+// Register mounts the handler at /v2/ on a server, and the Helm view at
+// /helm/.
 func (h *Handler) Register(s interface{ Handle(string, http.Handler) }) {
 	s.Handle("/v2/", h)
+	s.Handle("/helm/", http.HandlerFunc(h.serveHelm))
 }
 
 // repoName is a parsed, validated repository name.

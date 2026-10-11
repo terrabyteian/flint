@@ -235,6 +235,7 @@ func (h *Handler) putManifest(w http.ResponseWriter, r *http.Request, rn *repoNa
 		}
 		rec := pm.record
 		rec.Refs = refs
+		rec.Pushed = h.now()
 		b.Put(manifestKey(rn, d), rec.encode())
 		if !rec.Subject.IsZero() {
 			b.Put(referrerKey(rn, rec.Subject, d), newEnc())

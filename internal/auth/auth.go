@@ -487,6 +487,48 @@ func (s *Service) Authorize(w http.ResponseWriter, r *http.Request, repo string,
 	return true
 }
 
+// AuthorizeBasic is Authorize for clients of classic package protocols,
+// such as Helm chart repositories, that send HTTP basic credentials, a
+// password or an API token, and know no token service. It accepts no
+// bearer token, and when it returns false it has written a 401 with a
+// Basic challenge, or a 403 if the credentials lack the permission.
+func (s *Service) AuthorizeBasic(w http.ResponseWriter, r *http.Request, repo string, actions ...string) bool {
+	c, err := s.authenticate(r, false)
+	switch {
+	case err != nil && !errors.Is(err, errBadCredentials):
+		s.log.Error("authentication failed", "err", err)
+		writePlainError(w, http.StatusInternalServerError, "internal error")
+		return false
+	case err != nil:
+		basicChallenge(w, "invalid credentials")
+		return false
+	case !s.permits(c, repo, actions):
+		if c.kind == credNone {
+			basicChallenge(w, "authentication required")
+		} else {
+			writePlainError(w, http.StatusForbidden, "requested access to the resource is denied")
+		}
+		return false
+	}
+	logPrincipal(r.Context(), c.principal)
+	*r = *r.WithContext(context.WithValue(r.Context(), principalKey{}, c.principal))
+	return true
+}
+
+// basicChallenge writes a 401 response with a Basic challenge.
+func basicChallenge(w http.ResponseWriter, msg string) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
+	writePlainError(w, http.StatusUnauthorized, msg)
+}
+
+// writePlainError writes a plain-text error response.
+func writePlainError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	fmt.Fprintln(w, msg)
+}
+
 type principalKey struct{}
 
 // Actor names the principal Authorize admitted r as, for the origin of the

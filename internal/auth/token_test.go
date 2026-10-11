@@ -285,6 +285,48 @@ func TestAPITokenCredentials(t *testing.T) {
 	}
 }
 
+// TestAuthorizeBasic checks the variant of Authorize for clients that
+// know only basic credentials.
+func TestAuthorizeBasic(t *testing.T) {
+	e := newEnv(t, testConfig)
+	e.addUser("bob", "bob-password", false)
+	e.addUser("carol", "carol-password", false, "ci")
+	tok := e.addToken("carol", false, time.Time{}, Scope{Repositories: []string{"docker-local"}, Role: RoleRead})
+	jwt := e.token("bob", "bob-password", "repository:docker-local/charts:pull")
+	challenged := func(resp response) bool {
+		return resp.status == http.StatusUnauthorized && resp.header.Get("WWW-Authenticate") == `Basic realm="flint"`
+	}
+
+	for _, c := range []struct {
+		what   string
+		req    request
+		status int
+		body   string
+	}{
+		{"password", request{path: "/test-basic/pull/docker-local/charts", user: "bob", pass: "bob-password"}, 200, "ok bob"},
+		{"API token", request{path: "/test-basic/pull/docker-local", user: TokenUser, pass: tok}, 200, ""},
+		{"API token with its owner", request{path: "/test-basic/pull/docker-local", user: "carol", pass: tok}, 200, ""},
+		{"anonymous pull", request{path: "/test-basic/pull/public"}, 200, "ok anonymous"},
+		{"no credentials", request{path: "/test-basic/pull/docker-local"}, 401, ""},
+		{"wrong password", request{path: "/test-basic/pull/docker-local", user: "bob", pass: "nope"}, 401, ""},
+		{"bearer token", request{path: "/test-basic/pull/docker-local/charts", bearer: jwt}, 401, ""},
+		{"no permission", request{path: "/test-basic/pull/team-a-web", user: "bob", pass: "bob-password"}, 403, ""},
+		{"token scope", request{path: "/test-basic/push/docker-local", user: TokenUser, pass: tok}, 403, ""},
+	} {
+		resp := e.do(c.req)
+		switch {
+		case resp.status != c.status:
+			t.Errorf("%s: %d %s, want %d", c.what, resp.status, resp.body, c.status)
+		case c.status == 401 && !challenged(resp):
+			t.Errorf("%s: challenge %q", c.what, resp.header.Get("WWW-Authenticate"))
+		case c.status >= 400 && !strings.HasPrefix(resp.header.Get("Content-Type"), "text/plain"):
+			t.Errorf("%s: error Content-Type %q", c.what, resp.header.Get("Content-Type"))
+		case c.body != "" && resp.body != c.body:
+			t.Errorf("%s: body %q", c.what, resp.body)
+		}
+	}
+}
+
 // TestRevocation checks that revoking a token, deleting a user, or
 // expiring a token ends access at once, also for JWTs already issued.
 func TestRevocation(t *testing.T) {

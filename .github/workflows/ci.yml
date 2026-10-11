@@ -204,6 +204,68 @@ jobs:
           path: ${{ runner.temp }}/conformance
           if-no-files-found: ignore
 
+  helm:
+    name: Helm repository with Helm ${{ matrix.helm }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Helm 3 before 3.17 reads the JSON index as YAML; later releases
+        # and Helm 4 detect JSON.
+        helm: [v3.16.4, v3.22.0, v4.3.0]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ matrix.helm }}
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "charts", "format": "oci", "type": "hosted", "helmIndex": true}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [{"repositories": ["charts"], "role": "write", "groups": ["ci"]}]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Create a CI user and API token
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          token=$(curl -fsS -u "ci-bot:$bot_password" http://127.0.0.1:5000/api/v1/tokens \
+            -d '{"name": "e2e", "expiresIn": "2h"}' | jq -r .token)
+          echo "::add-mask::$token"
+          echo "E2E_TOKEN=$token" >>"$GITHUB_ENV"
+      - name: Push with helm push and install from the classic repository
+        env:
+          E2E_USERNAME: ci-bot
+        run: E2E_PASSWORD="$E2E_TOKEN" scripts/e2e-helm.sh 127.0.0.1:5000 charts
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"
+
   proxy:
     name: Proxy end to end
     runs-on: ubuntu-latest

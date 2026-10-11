@@ -163,7 +163,7 @@ Illustrative v1 key space:
 | --- | --- | --- |
 | `repo\0<repo>` | repository created at runtime | `internal/repo` |
 | `oci\0blob\0<repo>\0<name>\0<digest>` | blob link (blob size) | `internal/oci` |
-| `oci\0manifest\0<repo>\0<name>\0<digest>` | manifest record (media type, size, artifact type, subject, annotations, referenced digests) | `internal/oci` |
+| `oci\0manifest\0<repo>\0<name>\0<digest>` | manifest record (media type, size, artifact type, subject, annotations, referenced digests, push time) | `internal/oci` |
 | `oci\0tag\0<repo>\0<name>\0<tag>` | manifest digest | `internal/oci` |
 | `oci\0referrer\0<repo>\0<name>\0<subject>\0<digest>` | referrers index entry: manifest `<digest>` has subject `<subject>` | `internal/oci` |
 | `oci\0upload\0<id>` | upload session (repository name, start time) | `internal/oci` |
@@ -519,6 +519,7 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - The referrers API, including the `subject` field on pushed manifests.
 - Docker image manifest v2 schema 2 and manifest lists; OCI image manifests and indexes; multi-arch images.
 - Arbitrary OCI artifacts, such as Helm charts and signatures, by media type.
+- A classic Helm chart repository view (`index.yaml` and chart archives) at `/helm/<repo>/` over the charts pushed with `helm push` to a hosted repository with `helmIndex`. Nothing is stored for it: the index is derived from the tags and manifest records, written as JSON (which Helm reads as JSON or, before 3.17, as YAML, so flint needs no YAML code), and cached in memory until a tag in the view changes.
 - Not supported: Docker schema 1.
 
 ### PyPI

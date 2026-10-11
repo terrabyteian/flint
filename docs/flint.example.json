@@ -21,7 +21,8 @@
       "format": "oci",
       "type": "hosted",
       "immutableTags": true,
-      "anonymousPull": true
+      "anonymousPull": true,
+      "helmIndex": true
     },
     {
       "name": "dockerhub",

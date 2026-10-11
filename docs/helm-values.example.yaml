@@ -18,6 +18,9 @@ config:
       type: hosted
       immutableTags: true
       anonymousPull: true
+      # Also a classic Helm chart repository at /helm/releases/
+      # (docs/helm-repository.md).
+      helmIndex: true
     # A Docker Hub mirror, also usable as a containerd registry mirror
     # (docs/containerd.md).
     - name: dockerhub

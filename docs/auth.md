@@ -97,6 +97,12 @@ docker login registry.example -u ci-bot              # password or API token
 echo "$TOKEN" | crane auth login registry.example -u ci-bot --password-stdin
 ```
 
+## Helm chart repositories
+
+The [classic Helm chart repository view](helm-repository.md) at `/helm/<repository>/` takes HTTP basic credentials, a password or an API token, as `helm repo add --username --password` sends them; tokens from the Docker token endpoint are not accepted.
+Reading it needs the `read` role, like a pull, or the repository's `anonymousPull`.
+Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`; without permission it is `403`.
+
 ## Admin API
 
 The admin API serves JSON under `/api/v1/`.
