@@ -381,8 +381,6 @@ func TestProver(t *testing.T) {
 	if _, err := NewProver(ctx, fork.tree(1000), l.reader(&reads, false)); !errors.Is(err, ErrBadNote) {
 		t.Errorf("tiles of another tree: %v", err)
 	}
-	// A full tile that does not match the tile above it is refused,
-	// even if its reader skipped the check.
 	p, err = NewProver(ctx, l.tree(n), l.reader(&reads, false))
 	if err != nil {
 		t.Fatal(err)
@@ -420,6 +418,8 @@ func TestProver(t *testing.T) {
 		})
 	}
 	wg.Wait()
+	// A full tile that does not match the tile above it is refused,
+	// even if its reader skipped the check.
 	p, err = NewProver(ctx, l.tree(n), l.reader(&reads, false))
 	if err != nil {
 		t.Fatal(err)
