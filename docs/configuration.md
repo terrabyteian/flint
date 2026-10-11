@@ -118,6 +118,8 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `auth.bootstrapAdmin` | object | none | Create the first administrator at startup if none exists; see below. |
 | `backup.directory` | string | none | Absolute path of the [backup](backup.md) directory, outside the data directory and not containing it. Without it, backups are disabled. |
 | `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
+| `gc.gracePeriod` | duration string | `"24h"` | How long [garbage collection](#garbage-collection) keeps a blob that nothing references after the blob was stored. At least `"1h"`. |
+| `gc.interval` | duration string | none | Run garbage collection on a schedule, this long after the previous run started. Without it, garbage collection runs only when an administrator starts it. |
 
 Durations are Go duration strings: a number and a unit, such as `"30s"`, `"2m"`, or `"1m30s"`.
 Sizes are a number of bytes, or a number and a unit: `kB`, `MB`, `GB`, `TB`, and `PB` count in powers of 1000, and `KiB`, `MiB`, `GiB`, `TiB`, and `PiB` in powers of 1024, with or without the final `B` (`Gi`), such as `"500MiB"` or `"1.5TB"`.
@@ -186,6 +188,14 @@ A user's role on a repository is the highest one any matching grant gives; [auth
 | `passwordFile` | string | required | File holding the administrator's password, such as a mounted Kubernetes Secret. One trailing newline is ignored. |
 
 The file is read only while no administrator exists, so it can be removed after the first start, and changing it later does not reset the password.
+
+### Garbage collection
+
+Deleting an image or a blob hides it at once; garbage collection later deletes the blobs nothing references any more.
+Administrators run it with `flint gc` or the admin API, and `gc.interval` runs it on a schedule.
+The scheduled time counts from the start of the previous run, which survives restarts, so a server restarted more often than the interval still collects; a scheduled run never starts within a minute of startup.
+The grace period protects content a push stored a moment ago; it cannot be set below an hour.
+[Garbage collection](garbage-collection.md) describes what is reclaimed, how to run it, and how to monitor it.
 
 ## Endpoints
 
@@ -268,6 +278,8 @@ Besides the HTTP, metadata store, Go runtime, and [backup](backup.md#metrics) me
 | `flint_data_free_bytes` | Free bytes on the data directory's filesystem, as last measured. |
 | `flint_proxy_cached_bytes{repository}` | Bytes cached by proxy repositories with a size limit. |
 | `flint_proxy_evictions_total{repository}` | Items evicted to keep proxy repositories within their size limits. |
+
+Garbage collection exports `flint_gc_runs_total{mode,result}`, `flint_gc_duration_seconds{mode}`, `flint_gc_reclaimed_blobs_total`, `flint_gc_reclaimed_bytes_total`, `flint_gc_last_success_timestamp_seconds`, and `flint_gc_running`; [garbage collection](garbage-collection.md#monitoring) describes them.
 
 The disk-pressure gauge is the alert for a nearly full disk, for example as a Prometheus alerting rule:
 

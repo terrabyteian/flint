@@ -170,8 +170,9 @@ Illustrative v1 key space:
 | `oci\0pulled\0blob\0<repo>\0<name>\0<digest>` | last pull of a blob cached by a size-limited proxy repository | `internal/oci` |
 | `oci\0pulled\0manifest\0<repo>\0<name>\0<digest>` | last pull of a manifest cached by a size-limited proxy repository | `internal/oci` |
 | `pypi\0file\0<repo>\0<filename>` | file record, kept as a tombstone after delete | `internal/pypi` |
-| `gc\0epoch` | GC epoch counter, incremented when a sweep starts | `internal/gc` |
-| `gc\0doomed\0<digest>` | doomed set of the running sweep; cleared when the sweep ends | `internal/gc` |
+| `gc\0epoch` | GC epoch counter, incremented by each sweep round's start batch | `internal/gc` |
+| `gc\0doomed\0<digest>` | doomed set of the sweep round in progress; cleared when the round ends, and at startup | `internal/gc` |
+| `gc\0last` | report of the last garbage-collection run that was not a dry run | `internal/gc` |
 | `auth\0user\0<username>` | user record | `internal/auth` |
 | `auth\0token\0<token-id>` | token record with hashed secret | `internal/auth` |
 | `auth\0usertoken\0<username>\0<token-id>` | empty; indexes a user's tokens | `internal/auth` |
@@ -435,6 +436,29 @@ Deletes ask for `delete`, which only admins hold.
 A cross-repository mount asks, with a response writer it discards, whether the caller may pull from the source; if not, it falls back to a normal upload.
 `oci.Options.Actor` names the principal recorded in batch origins for the audit log.
 
+## Interfaces for the M4 garbage collector
+
+Every package that writes metadata tells the garbage collector what its records reference, and every batch that makes a blob visible carries the collector's precondition:
+
+```go
+// MarkFunc returns the digests of the blobs a metadata record references.
+// An error means the record cannot be read.
+type MarkFunc func(key, value []byte) ([]blob.Digest, error)
+
+// Marker maps every metadata key prefix a package owns to the function
+// that reads its records, or nil if they reference no blobs.
+type Marker map[string]MarkFunc
+
+// Guard reads the GC epoch and the digests' doomed entries from v, fails
+// with ErrDoomed if one is doomed, and makes b require the epoch unchanged.
+func Guard(v meta.View, b *meta.Batch, ds ...blob.Digest) error
+```
+
+- **Registration.** `flint serve` gives the collector the `Marker` of every package that writes metadata (`oci.GCMarker`, `auth.GCMarker`; PyPI and later formats add theirs). No prefix may start with another. The collector knows no format's encodings: it only calls the functions.
+- **Unknown records stop deletion.** Marking scans the keys under the registered prefixes, and also the keys between them. A live key under no registered prefix, or a record its function cannot read, makes the run refuse to delete anything and report the key family (the key up to its second separator, such as `pypi\0file\0`), so a format that forgot to register can never lose data.
+- **Proof in tests.** A format's tests write every kind of record the format can, then call `gctest.CheckMarked` or `gctest.CheckStored`, which fail on any key or record the format's marker does not cover.
+- **Links.** A batch that makes a blob visible calls `Guard` with a view it read before its blob-existence check, and fails with a retryable error on `ErrDoomed`. A record that references a blob without linking it, such as a manifest listing its layers, instead requires, at the version it read, a record that references the blob and was written under the same rules, such as the layer's link.
+
 ## Package layout
 
 Packages are created when there is code for them; this is the target layout, not a list of placeholders.
@@ -554,7 +578,16 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 
 ## Cleanup and data safety
 
-- **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping removes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads. The sweep uses a GC epoch counter (`gc\0epoch`): its start batch bumps the epoch and records the doomed set (`gc\0doomed\0<digest>`), and its end batch clears the doomed set. Every link batch, from an upload or a mount, reads the epoch and the digest's doomed entry from the same view, commits with a `Require` on that epoch, and fails with a retryable error if the digest is doomed in that view or the precondition fails; a mount then falls back to a normal upload. Two guarantees make a concurrent link and sweep unable to both succeed: the sweep deletes only doomed blobs that are unreferenced in a view taken after its start batch and in every view pinned with the garbage collector (such as a running backup's), and a link reads the epoch and the doomed entry from one view before its blob-existence check (`Upload.Commit` or the mount's source check), so a sweep that starts after that read makes its precondition fail and a sweep already running is caught by the doomed entry in that view. The garbage-collection task defines and tests the algorithms that meet these guarantees.
+- **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping removes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads. The sweep uses a GC epoch counter (`gc\0epoch`): its start batch bumps the epoch and records the doomed set (`gc\0doomed\0<digest>`), and its end batch clears the doomed set. Every link batch, from an upload or a mount, reads the epoch and the digest's doomed entry from the same view, commits with a `Require` on that epoch, and fails with a retryable error if the digest is doomed in that view or the precondition fails; a mount then falls back to a normal upload. Two guarantees make a concurrent link and sweep unable to both succeed: the sweep deletes only doomed blobs that are unreferenced in a view taken after its start batch and in every view pinned with the garbage collector (such as a running backup's), and a link reads the epoch and the doomed entry from one view before its blob-existence check (`Upload.Commit` or the mount's source check), so a sweep that starts after that read makes its precondition fail and a sweep already running is caught by the doomed entry in that view. The `internal/gc` package documentation describes the algorithm that meets these guarantees, and its tests, including crash tests and deterministic interleavings of links with sweeps, prove them.
+- **Garbage-collection decisions.**
+  - The grace period is 24 hours by default, configurable, and never below one hour; it counts from the blob's commit time.
+  - A blob is referenced while any record a `Marker` reads names it: in OCI, a blob link, a manifest record (its own bytes, config, layers, and child manifests), a tag, or a referrers entry (not its subject). A blob link is a reference, so a manifest delete reclaims the manifest's bytes, and its layers' bytes once their links are deleted too.
+  - A sweep runs in rounds of at most 50,000 doomed blobs. A round writes its doomed set in batches, the last of which increments the epoch and is the round's start batch; it then takes a view and only after that reads the pinned views, so a view pinned meanwhile follows that view and holds no reference to a doomed blob that view lacks.
+  - A doomed set left by a crash is cleared at startup and before every run, without deleting more; the next run starts over.
+  - One run at a time, started through the admin API (`flint gc`) or by `gc.interval`, which counts from the start of the previous run; the last run's report is kept in the metadata, so the schedule survives restarts. A dry run writes and deletes nothing and reports what it would delete.
+  - Every deleted blob is logged. A run that cannot finish clears its doomed set and reports what it deleted.
+  - A proxy pull that finds the stored copy of a blob doomed serves it without linking it, and fetches it again next time; a mount falls back to an upload, and other links fail with `503` and `Retry-After`.
+  - Abandoned upload sessions and staged upload data are removed by the upload expiry, 24 hours after the session started or the data was last written, not by garbage collection.
 - **Deletes** hide immediately in metadata; garbage collection reclaims space later.
 - **Retention policies** (for example, keep the last N tags matching a pattern, or delete untagged manifests older than X) are designed now and built shortly after v1. They are the only mechanism that deletes untagged manifests in hosted repositories.
 - **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup takes and pins its metadata view with the garbage collector in one step and holds it until it finishes copying, so the sweep's deletion check covers it and every blob its snapshot references is still present when it is copied. [backup.md](backup.md) is the operator's guide; the decisions behind it:

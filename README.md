@@ -3,7 +3,7 @@
 flint is a self-hosted artifact registry, built from scratch.
 It serves container images and OCI artifacts, and Python packages, from hosted repositories and caching proxies of upstream registries such as Docker Hub, ghcr.io, and PyPI.
 
-> **Status: pre-alpha.** `flint serve` serves hosted OCI repositories (the OCI Distribution Spec v1.1, checked against the official conformance suite), caching proxies of upstream registries such as Docker Hub and ghcr.io that also work as [containerd mirrors](docs/containerd.md), local users and API tokens, the Docker token service, an [admin API](docs/auth.md), and incremental [backups](docs/backup.md) with restore.
+> **Status: pre-alpha.** `flint serve` serves hosted OCI repositories (the OCI Distribution Spec v1.1, checked against the official conformance suite), caching proxies of upstream registries such as Docker Hub and ghcr.io that also work as [containerd mirrors](docs/containerd.md), local users and API tokens, the Docker token service, an [admin API](docs/auth.md), incremental [backups](docs/backup.md) with restore, and online [garbage collection](docs/garbage-collection.md).
 > See the [roadmap](docs/design.md#roadmap) for what comes next.
 
 ## Goals

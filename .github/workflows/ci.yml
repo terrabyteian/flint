@@ -194,6 +194,10 @@ jobs:
         env:
           E2E_USERNAME: ci-bot
         run: E2E_PASSWORD="$E2E_TOKEN" scripts/e2e-oci.sh 127.0.0.1:5000 e2e
+      - name: Garbage collection
+        env:
+          FLINT_USER: admin
+        run: FLINT_PASSWORD="$ADMIN_PASSWORD" scripts/e2e-gc.sh "$RUNNER_TEMP/flint" "$RUNNER_TEMP/flint-data" 127.0.0.1:5000 e2e
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"

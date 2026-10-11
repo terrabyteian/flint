@@ -33,6 +33,9 @@ config:
         url: https://ghcr.io
   proxyCache:
     minFreeSpace: 20GiB
+  gc:
+    gracePeriod: 48h
+    interval: 24h
   auth:
     permissions:
       - repositories: ["docker-local", "releases"]

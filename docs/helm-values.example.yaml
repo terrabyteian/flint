@@ -31,6 +31,10 @@ config:
       - repositories: ["docker-local", "releases"]
         role: write
         groups: ["ci"]
+  # Delete the blobs nothing references any more once a day
+  # (docs/garbage-collection.md).
+  gc:
+    interval: 24h
 
 # The first administrator's password, from a Secret created beforehand:
 #   kubectl create secret generic flint-admin --namespace flint \
