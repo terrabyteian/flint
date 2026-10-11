@@ -2,7 +2,9 @@ package cargo
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"slices"
@@ -329,4 +331,26 @@ func TestBlobsOnce(t *testing.T) {
 	if _, err := e.blobs.Stat(t.Context(), d); err != nil {
 		t.Errorf("the .crate file is not in the blob store under its sha256: %v", err)
 	}
+}
+
+// failingStore is a blob store whose uploads fail to write.
+type failingStore struct{ blob.Store }
+
+func (s failingStore) NewUpload(ctx context.Context) (blob.Upload, error) {
+	u, err := s.Store.NewUpload(ctx)
+	return failingUpload{u}, err
+}
+
+type failingUpload struct{ blob.Upload }
+
+func (failingUpload) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+func TestPublishStoreFailure(t *testing.T) {
+	e := newEnv(t)
+	e.h.blobs = failingStore{e.blobs}
+	w := e.publish("local", newCrate("foo", "1.0.0"))
+	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "invalid .crate file") {
+		t.Errorf("publish with a failing blob store: %d %s, want 500", w.Code, w.Body)
+	}
+	e.get("/cargo/local/"+indexPath("foo"), http.StatusNotFound)
 }

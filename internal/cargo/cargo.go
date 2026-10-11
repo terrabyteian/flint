@@ -97,7 +97,7 @@ type Options struct {
 	// Fetcher, Docs, and Paths are the proxy cache shared with other
 	// formats: the fetcher, the document cache, which keeps index files,
 	// and the path-cache engine, which keeps .crate files. Nil means new
-	// ones of the handler's own, which RunProxy maintains.
+	// ones of the handler's own.
 	Fetcher *upstream.Fetcher
 	Docs    *upstream.DocCache
 	Paths   *upstream.PathCache
@@ -147,15 +147,14 @@ type Handler struct {
 	publishBytes *metrics.Counter
 
 	// Proxy repositories.
-	hasProxy  bool
-	space     *upstream.Space
-	fetcher   *upstream.Fetcher
-	pm        *upstream.Metrics
-	docs      *upstream.DocCache
-	paths     *upstream.PathCache
-	ownCaches bool // docs and paths are this handler's own, which it runs
-	indexes   indexCache
-	configs   configCache
+	hasProxy bool
+	space    *upstream.Space
+	fetcher  *upstream.Fetcher
+	pm       *upstream.Metrics
+	docs     *upstream.DocCache
+	paths    *upstream.PathCache
+	indexes  indexCache
+	configs  configCache
 }
 
 // New returns a Handler.
@@ -263,12 +262,10 @@ func New(opts Options) (*Handler, error) {
 	if h.docs == nil {
 		h.docs = upstream.NewDocCache(upstream.DocCacheOptions{Meta: h.meta, Blobs: h.blobs, Space: h.space,
 			Metrics: h.pm, Logger: h.log, Now: h.now})
-		h.ownCaches = true
 	}
 	if h.paths == nil {
 		h.paths = upstream.NewPathCache(upstream.PathCacheOptions{Meta: h.meta, Blobs: h.blobs, Fetcher: h.fetcher,
 			Docs: h.docs, Space: h.space, Metrics: h.pm, Logger: h.log, Now: h.now})
-		h.ownCaches = true
 	}
 	for _, r := range h.repos {
 		if r.proxy == nil {
@@ -289,25 +286,6 @@ func New(opts Options) (*Handler, error) {
 func (h *Handler) Register(s interface{ Handle(string, http.Handler) }) {
 	s.Handle(repo.Prefix(config.FormatCargo), h)
 	h.registerAdmin(s)
-}
-
-// RunProxy runs the proxy repositories' background work until ctx is
-// done, if the handler has caches of its own: it persists last-pull
-// times, evicts .crate files over size limits, and forgets stale
-// confirmations and not-found answers. Shared caches are run by their
-// owner.
-func (h *Handler) RunProxy(ctx context.Context) {
-	if !h.hasProxy || !h.ownCaches {
-		return
-	}
-	var window time.Duration
-	for _, rp := range h.repos {
-		if rp.proxy != nil {
-			window = max(window, rp.proxy.revalidate)
-		}
-	}
-	go h.docs.Run(ctx, window)
-	h.paths.Run(ctx)
 }
 
 // FlushPullTimes persists the last-pull times recorded since the last

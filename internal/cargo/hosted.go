@@ -158,6 +158,21 @@ func (b *bodyReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// uploadWriter writes to an upload and remembers why a write failed, so a
+// failure to store the .crate file is told apart from invalid content.
+type uploadWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (u *uploadWriter) Write(p []byte) (int, error) {
+	n, err := u.w.Write(p)
+	if err != nil && u.err == nil {
+		u.err = err
+	}
+	return n, err
+}
+
 // readLength reads a 32-bit little-endian length.
 func readLength(r io.Reader, what string) (int64, error) {
 	var b [4]byte
@@ -213,7 +228,8 @@ func (h *Handler) publish(r *http.Request, rp *repository, via *repo.Virtual) er
 	}
 	defer up.Cancel() // a no-op once committed
 	start := body.n
-	crate := io.TeeReader(io.LimitReader(body, size), up)
+	uw := &uploadWriter{w: up}
+	crate := io.TeeReader(io.LimitReader(body, size), uw)
 	cerr := checkCrate(crate, m.Name+"-"+m.Vers+"/")
 	if _, err := io.Copy(io.Discard, crate); err != nil && cerr == nil {
 		cerr = err
@@ -224,6 +240,8 @@ func (h *Handler) publish(r *http.Request, rp *repository, via *repo.Virtual) er
 			return ctx.Err()
 		}
 		return errorf(http.StatusBadRequest, "reading the .crate file: %v", body.err)
+	case uw.err != nil:
+		return fmt.Errorf("storing the .crate file: %w", uw.err)
 	case body.n-start != size:
 		return errorf(http.StatusBadRequest, "the publish request ends inside its .crate file")
 	case cerr != nil:
