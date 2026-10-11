@@ -179,6 +179,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Blobs:        blobs,
 		Repositories: cfg.Repositories,
 		Authorizer:   authz,
+		Actor:        authz.Actor,
 		Logger:       logger,
 		Metrics:      reg,
 	})

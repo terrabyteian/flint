@@ -142,7 +142,7 @@ spec:
             optional: true
             defaultMode: 288 # 0440
             items:
-              - key: {{ .Values.bootstrapAdmin.secretKey }}
+              - key: password
                 path: password
         {{- end }}
       {{- with .Values.nodeSelector }}

@@ -454,6 +454,8 @@ func (s *Service) permits(c credentials, repo string, actions []string) bool {
 // With repo empty and no actions, it checks only that the request carries
 // valid credentials, a bearer token from the token service included, as
 // the registry's base endpoint needs for "docker login".
+//
+// When it returns true, it records the principal in r's context for Actor.
 func (s *Service) Authorize(w http.ResponseWriter, r *http.Request, repo string, actions ...string) bool {
 	c, err := s.authenticate(r, true)
 	switch {
@@ -481,7 +483,21 @@ func (s *Service) Authorize(w http.ResponseWriter, r *http.Request, repo string,
 		return false
 	}
 	logPrincipal(r.Context(), c.principal)
+	*r = *r.WithContext(context.WithValue(r.Context(), principalKey{}, c.principal))
 	return true
+}
+
+type principalKey struct{}
+
+// Actor names the principal Authorize admitted r as, for the origin of the
+// metadata batches the request writes: the user, the user and API token,
+// or "anonymous".
+func (s *Service) Actor(r *http.Request) string {
+	p, _ := r.Context().Value(principalKey{}).(*Principal)
+	if p == nil || p.User == "" {
+		return "anonymous"
+	}
+	return actorOf(p)
 }
 
 // Allowed reports whether the request's credentials permit every action

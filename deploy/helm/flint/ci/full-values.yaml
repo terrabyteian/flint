@@ -26,7 +26,6 @@ bootstrapAdmin:
   enabled: true
   username: root
   existingSecret: flint-admin
-  secretKey: admin-password
 containerPort: 8443
 service:
   type: LoadBalancer

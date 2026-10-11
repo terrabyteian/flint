@@ -5,9 +5,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/terrabyteian/flint/internal/meta"
 )
 
 // apiCall makes an admin API request with basic credentials and decodes a
@@ -136,6 +141,19 @@ func TestAuthEndToEnd(t *testing.T) {
 	}
 	kid := tokenKid(t, jwt)
 
+	blob := []byte("pushed with an API token\n")
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(blob))
+	req, _ := http.NewRequest("POST", base+"/v2/docker-local/e2e/blobs/uploads/?digest="+digest, bytes.NewReader(blob))
+	req.SetBasicAuth("ci-bot", tok.Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("blob push with an API token: %d", resp.StatusCode)
+	}
+
 	t.Run("registry client", func(t *testing.T) {
 		registryClient(t, p.addr, "ci-bot", tok.Token)
 	})
@@ -154,6 +172,23 @@ func TestAuthEndToEnd(t *testing.T) {
 		if strings.Contains(out, secret) {
 			t.Errorf("the log contains a secret %q", secret)
 		}
+	}
+
+	// The push's batch origin names the token, not the client address.
+	store, err := meta.Open(filepath.Join(dataDir, "meta"), meta.Options{Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actor string
+	store.ReadLog(context.Background(), 0, func(en meta.Entry) error {
+		if en.Origin.Action == "oci.blob.push" && en.Origin.Target == "docker-local/e2e@"+digest {
+			actor = en.Origin.Actor
+		}
+		return nil
+	})
+	store.Close()
+	if want := "ci-bot (token " + tok.ID + ")"; actor != want {
+		t.Errorf("blob push origin actor = %q, want %q", actor, want)
 	}
 
 	// After a restart, the bootstrap is skipped even without its password

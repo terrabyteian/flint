@@ -96,7 +96,7 @@ To terminate TLS in a proxy instead, leave `tls.enabled` off and list the proxy'
 ### First administrator
 
 flint creates its first administrator at startup from a password file, while no administrator exists ([authentication](auth.md#users-and-the-first-administrator)).
-The chart mounts that file from a Secret you create:
+The chart mounts that file from the key `password` of a Secret you create:
 
 ```sh
 kubectl create secret generic flint-admin --namespace flint \
@@ -108,7 +108,6 @@ bootstrapAdmin:
   enabled: true
   username: admin             # the default
   existingSecret: flint-admin
-  secretKey: password         # the default
 ```
 
 The chart sets `config.auth.bootstrapAdmin` itself and refuses to render if you set it.
