@@ -339,18 +339,39 @@ func (c *Client) Request(ctx context.Context, method, rawURL string, header http
 	return c.do(ctx, method, u, header, "")
 }
 
-// Allowed reports whether the client's Policy allows fetching rawURL.
-func (c *Client) Allowed(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	return err == nil && c.pol.check(u) == nil
+// idleWatch is a timer that gives up on a request when the upstream is
+// silent for d.
+type idleWatch struct {
+	t *time.Timer
+	d time.Duration
+}
+
+type watchdogKey struct{}
+
+// withWatchdog returns ctx carrying the watchdog t, armed for d: a
+// Client stops it while a request waits for a concurrency slot, which is
+// not the upstream's silence, and arms it again once a slot is free.
+func withWatchdog(ctx context.Context, t *time.Timer, d time.Duration) context.Context {
+	return context.WithValue(ctx, watchdogKey{}, &idleWatch{t, d})
 }
 
 // acquire waits for a request slot and returns its release.
 func (c *Client) acquire(ctx context.Context, op string) (func(), error) {
 	select {
 	case c.slots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, &Error{Op: op, Err: fmt.Errorf("waiting for one of the %d concurrent upstream requests allowed: %w", cap(c.slots), ctx.Err())}
+	default:
+		wd, _ := ctx.Value(watchdogKey{}).(*idleWatch)
+		if wd != nil && !wd.t.Stop() {
+			wd = nil // it fired already
+		}
+		select {
+		case c.slots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, &Error{Op: op, Err: fmt.Errorf("waiting for one of the %d concurrent upstream requests allowed: %w", cap(c.slots), ctx.Err())}
+		}
+		if wd != nil {
+			wd.t.Reset(wd.d)
+		}
 	}
 	var once sync.Once
 	return func() { once.Do(func() { <-c.slots }) }, nil

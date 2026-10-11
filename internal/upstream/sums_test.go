@@ -89,6 +89,7 @@ func TestParseIntegrity(t *testing.T) {
 	data := []byte("tarball")
 	s512 := sha512.Sum512(data)
 	s1 := sha1.Sum(data)
+	s256 := sha256.Sum256(data)
 	b64 := base64.StdEncoding.EncodeToString
 	for _, tc := range []struct {
 		in   string
@@ -98,6 +99,11 @@ func TestParseIntegrity(t *testing.T) {
 		{"sha512-" + b64(s512[:]), upstream.SHA512, s512[:]},
 		{"sha1-" + b64(s1[:]) + " sha512-" + b64(s512[:]), upstream.SHA512, s512[:]},
 		{"sha1-" + b64(s1[:]), upstream.SHA1, s1[:]},
+		// sha256 is the blob store's digest, not an Expect.Sums algorithm.
+		{"sha256-" + b64(s256[:]), "", nil},
+		{"sha256-" + b64(s256[:]) + " sha1-" + b64(s1[:]), upstream.SHA1, s1[:]},
+		{"sha1-" + b64(s1[:]) + " sha256-" + b64(s256[:]), upstream.SHA1, s1[:]},
+		{"sha512-" + b64(s512[:]) + " sha1-" + b64(s1[:]), upstream.SHA512, s512[:]},
 		{"sha512-" + b64(s512[:]) + "?opt", upstream.SHA512, s512[:]},
 		{"sha512-short", "", nil},
 		{"md5-" + b64(s1[:]), "", nil},

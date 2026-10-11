@@ -18,11 +18,12 @@ const maxLinkAttempts = 4
 // collection or other writers; the client should retry.
 var ErrBusy = errors.New("upstream: the cache is busy with this content; retry the request")
 
-// commitLink commits a batch that links the blobs ds, under the
+// CommitLink commits a batch that links the blobs ds, under the
 // garbage-collection precondition: the batch build fills is committed
 // only if no sweep started since the blobs were found in the store, and
-// retried when a precondition fails.
-func commitLink(ctx context.Context, store meta.Store, blobs blob.Store, ds []blob.Digest, build func(v meta.View, b *meta.Batch)) error {
+// retried when a precondition fails. It fails with ErrBusy when the
+// batch keeps losing races or a blob was swept meanwhile.
+func CommitLink(ctx context.Context, store meta.Store, blobs blob.Store, ds []blob.Digest, build func(v meta.View, b *meta.Batch)) error {
 	for attempt := 0; ; attempt++ {
 		v := store.View()
 		var b meta.Batch

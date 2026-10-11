@@ -186,8 +186,6 @@ func ParseIntegrity(s string) (alg string, sum []byte, ok bool) {
 			return SHA512, raw, true
 		case a == SHA1 && len(raw) == sha1.Size && alg == "":
 			alg, sum = SHA1, raw
-		case a == "sha256" && len(raw) == sha256.Size && alg == "":
-			alg, sum = "sha256", raw
 		}
 	}
 	return alg, sum, alg != ""

@@ -14,29 +14,32 @@ import (
 func TestNegativeCache(t *testing.T) {
 	clock := &fakeClock{t: time.Unix(1700000000, 0)}
 	n := upstream.NewNegativeCache(clock.Now)
-	n.Remember("r\x00a", time.Minute)
-	n.Remember("r\x00off", 0) // a zero window remembers nothing
-	if !n.Known("r\x00a") || n.Known("r\x00b") || n.Known("r\x00off") {
+	known := func(k string) bool { ok, _ := n.Known(k); return ok }
+	n.Remember("r\x00a", false, time.Minute)
+	n.Remember("r\x00gone", true, time.Minute)
+	n.Remember("r\x00off", false, 0) // a zero window remembers nothing
+	if !known("r\x00a") || known("r\x00b") || known("r\x00off") {
 		t.Fatal("Known after Remember")
 	}
+	if _, gone := n.Known("r\x00a"); gone {
+		t.Error("a 404 remembered as gone")
+	}
+	if ok, gone := n.Known("r\x00gone"); !ok || !gone {
+		t.Error("a 410 not remembered as gone")
+	}
 	clock.Add(59 * time.Second)
-	if !n.Known("r\x00a") {
+	if !known("r\x00a") {
 		t.Error("forgotten within the window")
 	}
 	clock.Add(time.Second)
-	if n.Known("r\x00a") {
+	if known("r\x00a") {
 		t.Error("remembered after the window")
 	}
-	n.Remember("r\x00a", time.Minute)
-	n.Forget("r\x00a")
-	if n.Known("r\x00a") {
-		t.Error("remembered after Forget")
-	}
-	n.Remember("r\x00x", time.Minute)
-	n.Remember("r\x00y", time.Hour)
+	n.Remember("r\x00x", false, time.Minute)
+	n.Remember("r\x00y", false, time.Hour)
 	clock.Add(2 * time.Minute)
 	n.Prune()
-	if n.Len() != 1 || !n.Known("r\x00y") {
+	if n.Len() != 1 || !known("r\x00y") {
 		t.Errorf("after Prune: %d entries", n.Len())
 	}
 }

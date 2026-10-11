@@ -278,6 +278,15 @@ func TestPathCacheNegative(t *testing.T) {
 	e.want("/remote/gone.zip", http.StatusNotFound, "")
 	e.clock.Add(upstream.DefaultNotFoundTTL)
 	e.want("/remote/gone.zip?keepgone", http.StatusGone, "")
+	// A remembered 410 is still one.
+	e.want("/remote/gone.zip?keepgone", http.StatusGone, "")
+	e.want("/remote/gone.zip", http.StatusNotFound, "")
+	e.files.set(func(u *fileUpstream) { u.gone["/gone.xml"] = true })
+	e.want("/remote/gone.xml?keepgone", http.StatusGone, "")
+	e.want("/remote/gone.xml?keepgone", http.StatusGone, "")
+	if got := e.files.took(); len(got) != 3 {
+		t.Errorf("requests: %q, want the file twice and the document once", got)
+	}
 }
 
 func TestPathCacheMutable(t *testing.T) {

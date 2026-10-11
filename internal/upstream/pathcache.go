@@ -237,6 +237,24 @@ func (rp *PathRepo) notFoundTTL() time.Duration {
 
 func negKey(rp *PathRepo, path string) string { return rp.Name + "\x00" + path }
 
+// remember remembers the upstream's not-found answer err about rt.
+func (pc *PathCache) remember(rp *PathRepo, rt *Route, err error) {
+	pc.neg.Remember(negKey(rp, rt.Path), errors.Is(err, ErrGone), rp.notFoundTTL())
+}
+
+// remembered returns the not-found answer the upstream recently gave
+// about rt, or nil.
+func (pc *PathCache) remembered(rp *PathRepo, rt *Route) error {
+	known, gone := pc.neg.Known(negKey(rp, rt.Path))
+	switch {
+	case !known:
+		return nil
+	case gone:
+		return &Error{Op: "GET " + rt.URL, Status: http.StatusGone, Err: ErrGone}
+	}
+	return &Error{Op: "GET " + rt.URL, Status: http.StatusNotFound, Err: ErrNotFound}
+}
+
 // serveImmutable serves immutable content: from the cache, or else
 // fetched, verified, and cached while it streams to the client.
 func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *PathRepo, rt *Route, actor string) {
@@ -259,8 +277,8 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 		}
 		// Linked but missing from the store: fetch it again.
 	}
-	if pc.neg.Known(negKey(rp, rt.Path)) {
-		pc.fail(w, r, rp, rt, &Error{Op: "GET " + rt.URL, Status: http.StatusNotFound, Err: ErrNotFound})
+	if err := pc.remembered(rp, rt); err != nil {
+		pc.fail(w, r, rp, rt, err)
 		return
 	}
 	if r.Method == http.MethodHead {
@@ -307,7 +325,7 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 			ct = orOctetStream(res.ContentType)
 		}
 		rec := &FileRecord{Digest: res.Info.Digest, Size: res.Info.Size, ContentType: ct, Sums: res.Sums, Fetched: pc.now().UTC()}
-		err = commitLink(ctx, pc.meta, pc.blobs, []blob.Digest{rec.Digest}, func(_ meta.View, b *meta.Batch) {
+		err = CommitLink(ctx, pc.meta, pc.blobs, []blob.Digest{rec.Digest}, func(_ meta.View, b *meta.Batch) {
 			b.Put(k, rec.encode())
 			b.SetOrigin(meta.Origin{Actor: actor, Action: rp.Format + ".proxy.cache", Target: rp.Name + "/" + rt.Path})
 		})
@@ -364,7 +382,7 @@ func (pc *PathCache) fetchFailed(rp *PathRepo, rt *Route, err error) {
 	switch {
 	case errors.Is(err, errPassThrough):
 	case errors.Is(err, ErrNotFound):
-		pc.neg.Remember(negKey(rp, rt.Path), rp.notFoundTTL())
+		pc.remember(rp, rt, err)
 	default:
 		if errors.Is(err, ErrUnavailable) {
 			rp.Client.MarkOffline()
@@ -419,7 +437,7 @@ func (pc *PathCache) head(w http.ResponseWriter, r *http.Request, rp *PathRepo, 
 	}
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			pc.neg.Remember(negKey(rp, rt.Path), rp.notFoundTTL())
+			pc.remember(rp, rt, err)
 		}
 		pc.fail(w, r, rp, rt, err)
 		return
@@ -454,7 +472,7 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 	}
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			pc.neg.Remember(negKey(rp, rt.Path), rp.notFoundTTL())
+			pc.remember(rp, rt, err)
 		} else if !errors.Is(err, context.Canceled) {
 			pc.m.UpstreamErrors.With(rp.Name).Inc()
 		}
@@ -524,15 +542,15 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 // serveMutable serves a document through the DocCache.
 func (pc *PathCache) serveMutable(w http.ResponseWriter, r *http.Request, rp *PathRepo, rt *Route, actor string) {
 	ctx := r.Context()
-	if pc.neg.Known(negKey(rp, rt.Path)) {
-		pc.fail(w, r, rp, rt, &Error{Op: "GET " + rt.URL, Status: http.StatusNotFound, Err: ErrNotFound})
+	if err := pc.remembered(rp, rt); err != nil {
+		pc.fail(w, r, rp, rt, err)
 		return
 	}
 	doc, err := pc.docs.Get(ctx, &DocRequest{Repo: rp.Name, Key: rt.Path, Client: rp.Client, URL: rt.URL, Header: rt.Header,
 		Revalidate: rp.Revalidate, MaxSize: rt.MaxSize, Actor: actor, Action: rp.Format + ".proxy.cache"})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			pc.neg.Remember(negKey(rp, rt.Path), rp.notFoundTTL())
+			pc.remember(rp, rt, err)
 		}
 		pc.fail(w, r, rp, rt, err)
 		return
@@ -671,19 +689,10 @@ func StatusOf(err error, host string) (int, string) {
 
 // Run does the repositories' background work until ctx is done: it
 // persists the last-pull times of size-limited repositories, evicts
-// files over their limits, and forgets expired confirmations and
-// not-found answers.
+// files over their limits, and forgets expired not-found answers. The
+// shared DocCache's confirmations are pruned by its own Run.
 func (pc *PathCache) Run(ctx context.Context) {
-	var window time.Duration
-	pc.mu.Lock()
-	for _, rp := range pc.repos {
-		window = max(window, rp.Revalidate)
-	}
-	pc.mu.Unlock()
-	pc.limits.Run(ctx, func(msg string, err error) { pc.log.Warn(msg, "err", err) }, func() {
-		pc.docs.Prune(window)
-		pc.neg.Prune()
-	})
+	pc.limits.Run(ctx, func(msg string, err error) { pc.log.Warn(msg, "err", err) }, pc.neg.Prune)
 }
 
 // FlushPullTimes persists the last-pull times recorded since the last

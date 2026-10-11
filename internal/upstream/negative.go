@@ -23,7 +23,12 @@ type NegativeCache struct {
 	now func() time.Time
 
 	mu sync.Mutex
-	m  map[string]time.Time // expiry by key
+	m  map[string]negEntry
+}
+
+type negEntry struct {
+	exp  time.Time
+	gone bool // the upstream answered 410
 }
 
 // NewNegativeCache returns an empty NegativeCache; now is the clock, nil
@@ -32,11 +37,12 @@ func NewNegativeCache(now func() time.Time) *NegativeCache {
 	if now == nil {
 		now = time.Now
 	}
-	return &NegativeCache{now: now, m: map[string]time.Time{}}
+	return &NegativeCache{now: now, m: map[string]negEntry{}}
 }
 
-// Remember records that the upstream does not have key, for ttl.
-func (n *NegativeCache) Remember(key string, ttl time.Duration) {
+// Remember records that the upstream does not have key, for ttl; gone
+// records that it answered 410 rather than 404.
+func (n *NegativeCache) Remember(key string, gone bool, ttl time.Duration) {
 	if ttl <= 0 {
 		return
 	}
@@ -49,27 +55,20 @@ func (n *NegativeCache) Remember(key string, ttl time.Duration) {
 			clear(n.m)
 		}
 	}
-	n.m[key] = now.Add(ttl)
+	n.m[key] = negEntry{exp: now.Add(ttl), gone: gone}
 }
 
 // Known reports whether the upstream answered that it does not have key
-// within the time Remember was given.
-func (n *NegativeCache) Known(key string) bool {
+// within the time Remember was given, and whether that answer was 410.
+func (n *NegativeCache) Known(key string) (known, gone bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	exp, ok := n.m[key]
-	if ok && !n.now().Before(exp) {
+	e, ok := n.m[key]
+	if ok && !n.now().Before(e.exp) {
 		delete(n.m, key)
-		return false
+		return false, false
 	}
-	return ok
-}
-
-// Forget drops key, such as once the content is cached after all.
-func (n *NegativeCache) Forget(key string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	delete(n.m, key)
+	return ok, e.gone
 }
 
 // Prune drops expired entries.
@@ -80,8 +79,8 @@ func (n *NegativeCache) Prune() {
 }
 
 func (n *NegativeCache) prune(now time.Time) {
-	for k, exp := range n.m {
-		if !now.Before(exp) {
+	for k, e := range n.m {
+		if !now.Before(e.exp) {
 			delete(n.m, k)
 		}
 	}

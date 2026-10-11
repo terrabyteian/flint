@@ -288,7 +288,7 @@ func (c *DocCache) fetch(ctx context.Context, req *DocRequest, cached *DocRecord
 		}
 	}
 	op := "GET " + req.URL
-	resp, err := req.Client.GetURL(ctx, req.URL, hdr)
+	resp, err := req.Client.GetURL(withWatchdog(ctx, watchdog, timeout), req.URL, hdr)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +356,7 @@ func (c *DocCache) fetch(ctx context.Context, req *DocRequest, cached *DocRecord
 	if action == "" {
 		action = "proxy.cache"
 	}
-	err = commitLink(ctx, c.meta, c.blobs, []blob.Digest{doc.Digest}, func(_ meta.View, b *meta.Batch) {
+	err = CommitLink(ctx, c.meta, c.blobs, []blob.Digest{doc.Digest}, func(_ meta.View, b *meta.Batch) {
 		b.Put(DocKey(req.Repo, req.Key), doc.DocRecord.encode())
 		b.SetOrigin(meta.Origin{Actor: req.Actor, Action: action, Target: req.Repo + "/" + req.Key})
 	})
@@ -531,10 +531,6 @@ func (c *DocCache) Run(ctx context.Context, window time.Duration) {
 		}
 	}
 }
-
-// Forget drops the confirmation of repo's document key, so the next
-// request revalidates it.
-func (c *DocCache) Forget(repo, key string) { c.fresh.Forget(freshKey(repo, key)) }
 
 // derivedCache holds derived documents by key, least recently used out
 // first, within a byte budget.

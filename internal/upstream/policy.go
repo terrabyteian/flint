@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/terrabyteian/flint/internal/hostpattern"
 )
 
 // ErrPolicy means the fetch policy refused a request: upstream metadata,
@@ -27,8 +29,10 @@ var ErrPolicy = errors.New("refused by the upstream fetch policy")
 // may resolve to any address, so an upstream inside the network works.
 // Every other host, which only upstream content, a redirect, or a token
 // challenge can lead to, must resolve to a public address: flint refuses
-// to connect to loopback, link-local, private, and unspecified addresses
-// for it. The check runs on the resolved address when the connection is
+// to connect to loopback, link-local, private, shared (100.64.0.0/10),
+// and unspecified (0.0.0.0/8) addresses for it, nor to IPv6 addresses
+// that embed such an IPv4 address (NAT64 64:ff9b::/96 and 6to4
+// 2002::/16). The check runs on the resolved address when the connection is
 // dialed, not on the host name, so a name that resolves differently by
 // then cannot get around it. Metadata from an upstream therefore never
 // steers flint at internal services.
@@ -51,56 +55,13 @@ type Policy struct {
 
 // policy is a Client's compiled Policy.
 type policy struct {
-	own     hostPattern   // the upstream's own host and port
-	allow   []hostPattern // configured: any address
-	formats []hostPattern // format defaults: public addresses only
+	own     hostpattern.Pattern   // the upstream's own host and port
+	allow   []hostpattern.Pattern // configured: any address
+	formats []hostpattern.Pattern // format defaults: public addresses only
 	anyHost bool
 
 	mu      sync.Mutex
 	proxies map[string]bool // host:port of HTTP proxies the transport used
-}
-
-// hostPattern matches a host, with a port or any port, or every
-// subdomain of a domain.
-type hostPattern struct {
-	host     string // lowercase, without brackets
-	port     string // "" for any port
-	wildcard bool   // host is a domain whose subdomains match
-}
-
-func (p hostPattern) match(host, port string) bool {
-	if p.port != "" && p.port != port {
-		return false
-	}
-	if p.wildcard {
-		return strings.HasSuffix(host, "."+p.host)
-	}
-	return host == p.host
-}
-
-func parseHostPattern(s string) (hostPattern, error) {
-	if s == "" || strings.ContainsAny(s, "/?#@ ") {
-		return hostPattern{}, fmt.Errorf("%q is not a host name or address, optionally with a port", s)
-	}
-	host, port := s, ""
-	if h, p, err := net.SplitHostPort(s); err == nil {
-		host, port = h, p
-	} else if strings.Count(s, ":") > 1 { // a bare IPv6 address
-		host = strings.Trim(s, "[]")
-	}
-	if port != "" {
-		if _, err := netip.ParseAddrPort("0.0.0.0:" + port); err != nil {
-			return hostPattern{}, fmt.Errorf("%q has an invalid port", s)
-		}
-	}
-	p := hostPattern{host: strings.ToLower(strings.TrimSuffix(host, ".")), port: port}
-	if rest, ok := strings.CutPrefix(p.host, "*."); ok {
-		p.host, p.wildcard = rest, true
-	}
-	if p.host == "" || strings.Contains(p.host, "*") {
-		return hostPattern{}, fmt.Errorf("%q is not a host name or address; a wildcard is allowed only as a leading \"*.\"", s)
-	}
-	return p, nil
 }
 
 // splitURLHost returns u's lowercase host name and its port, the
@@ -119,16 +80,16 @@ func splitURLHost(u *url.URL) (host, port string) {
 
 func compilePolicy(base *url.URL, pol Policy) (*policy, error) {
 	host, port := splitURLHost(base)
-	p := &policy{own: hostPattern{host: host, port: port}, anyHost: pol.AnyHost, proxies: map[string]bool{}}
+	p := &policy{own: hostpattern.Pattern{Host: host, Port: port}, anyHost: pol.AnyHost, proxies: map[string]bool{}}
 	for _, s := range pol.AllowHosts {
-		hp, err := parseHostPattern(s)
+		hp, err := hostpattern.Parse(s)
 		if err != nil {
 			return nil, fmt.Errorf("upstream: allowed host %w", err)
 		}
 		p.allow = append(p.allow, hp)
 	}
 	for _, s := range pol.FormatHosts {
-		hp, err := parseHostPattern(s)
+		hp, err := hostpattern.Parse(s)
 		if err != nil {
 			return nil, fmt.Errorf("upstream: format host %w", err)
 		}
@@ -141,11 +102,11 @@ func compilePolicy(base *url.URL, pol Policy) (*policy, error) {
 // upstream's own host or an allowed host. Such a host may resolve to an
 // internal address.
 func (p *policy) configured(host, port string) bool {
-	if p.own.match(host, port) {
+	if p.own.Match(host, port) {
 		return true
 	}
 	for _, hp := range p.allow {
-		if hp.match(host, port) {
+		if hp.Match(host, port) {
 			return true
 		}
 	}
@@ -169,19 +130,37 @@ func (p *policy) check(u *url.URL) error {
 		return nil
 	}
 	for _, hp := range p.formats {
-		if hp.match(host, port) {
+		if hp.Match(host, port) {
 			return nil
 		}
 	}
 	return fmt.Errorf("%w: %s is not the upstream's host or an allowed host; add it to proxy.allowHosts to allow it", ErrPolicy, u.Host)
 }
 
+// Address ranges internal beyond netip's classification, and IPv6
+// ranges that embed an IPv4 address.
+var (
+	thisNetwork = netip.MustParsePrefix("0.0.0.0/8")     // RFC 791: this host on this network
+	sharedSpace = netip.MustParsePrefix("100.64.0.0/10") // RFC 6598: carrier-grade NAT, some clouds' metadata services
+	nat64       = netip.MustParsePrefix("64:ff9b::/96")  // RFC 6052: the IPv4 address in the last 32 bits
+	sixToFour   = netip.MustParsePrefix("2002::/16")     // RFC 3056: the IPv4 address in bits 16 to 47
+)
+
 // internal reports whether a is an address flint never connects to for a
-// host only upstream content led to.
+// host only upstream content led to: loopback, private, link-local,
+// shared, or unspecified, or an IPv6 address embedding such an IPv4
+// address.
 func internal(a netip.Addr) bool {
 	a = a.Unmap()
+	switch b := a.As16(); {
+	case nat64.Contains(a):
+		a = netip.AddrFrom4([4]byte(b[12:16]))
+	case sixToFour.Contains(a):
+		a = netip.AddrFrom4([4]byte(b[2:6]))
+	}
 	return a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() ||
-		a.IsInterfaceLocalMulticast() || a.IsUnspecified() || !a.IsValid()
+		a.IsInterfaceLocalMulticast() || a.IsUnspecified() || !a.IsValid() ||
+		thisNetwork.Contains(a) || sharedSpace.Contains(a)
 }
 
 // checkRedirect is the http.Client's CheckRedirect: a redirect is

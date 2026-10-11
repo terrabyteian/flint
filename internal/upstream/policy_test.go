@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -88,9 +89,6 @@ func TestPolicyHosts(t *testing.T) {
 			if !errors.Is(err, upstream.ErrPolicy) {
 				t.Fatalf("GetURL(%s) = %v, want ErrPolicy", tc.url, err)
 			}
-			if c.Allowed(tc.url) && !strings.Contains(tc.url, "localhost") {
-				t.Errorf("Allowed(%s) = true", tc.url)
-			}
 			if otherHits.Load() != before {
 				t.Error("the refused host got a request")
 			}
@@ -99,6 +97,50 @@ func TestPolicyHosts(t *testing.T) {
 				t.Error("a policy refusal marked the upstream offline")
 			}
 		})
+	}
+}
+
+func TestInternalAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		addr     string
+		internal bool
+	}{
+		{"127.0.0.1", true},
+		{"10.1.2.3", true},
+		{"169.254.169.254", true},
+		{"0.0.0.0", true},
+		{"0.1.2.3", true},
+		{"100.64.0.1", true},
+		{"100.100.100.200", true},
+		{"100.127.255.255", true},
+		{"::1", true},
+		{"fd00::1", true},
+		{"fe80::1", true},
+		{"::ffff:100.100.100.200", true},
+		{"64:ff9b::a9fe:a9fe", true}, // NAT64 169.254.169.254
+		{"64:ff9b::7f00:1", true},    // NAT64 127.0.0.1
+		{"2002:a00:1::1", true},      // 6to4 10.0.0.1
+		{"2002:6464:64c8::1", true},  // 6to4 100.100.100.200
+		{"93.184.216.34", false},
+		{"100.63.255.255", false},
+		{"100.128.0.0", false},
+		{"1.0.0.1", false},
+		{"64:ff9b::5db8:d822", false}, // NAT64 93.184.216.34
+		{"2002:5db8:d822::1", false},  // 6to4 93.184.216.34
+		{"2606:4700::1111", false},
+	} {
+		if got := upstream.Internal(netip.MustParseAddr(tc.addr)); got != tc.internal {
+			t.Errorf("internal(%s) = %v, want %v", tc.addr, got, tc.internal)
+		}
+	}
+	// Upstream content naming such an address is refused before any
+	// connection is attempted.
+	up, _ := countingServer(t, nil)
+	c := newClient(t, up.URL, upstream.Options{Policy: upstream.Policy{AnyHost: true}})
+	for _, u := range []string{"http://100.100.100.200/latest/meta-data/", "http://0.1.2.3/", "http://[64:ff9b::a9fe:a9fe]/", "http://[2002:a9fe:a9fe::1]/"} {
+		if err := fetch(c, u); !errors.Is(err, upstream.ErrPolicy) {
+			t.Errorf("GetURL(%s) = %v, want ErrPolicy", u, err)
+		}
 	}
 }
 
@@ -221,6 +263,56 @@ func TestMaxConcurrent(t *testing.T) {
 		if _, err := c.GetURL(ctx, notFound.URL+"/x", nil); !errors.Is(err, upstream.ErrNotFound) {
 			t.Fatalf("GetURL = %v, want ErrNotFound", err)
 		}
+	}
+}
+
+// TestSlotWaitIsNotSilence checks that waiting for a concurrency slot
+// does not count against a fetch's idle timeout or a document's timeout:
+// the upstream is busy serving flint, not silent.
+func TestSlotWaitIsNotSilence(t *testing.T) {
+	e := newDocEnv(t)
+	e.up.set("/file", []byte("file content"), "", "")
+	e.up.set("/doc", []byte(`{"v":1}`), "", "")
+	c := newClient(t, e.up.URL, upstream.Options{MaxConcurrent: 1, Now: e.clock.Now})
+	const silence = 100 * time.Millisecond
+	hold := func() {
+		t.Helper()
+		resp, err := c.GetURL(ctx, e.up.URL+"/file", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.AfterFunc(4*silence, func() { resp.Body.Close() }) // frees the only slot
+	}
+
+	hold()
+	f := upstream.NewFetcher(e.blobs, silence)
+	var doneErr error
+	fe, _ := f.FetchPath("k", "file", upstream.Expect{Size: -1}, func(ctx context.Context) (io.ReadCloser, int64, string, error) {
+		resp, err := c.GetURL(ctx, e.up.URL+"/file", nil)
+		if err != nil {
+			return nil, 0, "", err
+		}
+		return resp.Body, resp.ContentLength, "", nil
+	}, func(_ context.Context, _ upstream.PathResult, err error) { doneErr = err })
+	var out strings.Builder
+	_, err := fe.Stream(ctx, &out)
+	fe.Release()
+	if err != nil || doneErr != nil || out.String() != "file content" {
+		t.Fatalf("fetch after waiting for a slot: %q, %v; done: %v", out.String(), err, doneErr)
+	}
+
+	hold()
+	req := e.req("doc")
+	req.Client, req.FetchTimeout = c, silence
+	d, err := e.c.Get(ctx, req)
+	if err != nil {
+		t.Fatalf("document after waiting for a slot: %v", err)
+	}
+	if got := e.body(d); got != `{"v":1}` {
+		t.Fatalf("document = %q", got)
+	}
+	if c.Offline() {
+		t.Error("waiting for a slot marked the upstream offline")
 	}
 }
 

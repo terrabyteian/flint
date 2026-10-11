@@ -195,7 +195,7 @@ func (f *Fetcher) download(ctx context.Context, cancel func(), fe *Fetch, open S
 			}
 		}
 	}
-	body, size, err := open(ctx)
+	body, size, err := open(withWatchdog(ctx, watchdog, f.idle))
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return blob.Info{}, fmt.Errorf("%w: no answer from the upstream for %v while fetching %s", ErrUnavailable, f.idle, fe.label)

@@ -13,7 +13,6 @@ import (
 
 	"github.com/terrabyteian/flint/internal/blob"
 	"github.com/terrabyteian/flint/internal/config"
-	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
@@ -178,35 +177,6 @@ func (h *Handler) loadPage(ctx context.Context, rp *repository, project string, 
 	return doc, nil
 }
 
-// commitLink commits a batch that links the blobs ds, under the
-// garbage-collection precondition, retrying when a precondition fails.
-func (h *Handler) commitLink(ctx context.Context, ds []blob.Digest, build func(v meta.View, b *meta.Batch)) error {
-	for attempt := 0; ; attempt++ {
-		v := h.view()
-		var b meta.Batch
-		err := gc.Guard(v, &b, ds...)
-		if err == nil {
-			build(v, &b)
-		}
-		v.Release()
-		if err == nil {
-			err = h.statBlobs(ctx, ds...)
-		}
-		if err == nil {
-			_, err = h.meta.Commit(ctx, &b)
-		}
-		switch {
-		case err == nil:
-			return nil
-		case errors.Is(err, meta.ErrConflict) && attempt < maxLinkAttempts-1:
-		case errors.Is(err, meta.ErrConflict), errors.Is(err, gc.ErrDoomed):
-			return errRetry
-		default:
-			return err
-		}
-	}
-}
-
 // reserve reserves room for n bytes of new cached content in the data
 // directory, if it has room.
 func (h *Handler) reserve(n int64) (release func(), ok bool) {
@@ -331,10 +301,13 @@ func (h *Handler) linkCached(ctx context.Context, actor string, rp *repository, 
 		k = metadataKey(rp.name, filename)
 		target += ".metadata"
 	}
-	err := h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) {
+	err := upstream.CommitLink(ctx, h.meta, h.blobs, []blob.Digest{d}, func(_ meta.View, b *meta.Batch) {
 		b.Put(k, rec)
 		b.SetOrigin(meta.Origin{Actor: actor, Action: "pypi.proxy.cache", Target: target})
 	})
+	if errors.Is(err, upstream.ErrBusy) {
+		return errRetry
+	}
 	if err == nil {
 		h.track(rp, k, size)
 	}
