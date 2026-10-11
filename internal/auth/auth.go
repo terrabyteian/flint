@@ -90,8 +90,8 @@ type Options struct {
 	KeyDir string
 	// FS is the filesystem of KeyDir; nil means fsys.OS.
 	FS fsys.FS
-	// Config supplies the permission grants, the repositories that allow
-	// anonymous pulls, and the token lifetime. Nil grants nothing.
+	// Config supplies the permission grants and the repositories that
+	// allow anonymous pulls. Nil grants nothing.
 	Config *config.Config
 	// Logger receives auth logs; nil means slog.Default().
 	Logger *slog.Logger
