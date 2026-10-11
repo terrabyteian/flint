@@ -21,6 +21,7 @@ func TestMinimalDefaults(t *testing.T) {
 		DataDir:         "/data",
 		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout},
 		Log:             Log{Level: DefaultLogLevel},
+		Auth:            Auth{LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL}},
 		ProxyCache:      ProxyCache{MinFreeSpace: FreeSpace{Percent: 5, text: "5%"}},
 	}
 	if !reflect.DeepEqual(c, want) {
@@ -158,6 +159,10 @@ func TestValidation(t *testing.T) {
 			[]string{`trustedProxies[1]: "10.0.0.300"`, `trustedProxies[2]: "fe80::/129"`}},
 		{"zero shutdown", `{"dataDir": "/d", "shutdownTimeout": "0s"}`, []string{"shutdownTimeout: must be positive"}},
 		{"negative shutdown", `{"dataDir": "/d", "shutdownTimeout": "-1s"}`, []string{"shutdownTimeout: must be positive"}},
+		{"login token ttl", `{"dataDir": "/d", "auth": {"loginTokenTTL": "720h"}}`, nil},
+		{"zero login token ttl", `{"dataDir": "/d", "auth": {"loginTokenTTL": "0s"}}`, []string{"auth.loginTokenTTL: must be positive"}},
+		{"negative login token ttl", `{"dataDir": "/d", "auth": {"loginTokenTTL": "-1h"}}`, []string{"auth.loginTokenTTL: must be positive"}},
+		{"login token ttl syntax", `{"dataDir": "/d", "auth": {"loginTokenTTL": "90d"}}`, []string{`auth.loginTokenTTL: "90d" is not a duration`}},
 		{"bad level", `{"dataDir": "/d", "log": {"level": "verbose"}}`, []string{`log.level: "verbose" is not one of`}},
 		{"repo bad name", `{"dataDir": "/d", "repositories": [{"name": "Docker", "format": "oci", "type": "hosted"}]}`,
 			[]string{`repositories[0].name: "Docker" is not a valid repository name`}},

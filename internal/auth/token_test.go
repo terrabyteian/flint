@@ -253,9 +253,9 @@ func TestAPITokenCredentials(t *testing.T) {
 			t.Errorf("%s with basic token: %d", user, resp.status)
 		}
 	}
-	// An API token is not accepted as a bearer token anywhere.
+	// An API token is accepted as a bearer token everywhere.
 	for _, path := range []string{"/test/pull/docker-local/app", "/test/base", TokenPath, "/api/v1/user"} {
-		if resp := e.do(request{path: path, bearer: full}); resp.status != http.StatusUnauthorized {
+		if resp := e.do(request{path: path, bearer: full}); resp.status != http.StatusOK {
 			t.Errorf("bearer API token at %s: %d", path, resp.status)
 		}
 	}

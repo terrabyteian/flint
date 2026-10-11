@@ -14,8 +14,8 @@ import (
 )
 
 // The admin API serves JSON under /api/v1/. Every request authenticates
-// with basic credentials, a password or an API token; tokens from the
-// Docker token service are not accepted. Managing
+// with a password or an API token, in any form authenticate accepts;
+// tokens from the Docker token service are not accepted. Managing
 // users and groups needs the global admin role. Creating an API token,
 // creating or updating a user or its groups, and setting a password need
 // a password, even with an admin token: a token cannot mint further
@@ -76,10 +76,10 @@ func (s *Service) apiAuthenticate(w http.ResponseWriter, r *http.Request) (*Prin
 	w.Header().Set("Cache-Control", "no-store")
 	c, err := s.authenticate(r, false)
 	if err == nil && c.kind == credNone {
-		err = errBadCredentials
+		err = ErrInvalidCredentials
 	}
 	if err != nil {
-		if errors.Is(err, errBadCredentials) {
+		if errors.Is(err, ErrInvalidCredentials) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
 			writeJSON(w, http.StatusUnauthorized, apiError{"authentication required"})
 			return nil, false

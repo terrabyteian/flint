@@ -23,9 +23,10 @@ type tokenResponse struct {
 	IssuedAt    string `json:"issued_at"`
 }
 
-// handleToken is the Docker token endpoint. GET authenticates with basic
-// credentials or none (anonymous); POST is the OAuth 2 password grant that
-// containerd uses. Both take "scope" parameters such as
+// handleToken is the Docker token endpoint. GET authenticates with a
+// password or an API token, in any form authenticate accepts, or none
+// (anonymous); POST is the OAuth 2 password grant that containerd uses.
+// Both take "scope" parameters such as
 // "repository:docker-local/app:pull,push", and the token grants each
 // requested action the client's role allows. Requested actions it does
 // not allow are left out, not refused: the registry then refuses the
@@ -55,7 +56,7 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 		p = c.principal
 		scopes = r.URL.Query()["scope"]
 	}
-	if errors.Is(err, errBadCredentials) {
+	if errors.Is(err, ErrInvalidCredentials) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
 		writeRegistryError(w, http.StatusUnauthorized, "UNAUTHORIZED", "incorrect username, password, or token")
 		return
