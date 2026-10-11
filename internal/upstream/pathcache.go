@@ -45,6 +45,10 @@ import (
 // size limit, content is passed through without being cached, still
 // verified; nothing is deleted to make room except by the size limit's
 // eviction, which is opt-in.
+//
+// A format that reads content itself rather than serving it, such as a
+// record it verifies other content against or the documents of several
+// repositories it merges, uses Read and Doc, which cache as Serve does.
 type PathCache struct {
 	meta    meta.Store
 	blobs   blob.Store
@@ -202,6 +206,43 @@ type Route struct {
 	// KeepGone answers an upstream 410 with 410 rather than 404, for
 	// protocols that distinguish them.
 	KeepGone bool
+	// Client, if not nil, fetches the content instead of the
+	// repository's client, for a protocol that spans two upstreams, such
+	// as Go's module proxy and checksum database.
+	Client *Client
+	// Recheck makes Read run Expect.Check on a cached copy too, for
+	// content cached without it, such as by a route without the check:
+	// a copy that fails as a mismatch, or is larger than Read's limit,
+	// is fetched again, and replaced by one that passes.
+	Recheck bool
+	// Revalidate, if positive, is the revalidation window of mutable
+	// content instead of the repository's.
+	Revalidate time.Duration
+	// Validate, if not nil, checks newly fetched mutable content before
+	// it is cached and served (see DocRequest.Validate).
+	Validate func(ctx context.Context, d *Doc) error
+	// Also, if not nil, names immutable content that a newly fetched or
+	// revalidated document is a copy of, such as the version a query
+	// resolved to, or returns "": the document is then cached under that
+	// path too, unless something is cached there already, so the
+	// immutable content is served later without asking the upstream.
+	Also func(ctx context.Context, d *Doc) string
+}
+
+// client returns the client that fetches rt's content for rp.
+func (rt *Route) client(rp *PathRepo) *Client {
+	if rt.Client != nil {
+		return rt.Client
+	}
+	return rp.Client
+}
+
+// revalidate returns the revalidation window of rt's content in rp.
+func (rt *Route) revalidate(rp *PathRepo) time.Duration {
+	if rt.Revalidate > 0 {
+		return rt.Revalidate
+	}
+	return rp.Revalidate
 }
 
 // Lookup returns the record of the file rp cached at path, or nil.
@@ -289,9 +330,51 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 		pc.passThroughVerified(w, r, rp, rt, true)
 		return
 	}
+	fe := pc.fetch(rp, rt, actor)
+	defer fe.Release()
+	size, err := fe.Wait(ctx)
+	if err == nil && rt.Expect.Check != nil {
+		// The check reads the whole content, so it is sent only once
+		// it passed, and a failure is answered with an error rather
+		// than a response cut off.
+		err = fe.Done(ctx)
+	}
+	if errors.Is(err, errPassThrough) || errors.Is(err, ErrUnverifiable) {
+		pc.passThroughVerified(w, r, rp, rt, !errors.Is(err, ErrUnverifiable))
+		return
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		pc.fail(w, r, rp, rt, err)
+		return
+	}
+	ct := rt.ContentType
+	if ct == "" {
+		ct = orOctetStream(fe.ContentType())
+	}
+	w.Header().Set("Content-Type", ct)
+	if size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := fe.Stream(ctx, w); err != nil {
+		// Part of the file is out: cut the connection, so the client
+		// cannot take it for the whole file. The fetch logs its failure.
+		panic(http.ErrAbortHandler)
+	}
+	pc.m.Requests.With(rp.Name, ResultFetched).Inc()
+}
+
+// fetch returns the fetch of immutable content rt names into the cache
+// of rp, joining one in progress: verified against rt.Expect, linked
+// once committed, and failing with errPassThrough if the content may not
+// be cached. The caller must release it.
+func (pc *PathCache) fetch(rp *PathRepo, rt *Route, actor string) *Fetch {
 	var release func()
 	open := func(ctx context.Context) (io.ReadCloser, int64, http.Header, error) {
-		resp, err := rp.Client.GetURL(ctx, rt.URL, rt.Header)
+		resp, err := rt.client(rp).GetURL(ctx, rt.URL, rt.Header)
 		if err != nil {
 			return nil, 0, nil, err
 		}
@@ -325,45 +408,26 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 			ct = orOctetStream(res.ContentType)
 		}
 		rec := &FileRecord{Digest: res.Info.Digest, Size: res.Info.Size, ContentType: ct, Sums: res.Sums, Fetched: pc.now().UTC()}
-		err = CommitLink(ctx, pc.meta, pc.blobs, []blob.Digest{rec.Digest}, func(_ meta.View, b *meta.Batch) {
-			b.Put(k, rec.encode())
-			b.SetOrigin(meta.Origin{Actor: actor, Action: rp.Format + ".proxy.cache", Target: rp.Name + "/" + rt.Path})
-		})
-		if err != nil {
+		if err := pc.link(ctx, rp, rt.Path, rec, actor); err != nil {
 			pc.log.Warn("caching a proxied file failed", "repository", rp.Name, "path", rt.Path, "err", err)
-			return
 		}
-		pc.limits.Track(rp.tracker, k, rec.Size)
 	}
 	fe, _ := pc.fetcher.FetchPath("path\x00"+rp.Name+"\x00"+rt.Path, rp.Name+"/"+rt.Path, rt.Expect, open, done)
-	defer fe.Release()
-	size, err := fe.Wait(ctx)
-	if errors.Is(err, errPassThrough) || errors.Is(err, ErrUnverifiable) {
-		pc.passThroughVerified(w, r, rp, rt, !errors.Is(err, ErrUnverifiable))
-		return
+	return fe
+}
+
+// link records that rp caches the blob rec names at path, and tracks it
+// against the repository's size limit.
+func (pc *PathCache) link(ctx context.Context, rp *PathRepo, path string, rec *FileRecord, actor string) error {
+	k := FileKey(rp.Name, path)
+	err := CommitLink(ctx, pc.meta, pc.blobs, []blob.Digest{rec.Digest}, func(_ meta.View, b *meta.Batch) {
+		b.Put(k, rec.encode())
+		b.SetOrigin(meta.Origin{Actor: actor, Action: rp.Format + ".proxy.cache", Target: rp.Name + "/" + path})
+	})
+	if err == nil {
+		pc.limits.Track(rp.tracker, k, rec.Size)
 	}
-	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		pc.fail(w, r, rp, rt, err)
-		return
-	}
-	ct := rt.ContentType
-	if ct == "" {
-		ct = orOctetStream(fe.ContentType())
-	}
-	w.Header().Set("Content-Type", ct)
-	if size >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	}
-	w.WriteHeader(http.StatusOK)
-	if _, err := fe.Stream(ctx, w); err != nil {
-		// Part of the file is out: cut the connection, so the client
-		// cannot take it for the whole file. The fetch logs its failure.
-		panic(http.ErrAbortHandler)
-	}
-	pc.m.Requests.With(rp.Name, ResultFetched).Inc()
+	return err
 }
 
 func orOctetStream(ct string) string {
@@ -385,10 +449,10 @@ func (pc *PathCache) fetchFailed(rp *PathRepo, rt *Route, err error) {
 		pc.remember(rp, rt, err)
 	default:
 		if errors.Is(err, ErrUnavailable) {
-			rp.Client.MarkOffline()
+			rt.client(rp).MarkOffline()
 		}
 		pc.m.UpstreamErrors.With(rp.Name).Inc()
-		pc.log.Warn("proxy file fetch failed", "repository", rp.Name, "path", rt.Path, "upstream", rp.Client.Host(), "err", err)
+		pc.log.Warn("proxy file fetch failed", "repository", rp.Name, "path", rt.Path, "upstream", rt.client(rp).Host(), "err", err)
 	}
 }
 
@@ -430,7 +494,7 @@ func (pc *PathCache) serveBlob(w http.ResponseWriter, r *http.Request, d blob.Di
 // head answers a HEAD request for immutable content that is not cached
 // from the upstream's answer to one.
 func (pc *PathCache) head(w http.ResponseWriter, r *http.Request, rp *PathRepo, rt *Route) {
-	resp, err := rp.Client.Request(r.Context(), http.MethodHead, rt.URL, rt.Header)
+	resp, err := rt.client(rp).Request(r.Context(), http.MethodHead, rt.URL, rt.Header)
 	if err == nil && resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		err = &Error{Op: "HEAD " + rt.URL, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %s", resp.Status)}
@@ -469,7 +533,7 @@ const maxCheckInMemory = 64 << 20
 // its digests twice.
 func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request, rp *PathRepo, rt *Route, fromResponse bool) {
 	ctx := r.Context()
-	resp, err := rp.Client.GetURL(ctx, rt.URL, rt.Header)
+	resp, err := rt.client(rp).GetURL(ctx, rt.URL, rt.Header)
 	if err == nil && resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		err = &Error{Op: "GET " + rt.URL, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %s", resp.Status)}
@@ -516,6 +580,7 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 	}
 	if expect.Check != nil {
 		b, err := io.ReadAll(io.LimitReader(er, maxCheckInMemory+1))
+		resp.Body.Close()
 		switch {
 		case err == nil && len(b) > maxCheckInMemory:
 			err = fmt.Errorf("%w: %s cannot be verified without being cached while the data directory is nearly full", ErrNoSpace, rt.Path)
@@ -548,7 +613,7 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 		if ctx.Err() == nil {
 			pc.m.UpstreamErrors.With(rp.Name).Inc()
 			pc.log.WarnContext(ctx, "passing a file through from upstream failed", "repository", rp.Name,
-				"path", rt.Path, "upstream", rp.Client.Host(), "err", err)
+				"path", rt.Path, "upstream", rt.client(rp).Host(), "err", err)
 		}
 		panic(http.ErrAbortHandler)
 	}
@@ -558,20 +623,11 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 // serveMutable serves a document through the DocCache.
 func (pc *PathCache) serveMutable(w http.ResponseWriter, r *http.Request, rp *PathRepo, rt *Route, actor string) {
 	ctx := r.Context()
-	if err := pc.remembered(rp, rt); err != nil {
-		pc.fail(w, r, rp, rt, err)
-		return
-	}
-	doc, err := pc.docs.Get(ctx, &DocRequest{Repo: rp.Name, Key: rt.Path, Client: rp.Client, URL: rt.URL, Header: rt.Header,
-		Revalidate: rp.Revalidate, MaxSize: rt.MaxSize, Actor: actor, Action: rp.Format + ".proxy.cache"})
+	doc, err := pc.Doc(ctx, rp, rt, actor)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			pc.remember(rp, rt, err)
-		}
 		pc.fail(w, r, rp, rt, err)
 		return
 	}
-	pc.m.Requests.With(rp.Name, doc.Result).Inc()
 	ct := rt.ContentType
 	if ct == "" {
 		ct = orOctetStream(doc.ContentType)
@@ -611,6 +667,187 @@ func (pc *PathCache) serveMutable(w http.ResponseWriter, r *http.Request, rp *Pa
 	}
 }
 
+// Doc returns the mutable content rt names in rp, through the document
+// cache, as Serve would serve it, for a format that reads a document
+// itself, such as to merge the documents of several repositories, rather
+// than serving it as it is; it counts the request as Serve does. The
+// format reads the document with DocCache.Open.
+func (pc *PathCache) Doc(ctx context.Context, rp *PathRepo, rt *Route, actor string) (*Doc, error) {
+	if err := pc.remembered(rp, rt); err != nil {
+		return nil, err
+	}
+	doc, err := pc.docs.Get(ctx, &DocRequest{Repo: rp.Name, Key: rt.Path, Client: rt.client(rp), URL: rt.URL, Header: rt.Header,
+		Revalidate: rt.revalidate(rp), MaxSize: rt.MaxSize, Validate: rt.Validate, Actor: actor, Action: rp.Format + ".proxy.cache"})
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			pc.remember(rp, rt, err)
+		}
+		return nil, err
+	}
+	pc.m.Requests.With(rp.Name, doc.Result).Inc()
+	if rt.Also != nil && doc.Stored() && (doc.Result == ResultFetched || doc.Result == ResultRevalidated) {
+		if path := rt.Also(ctx, doc); path != "" {
+			pc.adopt(ctx, rp, path, doc, rt.ContentType, actor)
+		}
+	}
+	return doc, nil
+}
+
+// adopt caches stored document d of rp as the immutable content at
+// path, unless something is cached there already.
+func (pc *PathCache) adopt(ctx context.Context, rp *PathRepo, path string, d *Doc, ct, actor string) {
+	if f, err := pc.Lookup(rp, path); err != nil || f != nil {
+		return
+	}
+	if ct == "" {
+		ct = orOctetStream(d.ContentType)
+	}
+	rec := &FileRecord{Digest: d.Digest, Size: d.Size, ContentType: ct, Fetched: d.Fetched}
+	if err := pc.link(ctx, rp, path, rec, actor); err != nil {
+		pc.log.WarnContext(ctx, "caching a document as immutable content failed", "repository", rp.Name,
+			"document", d.URL, "path", path, "err", err)
+	}
+}
+
+// Read returns the immutable content rt names in rp, at most max bytes,
+// for a format that reads it itself rather than serving it, such as a
+// record it verifies other content against, and how it was found
+// (ResultHit, ResultFetched, or ResultPassthrough): from the cache, or
+// else fetched, verified, and cached as Serve would cache it; content
+// rt classifies as PassThrough is fetched and verified, but never
+// cached. Content larger than max fails with ErrTooLarge. Unlike Serve,
+// Read counts no request: the format counts what it serves.
+func (pc *PathCache) Read(ctx context.Context, rp *PathRepo, rt *Route, actor string, max int64) ([]byte, string, error) {
+	var f *FileRecord
+	if rt.Kind != PassThrough {
+		var err error
+		if f, err = pc.Lookup(rp, rt.Path); err != nil {
+			return nil, "", err
+		}
+	}
+	if f != nil && f.Size > max && !rt.Recheck {
+		return nil, "", tooLarge(rt, max)
+	}
+	if f != nil && f.Size <= max {
+		b, err := pc.readBlob(ctx, f.Digest, f.Size)
+		if err == nil && rt.Recheck {
+			err = rt.Expect.Check(ctx, bytes.NewReader(b), int64(len(b)))
+		}
+		if err == nil {
+			pc.limits.Touch(rp.tracker, FileKey(rp.Name, rt.Path))
+			return b, ResultHit, nil
+		}
+		if !errors.Is(err, blob.ErrNotFound) && !errors.Is(err, ErrDigestMismatch) {
+			return nil, "", err
+		}
+	}
+	// Not cached, linked but missing from the store, or a rechecked
+	// copy that is too large or fails its check: fetch it.
+	if err := pc.remembered(rp, rt); err != nil {
+		return nil, "", err
+	}
+	if rt.Kind == PassThrough || pc.space != nil && pc.space.Pressure() {
+		b, err := pc.readThrough(ctx, rp, rt, max)
+		return b, ResultPassthrough, err
+	}
+	fe := pc.fetch(rp, rt, actor)
+	defer fe.Release()
+	size, err := fe.Wait(ctx)
+	switch {
+	case errors.Is(err, errPassThrough):
+		b, err := pc.readThrough(ctx, rp, rt, max)
+		return b, ResultPassthrough, err
+	case err != nil:
+		return nil, "", err
+	case size > max:
+		return nil, "", tooLarge(rt, max)
+	}
+	var buf bytes.Buffer
+	if _, err := fe.Stream(ctx, &limitedWriter{&buf, max}); err != nil {
+		if errors.Is(err, errTooLarge) {
+			return nil, "", tooLarge(rt, max)
+		}
+		return nil, "", err
+	}
+	return buf.Bytes(), ResultFetched, nil
+}
+
+// readBlob reads a blob of size bytes.
+func (pc *PathCache) readBlob(ctx context.Context, d blob.Digest, size int64) ([]byte, error) {
+	f, err := pc.blobs.Open(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b := make([]byte, size)
+	if _, err := io.ReadFull(f, b); err != nil {
+		return nil, fmt.Errorf("upstream: reading blob %s: %w", d, err)
+	}
+	return b, nil
+}
+
+// readThrough fetches immutable content without caching it, at most max
+// bytes, and verifies it against rt.Expect, its Check included.
+func (pc *PathCache) readThrough(ctx context.Context, rp *PathRepo, rt *Route, max int64) ([]byte, error) {
+	resp, err := rt.client(rp).GetURL(ctx, rt.URL, rt.Header)
+	if err == nil && resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		err = &Error{Op: "GET " + rt.URL, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %s", resp.Status)}
+	}
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			pc.remember(rp, rt, err)
+		} else if !errors.Is(err, context.Canceled) {
+			pc.m.UpstreamErrors.With(rp.Name).Inc()
+		}
+		return nil, err
+	}
+	defer resp.Body.Close()
+	er, err := newExpectReader(resp.Body, &rt.Expect, rp.Name+"/"+rt.Path)
+	if err != nil {
+		return nil, err
+	}
+	b, err := io.ReadAll(io.LimitReader(er, max+1))
+	resp.Body.Close()
+	switch {
+	case err == nil && int64(len(b)) > max:
+		err = tooLarge(rt, max)
+	case err == nil && rt.Expect.Check != nil:
+		err = rt.Expect.Check(ctx, bytes.NewReader(b), int64(len(b)))
+	}
+	if err != nil {
+		if !errors.Is(err, ErrTooLarge) {
+			pc.m.UpstreamErrors.With(rp.Name).Inc()
+		}
+		return nil, err
+	}
+	pc.m.UpstreamBytes.With(rp.Name).Add(float64(len(b)))
+	return b, nil
+}
+
+// tooLarge is the error of content rt names that is larger than max.
+func tooLarge(rt *Route, max int64) error {
+	return &Error{Op: "GET " + rt.URL, Err: fmt.Errorf("%w: %s is larger than %d bytes", ErrTooLarge, rt.Path, max)}
+}
+
+// errTooLarge means a limitedWriter's limit was exceeded.
+var errTooLarge = errors.New("upstream: content over the limit")
+
+// limitedWriter writes to w until n bytes have been written, and fails
+// after that.
+type limitedWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > l.n {
+		return 0, errTooLarge
+	}
+	l.n -= int64(len(p))
+	return l.w.Write(p)
+}
+
 // derivedETag is the ETag of a derived document.
 func derivedETag(d blob.Digest, variant string) string {
 	h := sha256.New()
@@ -627,7 +864,7 @@ func (pc *PathCache) servePassThrough(w http.ResponseWriter, r *http.Request, rp
 	if r.Method == http.MethodHead {
 		method = http.MethodHead
 	}
-	resp, err := rp.Client.Request(ctx, method, rt.URL, rt.Header)
+	resp, err := rt.client(rp).Request(ctx, method, rt.URL, rt.Header)
 	if err == nil && resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		err = &Error{Op: method + " " + rt.URL, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %s", resp.Status)}
@@ -663,7 +900,7 @@ func (pc *PathCache) fail(w http.ResponseWriter, r *http.Request, rp *PathRepo, 
 	if r.Context().Err() != nil {
 		return
 	}
-	status, msg := StatusOf(err, rp.Client.Host())
+	status, msg := StatusOf(err, rt.client(rp).Host())
 	if status == http.StatusNotFound && rt.KeepGone && errors.Is(err, ErrGone) {
 		status = http.StatusGone
 	}

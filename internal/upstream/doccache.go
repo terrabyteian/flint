@@ -146,8 +146,10 @@ type DocRequest struct {
 	MaxMemory int64
 	// Validate, if not nil, checks a newly fetched document before it is
 	// linked and served, such as by parsing it; it reads it with
-	// DocCache.Open. A document that fails is treated as an upstream
-	// failure: the cached copy is served if there is one.
+	// DocCache.Open. It runs once the upstream's response is closed, so
+	// it may itself fetch from the same upstream. A document that fails
+	// is treated as an upstream failure: the cached copy is served if
+	// there is one.
 	Validate func(ctx context.Context, d *Doc) error
 	// Actor and Action are the origin of the batch that caches the
 	// document; Action defaults to "proxy.cache".
@@ -337,6 +339,8 @@ func (c *DocCache) fetch(ctx context.Context, req *DocRequest, cached *DocRecord
 	if c.m != nil {
 		c.m.UpstreamBytes.With(req.Repo).Add(float64(doc.Size))
 	}
+	watchdog.Stop()
+	resp.Body.Close()
 	if req.Validate != nil {
 		if err := req.Validate(ctx, doc); err != nil {
 			return nil, wrapOp(op, err)

@@ -167,7 +167,7 @@ Every route family accepts the same credentials, and answers a request without v
 | Style | Challenge | Used by |
 | --- | --- | --- |
 | Docker | `WWW-Authenticate: Bearer realm=...,service="flint",scope=...` | The registry API at `/v2/`, as described above |
-| Basic | `WWW-Authenticate: Basic realm="flint"` | Clients that wait for a challenge before they send credentials, such as Maven, Gradle, and wget, and Helm chart and generic files repositories |
+| Basic | `WWW-Authenticate: Basic realm="flint"` | Clients that wait for a challenge before they send credentials, such as Maven, Gradle, and wget, and Helm chart, generic files, and Go repositories |
 | Cargo | `WWW-Authenticate: Cargo login_url="..."` | Cargo, which shows the user where to get a token |
 | Plain | none | npm, which then tells the user to log in |
 
@@ -198,6 +198,12 @@ Publishing through it needs `write`, and deleting needs `delete`, on the member 
 [Generic files repositories](generic.md#credentials) at `/generic/<repository>/` use the Basic style.
 curl and wget send a password or an API token as HTTP basic credentials (`curl -u`, `wget --user --password`, or a `.netrc` file), and scripts may send an API token as `Authorization: Bearer <token>` instead.
 curl sends basic credentials with the first request; wget waits for the challenge.
+
+### Go repositories
+
+[Go repositories](go.md#credentials) use the Basic style.
+The go command sends credentials only over HTTPS: a password or an API token from `.netrc`, or, from Go 1.24 on, the headers a `GOAUTH` command prints, such as `Authorization: Bearer <token>`.
+Downloading needs the `read` role, or the repository's `anonymousPull`; a virtual repository needs it on the virtual repository only.
 
 ### Helm chart repositories
 

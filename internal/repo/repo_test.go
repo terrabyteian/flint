@@ -242,6 +242,46 @@ func TestConsult(t *testing.T) {
 
 var errNotFound = errors.New("not found")
 
+func TestFirst(t *testing.T) {
+	all := repos(nil)
+	reg := metrics.NewRegistry()
+	v, err := NewVirtual(all[3], all, VirtualOptions{Metrics: NewMetrics(reg), Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notFound := func(err error) bool { return errors.Is(err, errNotFound) }
+	first := func(m map[string]error) (Answer[string], bool, []string, error) {
+		var asked []string
+		a, ok, err := First(context.Background(), v, v.Members, "pkg", func(_ context.Context, mb Member) (string, error) {
+			asked = append(asked, mb.Name)
+			if err := m[mb.Name]; err != nil {
+				return "", err
+			}
+			return "latest of " + mb.Name, nil
+		}, notFound)
+		return a, ok, asked, err
+	}
+	a, ok, asked, err := first(nil)
+	if err != nil || !ok || a.Member.Name != "pypi" || a.Value != "latest of pypi" || !slices.Equal(asked, []string{"pypi"}) {
+		t.Errorf("First = %+v, %v, asked %q, %v; want pypi's answer, asking no other member", a, ok, asked, err)
+	}
+	a, ok, asked, err = first(map[string]error{"pypi": errDown, "local": errNotFound})
+	if err != nil || !ok || a.Member.Name != "team" || !slices.Equal(asked, []string{"pypi", "local", "team"}) {
+		t.Errorf("First = %+v, %v, asked %q, %v; want team's answer", a, ok, asked, err)
+	}
+	var exp bytes.Buffer
+	reg.WriteTo(&exp)
+	if !strings.Contains(exp.String(), `flint_virtual_member_skips_total{repository="all",member="pypi"} 1`) {
+		t.Errorf("the skip is not counted:\n%s", exp.String())
+	}
+	if _, ok, _, err := first(map[string]error{"pypi": errNotFound, "local": errNotFound, "team": errNotFound}); ok || err != nil {
+		t.Errorf("First with no answer = %v, %v; want neither", ok, err)
+	}
+	if _, ok, _, err := first(map[string]error{"pypi": errDown, "local": errNotFound, "team": errNotFound}); ok || err != errDown {
+		t.Errorf("First with no answer and a failure = %v, %v; want the failure", ok, err)
+	}
+}
+
 func TestMerge(t *testing.T) {
 	type file struct{ name, from string }
 	got := Merge([][]file{

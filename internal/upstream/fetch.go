@@ -274,6 +274,7 @@ func (f *Fetcher) download(ctx context.Context, cancel func(), fe *Fetch, open S
 		return blob.Info{}, fmt.Errorf("%w: %s ended after %d of %d bytes", ErrUnavailable, fe.label, up.Size(), size)
 	}
 	watchdog.Stop()
+	body.Close()
 	if hs != nil {
 		// Verified before the commit: content that fails never enters
 		// the blob store, and the final byte stays held back meanwhile.
@@ -343,6 +344,27 @@ func (fe *Fetch) Wait(ctx context.Context) (int64, error) {
 		return 0, fe.err
 	}
 	return fe.size, nil
+}
+
+// Done waits until the fetch has finished, and returns the error that
+// failed it, if any.
+func (fe *Fetch) Done(ctx context.Context) error {
+	for {
+		fe.mu.Lock()
+		state, err, changed := fe.state, fe.err, fe.changed
+		fe.mu.Unlock()
+		switch state {
+		case fetchVerified:
+			return nil
+		case fetchFailed:
+			return err
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // Stream writes the blob to w as it arrives and returns the bytes

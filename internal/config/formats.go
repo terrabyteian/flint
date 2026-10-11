@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/terrabyteian/flint/internal/sumdb"
 )
 
 // formatSpec describes a package format the configuration accepts. A
@@ -51,6 +54,14 @@ var formats = []formatSpec{
 			return r.Maven
 		},
 		check: checkMaven},
+	{name: FormatGo, types: []string{TypeProxy, TypeVirtual},
+		settings: func(r *Repository) any {
+			if r.Go == nil {
+				return nil
+			}
+			return r.Go
+		},
+		check: validateGo},
 }
 
 // Generic holds the settings of a generic files repository.
@@ -343,4 +354,98 @@ func (c *Config) validateVirtual(v *validator, path string, r Repository, names 
 			v.addf(path+".publishTo", "%q is a %s repository; publishTo must name a hosted member", p, c.Repositories[i].Type)
 		}
 	}
+}
+
+// Go configures a Go module proxy repository: the checksum database
+// flint verifies modules against before it caches them, and proxies for
+// clients.
+type Go struct {
+	// SumDB is the checksum database; default sum.golang.org.
+	SumDB *GoSumDB `json:"sumdb,omitempty"`
+	// NoSumCheck are module paths, or patterns in which "*" matches any
+	// run of characters, such as "corp.example.com/*", whose modules are
+	// cached without being verified against the checksum database: the
+	// private modules of a private upstream, which the database cannot
+	// know, as GONOSUMDB names them to the go command.
+	NoSumCheck []string `json:"noSumCheck,omitempty"`
+}
+
+// GoSumDB names a Go checksum database.
+type GoSumDB struct {
+	// Key is the database's public key, as GOSUMDB names it, such as
+	// sumdb.DefaultKey, sum.golang.org's: "<name>+<hash>+<key>". Its name
+	// is the one clients use for the database. Default sum.golang.org's.
+	Key string `json:"key,omitempty"`
+	// URL is where the database is fetched from, such as a mirror of it;
+	// default "https://<name>".
+	URL string `json:"url,omitempty"`
+}
+
+// GoSumDBKey returns the public key of the checksum database of a Go
+// proxy repository's settings g, which may be nil.
+func GoSumDBKey(g *Go) string {
+	if g == nil || g.SumDB == nil || g.SumDB.Key == "" {
+		return sumdb.DefaultKey
+	}
+	return g.SumDB.Key
+}
+
+// GoSumDBURL returns the URL of the checksum database of a Go proxy
+// repository's settings g, which may be nil, without a trailing "/".
+func GoSumDBURL(g *Go) string {
+	if g != nil && g.SumDB != nil && g.SumDB.URL != "" {
+		return strings.TrimRight(g.SumDB.URL, "/")
+	}
+	name, _, _ := strings.Cut(GoSumDBKey(g), "+")
+	return "https://" + name
+}
+
+// validateGo checks a Go repository's settings, whose JSON path is path.
+func validateGo(v *validator, path string, r *Repository) {
+	g := r.Go
+	if g == nil {
+		return
+	}
+	if r.Type != TypeProxy {
+		v.addf(path, "is only allowed for a proxy repository")
+		return
+	}
+	if db := g.SumDB; db != nil {
+		if db.Key != "" {
+			if _, err := sumdb.ParseKey(db.Key); err != nil {
+				v.addf(path+".sumdb.key", "%q is not a checksum database key of the form <name>+<hash>+<key>, as GOSUMDB names one", db.Key)
+			}
+		}
+		if db.URL != "" {
+			if err := checkSumDBURL(db.URL); err != nil {
+				v.addf(path+".sumdb.url", "%q %v", db.URL, err)
+			}
+		}
+	}
+	for i, p := range g.NoSumCheck {
+		if !ValidNamePattern(p) {
+			v.addf(fmt.Sprintf("%s.noSumCheck[%d]", path, i),
+				"%q is not a module path or pattern: use 1 to %d printable characters other than space, with \"*\" matching any run of characters",
+				p, maxNamePattern)
+		}
+	}
+}
+
+// checkSumDBURL checks a checksum database's URL: an http or https URL,
+// which may have a path, such as a module proxy's /sumdb/<name>.
+func checkSumDBURL(s string) error {
+	u, err := url.Parse(s)
+	switch {
+	case err != nil:
+		return errors.New("is not a URL")
+	case u.Scheme != "https" && u.Scheme != "http":
+		return errors.New("must be an http or https URL")
+	case u.Host == "":
+		return errors.New("has no host")
+	case u.User != nil:
+		return errors.New("must not contain credentials")
+	case u.RawQuery != "" || u.Fragment != "" || u.ForceQuery:
+		return errors.New("must not have a query or fragment")
+	}
+	return nil
 }

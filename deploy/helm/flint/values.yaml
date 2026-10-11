@@ -111,6 +111,19 @@ config:
   #   type: virtual
   #   virtual:
   #     members: [maven-releases, maven-snapshots, maven-central]
+  # # Go modules: a proxy.golang.org proxy, which also proxies the Go
+  # # checksum database, behind a virtual repository; the go command needs
+  # # TLS to send credentials (docs/go.md).
+  # - name: goproxy
+  #   format: go
+  #   type: proxy
+  #   proxy:
+  #     url: https://proxy.golang.org
+  # - name: go-all
+  #   format: go
+  #   type: virtual
+  #   virtual:
+  #     members: [goproxy]
   auth:
     permissions: []
   # proxyCache:

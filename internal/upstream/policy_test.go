@@ -287,16 +287,19 @@ func TestSlotWaitIsNotSilence(t *testing.T) {
 	hold()
 	f := upstream.NewFetcher(e.blobs, silence)
 	var doneErr error
+	done := make(chan struct{})
 	fe, _ := f.FetchPath("k", "file", upstream.Expect{Size: -1}, func(ctx context.Context) (io.ReadCloser, int64, http.Header, error) {
 		resp, err := c.GetURL(ctx, e.up.URL+"/file", nil)
 		if err != nil {
 			return nil, 0, nil, err
 		}
 		return resp.Body, resp.ContentLength, resp.Header, nil
-	}, func(_ context.Context, _ upstream.PathResult, err error) { doneErr = err })
+	}, func(_ context.Context, _ upstream.PathResult, err error) { doneErr = err; close(done) })
 	var out strings.Builder
 	_, err := fe.Stream(ctx, &out)
 	fe.Release()
+	// done runs after Stream has returned.
+	<-done
 	if err != nil || doneErr != nil || out.String() != "file content" {
 		t.Fatalf("fetch after waiting for a slot: %q, %v; done: %v", out.String(), err, doneErr)
 	}

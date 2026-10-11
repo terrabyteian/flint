@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/terrabyteian/flint/internal/sumdb"
 )
 
 func TestMinimalDefaults(t *testing.T) {
@@ -46,7 +48,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 13 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 16 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -72,6 +74,10 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if r := c.Repositories[12]; r.Format != FormatNPM || r.Type != TypeHosted {
 		t.Errorf("unexpected npm repository: %+v", r)
+	}
+	if g := c.Repositories[14].Go; c.Repositories[13].Format != FormatGo || g == nil || len(g.NoSumCheck) != 1 ||
+		GoSumDBKey(g) != sumdb.DefaultKey || c.Repositories[15].Virtual == nil || len(c.Repositories[15].Virtual.Members[0].Include) != 1 {
+		t.Errorf("unexpected Go repositories: %+v", c.Repositories[13:])
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
@@ -284,6 +290,29 @@ func TestValidation(t *testing.T) {
 				"repositories[2].virtual.members[4]: exclude: want an array, got string",
 				`repositories[2].virtual.publishTo: "p" is a proxy repository; publishTo must name a hosted member`,
 				`repositories[3].virtual.publishTo: "x" is not a member of the virtual repository`}},
+		{"go good", `{"dataDir": "/d", "repositories": [
+			{"name": "goproxy", "format": "go", "type": "proxy", "proxy": {"url": "https://proxy.golang.org"}},
+			{"name": "corp", "format": "go", "type": "proxy", "proxy": {"url": "https://goproxy.corp.example.com/mods/"},
+			 "go": {"sumdb": {"key": "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8",
+			  "url": "https://flint.example.com/go/goproxy/sumdb/sum.golang.org"}, "noSumCheck": ["corp.example.com/*"]}},
+			{"name": "go-all", "format": "go", "type": "virtual", "anonymousPull": true, "virtual": {"members": [
+			 {"name": "corp", "include": ["corp.example.com/*"]}, {"name": "goproxy", "exclude": ["corp.example.com/*"]}]}}]}`, nil},
+		{"go problems", `{"dataDir": "/d", "repositories": [
+			{"name": "h", "format": "go", "type": "hosted"},
+			{"name": "p", "format": "go", "type": "proxy", "proxy": {"url": "https://proxy.golang.org"},
+			 "go": {"sumdb": {"key": "sum.golang.org+00000000+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8", "url": "sum.golang.org"},
+			  "noSumCheck": ["", "a b"]}},
+			{"name": "v", "format": "go", "type": "virtual", "virtual": {"members": ["p"]}, "go": {}},
+			{"name": "q", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple/"}, "go": {}},
+			{"name": "w", "format": "go", "type": "virtual", "virtual": {"members": ["q"]}}]}`,
+			[]string{`repositories[0].type: "hosted" is not supported for format go; supported types: proxy, virtual`,
+				`repositories[1].go.sumdb.key: "sum.golang.org+00000000+`,
+				`repositories[1].go.sumdb.url: "sum.golang.org" must be an http or https URL`,
+				`repositories[1].go.noSumCheck[0]: "" is not a module path or pattern`,
+				`repositories[1].go.noSumCheck[1]: "a b" is not a module path or pattern`,
+				"repositories[2].go: is only allowed for a proxy repository",
+				"repositories[3].go: is only allowed for a repository of format go",
+				`repositories[4].virtual.members[0]: "q" is a pypi repository, not go`}},
 		{"public URL", `{"dataDir": "/d", "publicURL": "https://flint.example.com/registry/"}`, nil},
 		{"public URL problems", `{"dataDir": "/d", "publicURL": "flint.example.com"}`,
 			[]string{`publicURL: "flint.example.com" must be an http or https URL`}},
@@ -588,6 +617,23 @@ func TestCargoIndexURL(t *testing.T) {
 	}
 }
 
+func TestGoSumDB(t *testing.T) {
+	const key = "sum.example.com+12345678+AAAA"
+	for _, tt := range []struct {
+		g        *Go
+		key, url string
+	}{
+		{nil, sumdb.DefaultKey, "https://sum.golang.org"},
+		{&Go{}, sumdb.DefaultKey, "https://sum.golang.org"},
+		{&Go{SumDB: &GoSumDB{URL: "https://mirror.example.com/sumdb/sum.golang.org/"}}, sumdb.DefaultKey, "https://mirror.example.com/sumdb/sum.golang.org"},
+		{&Go{SumDB: &GoSumDB{Key: key}}, key, "https://sum.example.com"},
+	} {
+		if k, u := GoSumDBKey(tt.g), GoSumDBURL(tt.g); k != tt.key || u != tt.url {
+			t.Errorf("%+v: key %q and URL %q, want %q and %q", tt.g, k, u, tt.key, tt.url)
+		}
+	}
+}
+
 func TestPublicBase(t *testing.T) {
 	for in, want := range map[string]string{
 		"":                              "",
@@ -640,7 +686,7 @@ func TestFormatSettings(t *testing.T) {
 				v.addf(path, "is required")
 			}
 		}})
-	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "cargo", "npm", "maven", "test"}) {
+	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "cargo", "npm", "maven", "go", "test"}) {
 		t.Errorf("Formats() = %q", got)
 	}
 	_, err := Parse([]byte(`{"dataDir": "/d", "repositories": [
