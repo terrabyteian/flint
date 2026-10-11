@@ -183,6 +183,8 @@ Some package protocols put absolute URLs into the metadata clients store, such a
 `publicURL` is the base of every absolute URL flint writes into served metadata, so those URLs stay the same however a client reached flint: through an ingress, a port forward, or an internal service name.
 It is an `http` or `https` URL without credentials, a query, or a fragment; it may have a path, when a reverse proxy serves flint under one and strips it before forwarding.
 Without it, absolute URLs are built from the scheme and host of each request, as seen through [trusted proxies](#trusted-proxies).
+It is also the base of the login URLs flint gives clients, such as Cargo's `login_url`.
+The Docker token realm, the token endpoint named in a registry's `401` challenge, does not use it and always follows the host the client used, so a client that reached flint by an internal name gets its token from that same host.
 Where a protocol allows relative URLs, such as PyPI's project pages and the classic Helm index, flint writes relative ones and `publicURL` does not matter.
 Cached upstream content is stored as the upstream sent it and rewritten when served, so changing `publicURL` takes effect at once.
 

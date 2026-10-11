@@ -60,13 +60,19 @@ func Info(ctx context.Context) RequestInfo {
 // metadata it serves, to which a path starting with "/" is appended: the
 // configured public URL, so clients that store the URLs, as in lockfiles,
 // see one stable URL however they reached the server, or else the scheme
-// and host the client addressed, honoring trusted proxies, as in
-// "https://registry.example".
+// and host the client addressed, as Origin returns.
 func BaseURL(r *http.Request) string {
-	info := Info(r.Context())
-	if info.PublicURL != "" {
-		return info.PublicURL
+	if pub := Info(r.Context()).PublicURL; pub != "" {
+		return pub
 	}
+	return Origin(r)
+}
+
+// Origin returns the scheme and host the client addressed, honoring
+// trusted proxies, as in "https://registry.example". It ignores the
+// public URL.
+func Origin(r *http.Request) string {
+	info := Info(r.Context())
 	scheme, host := info.Scheme, info.Host
 	if scheme == "" {
 		// Not served by a Server, as in a test.
