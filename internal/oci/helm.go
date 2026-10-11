@@ -2,7 +2,6 @@ package oci
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -38,7 +36,6 @@ import (
 const (
 	mtHelmConfig       = "application/vnd.cncf.helm.config.v1+json"
 	mtHelmChart        = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
-	mtHelmChartLegacy  = "application/tar+gzip"
 	mtHelmProvenance   = "application/vnd.cncf.helm.chart.provenance.v1.prov"
 	helmIndexFile      = "index.yaml"
 	helmChartsDir      = "charts"
@@ -327,11 +324,7 @@ func (h *Handler) buildHelmView(ctx context.Context, repo, dir string, tags []he
 		files:  map[string]helmFile{},
 		charts: map[blob.Digest]*helmChart{},
 	}
-	type entry struct {
-		version string
-		body    json.RawMessage
-	}
-	entries := map[string][]entry{}
+	entries := map[string][]json.RawMessage{}
 	// The push times are in the manifest records; a record deleted since
 	// the tags were read leaves its chart without one.
 	pushed := make([]time.Time, len(tags))
@@ -351,7 +344,11 @@ func (h *Handler) buildHelmView(ctx context.Context, repo, dir string, tags []he
 		}
 		if !seen {
 			var err error
-			if c, err = h.readHelmChart(ctx, helmImage(repo, dir, t.name), t.digest); err != nil {
+			c, err = h.readHelmChart(ctx, helmImage(repo, dir, t.name), t.digest)
+			if errors.Is(err, errHelmMissing) {
+				continue
+			}
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -380,22 +377,13 @@ func (h *Handler) buildHelmView(ctx context.Context, repo, dir string, tags []he
 		if err != nil {
 			return nil, err
 		}
-		entries[c.name] = append(entries[c.name], entry{c.version, body})
-	}
-	sorted := make(map[string][]json.RawMessage, len(entries))
-	for name, es := range entries {
-		slices.SortFunc(es, func(a, b entry) int { return -compareVersions(a.version, b.version) })
-		bodies := make([]json.RawMessage, len(es))
-		for i, e := range es {
-			bodies[i] = e.body
-		}
-		sorted[name] = bodies
+		entries[c.name] = append(entries[c.name], body)
 	}
 	index, err := json.Marshal(struct {
 		APIVersion string                       `json:"apiVersion"`
 		Entries    map[string][]json.RawMessage `json:"entries"`
 		Generated  time.Time                    `json:"generated"`
-	}{"v1", sorted, h.now().UTC()})
+	}{"v1", entries, h.now().UTC()})
 	if err != nil {
 		return nil, err
 	}
@@ -411,6 +399,10 @@ func helmImage(repo, dir, name string) *repoName {
 	return &repoName{full: repo + "/" + name, repo: repo, name: name}
 }
 
+// errHelmMissing reports that a chart's manifest record or one of its
+// blobs is gone, which unlike the manifest's content can change.
+var errHelmMissing = errors.New("the chart's manifest or a blob it needs is missing")
+
 // readHelmChart reads the chart that manifest d in rn holds, or returns
 // nil if it holds none.
 func (h *Handler) readHelmChart(ctx context.Context, rn *repoName, d blob.Digest) (*helmChart, error) {
@@ -418,7 +410,7 @@ func (h *Handler) readHelmChart(ctx context.Context, rn *repoName, d blob.Digest
 	rec, ok := v.Get(manifestKey(rn, d))
 	v.Release()
 	if !ok {
-		return nil, nil // deleted since the tags were read
+		return nil, errHelmMissing // deleted since the tags were read
 	}
 	m, err := decodeManifest(rec.Value)
 	if err != nil {
@@ -430,7 +422,7 @@ func (h *Handler) readHelmChart(ctx context.Context, rn *repoName, d blob.Digest
 		return nil, nil
 	}
 	body, err := h.readBlob(ctx, d, m.Size)
-	if err != nil || body == nil {
+	if err != nil {
 		return nil, err
 	}
 	var doc manifestDoc
@@ -444,7 +436,7 @@ func (h *Handler) readHelmChart(ctx context.Context, rn *repoName, d blob.Digest
 			return nil, nil
 		}
 		switch l.MediaType {
-		case mtHelmChart, mtHelmChartLegacy:
+		case mtHelmChart:
 			c.chart = helmFile{digest: ld, size: l.Size}
 		case mtHelmProvenance:
 			c.prov = &helmFile{digest: ld, size: l.Size, prov: true}
@@ -455,7 +447,7 @@ func (h *Handler) readHelmChart(ctx context.Context, rn *repoName, d blob.Digest
 		return nil, nil
 	}
 	config, err := h.readBlob(ctx, cd, doc.Config.Size)
-	if err != nil || config == nil {
+	if err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(config, &c.meta); err != nil {
@@ -469,12 +461,12 @@ func (h *Handler) readHelmChart(ctx context.Context, rn *repoName, d blob.Digest
 	return c, nil
 }
 
-// readBlob reads blob d of size bytes, returning nil if the blob store
-// does not hold it.
+// readBlob reads blob d of size bytes, returning errHelmMissing if the
+// blob store does not hold it.
 func (h *Handler) readBlob(ctx context.Context, d blob.Digest, size int64) ([]byte, error) {
 	f, err := h.blobs.Open(ctx, d)
 	if errors.Is(err, blob.ErrNotFound) {
-		return nil, nil
+		return nil, errHelmMissing
 	}
 	if err != nil {
 		return nil, err
@@ -500,88 +492,4 @@ func validChartVersion(s string) bool {
 		}
 	}
 	return true
-}
-
-// compareVersions orders chart versions by semantic version precedence,
-// accepting a leading "v" and missing minor and patch numbers as Helm
-// does. Versions that do not parse sort below those that do, by their
-// text.
-func compareVersions(a, b string) int {
-	va, oka := parseVersion(a)
-	vb, okb := parseVersion(b)
-	switch {
-	case oka && okb:
-		for i := range 3 {
-			if c := cmp.Compare(va.nums[i], vb.nums[i]); c != 0 {
-				return c
-			}
-		}
-		if c := comparePrerelease(va.pre, vb.pre); c != 0 {
-			return c
-		}
-		return strings.Compare(a, b)
-	case oka:
-		return 1
-	case okb:
-		return -1
-	}
-	return strings.Compare(a, b)
-}
-
-type version struct {
-	nums [3]uint64
-	pre  string
-}
-
-func parseVersion(s string) (version, bool) {
-	var v version
-	s = strings.TrimPrefix(s, "v")
-	s, _, _ = strings.Cut(s, "+")
-	s, v.pre, _ = strings.Cut(s, "-")
-	parts := strings.Split(s, ".")
-	if len(parts) > 3 {
-		return v, false
-	}
-	for i, p := range parts {
-		n, err := strconv.ParseUint(p, 10, 64)
-		if err != nil {
-			return v, false
-		}
-		v.nums[i] = n
-	}
-	return v, true
-}
-
-// comparePrerelease compares pre-release strings: none ranks above any,
-// and dot-separated identifiers compare numerically when both are
-// numbers, else lexically, with numbers below text.
-func comparePrerelease(a, b string) int {
-	switch {
-	case a == b:
-		return 0
-	case a == "":
-		return 1
-	case b == "":
-		return -1
-	}
-	as, bs := strings.Split(a, "."), strings.Split(b, ".")
-	for i := 0; i < len(as) && i < len(bs); i++ {
-		na, ea := strconv.ParseUint(as[i], 10, 64)
-		nb, eb := strconv.ParseUint(bs[i], 10, 64)
-		var c int
-		switch {
-		case ea == nil && eb == nil:
-			c = cmp.Compare(na, nb)
-		case ea == nil:
-			c = -1
-		case eb == nil:
-			c = 1
-		default:
-			c = strings.Compare(as[i], bs[i])
-		}
-		if c != 0 {
-			return c
-		}
-	}
-	return cmp.Compare(uint64(len(as)), uint64(len(bs)))
 }

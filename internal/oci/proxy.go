@@ -551,7 +551,6 @@ func (h *Handler) cacheManifest(ctx context.Context, actor string, rn *repoName,
 	}
 	d := um.Digest
 	rec := pm.record
-	rec.Pushed = h.now()
 	seen := map[manifestRef]bool{}
 	add := func(kind refKind, ds []descriptor) {
 		for _, desc := range ds {

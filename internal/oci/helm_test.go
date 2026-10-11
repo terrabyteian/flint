@@ -125,7 +125,7 @@ func TestHelmIndex(t *testing.T) {
 	if idx.APIVersion != "v1" || !idx.Generated.Equal(e.now) || etag == "" {
 		t.Errorf("index header = %q %v, ETag %q", idx.APIVersion, idx.Generated, etag)
 	}
-	if got := versions(idx, "app"); !slices.Equal(got, []string{"2.0.0+build.1", "1.10.0", "1.2.0", "1.2.0-rc.1", "1.0.0"}) {
+	if got := versions(idx, "app"); !slices.Equal(got, []string{"1.0.0", "1.10.0", "1.2.0", "1.2.0-rc.1", "2.0.0+build.1"}) {
 		t.Errorf("app versions = %v", got)
 	}
 	if len(idx.Entries) != 2 || len(idx.Entries["web"]) != 1 {
@@ -221,13 +221,13 @@ func TestHelmIndexCaching(t *testing.T) {
 	// A new version changes it.
 	e.pushChart("charts/app", newChart("app", "1.1.0", false, nil))
 	idx, etag2 := e.helmIndex("/helm/charts/index.yaml")
-	if etag2 == etag || !slices.Equal(versions(idx, "app"), []string{"1.1.0", "1.0.0"}) {
+	if etag2 == etag || !slices.Equal(versions(idx, "app"), []string{"1.0.0", "1.1.0"}) {
 		t.Errorf("after a push: ETag %s, versions %v", etag2, versions(idx, "app"))
 	}
 	if w := e.helm("GET", "/helm/charts/index.yaml", "If-None-Match", etag); w.Code != http.StatusOK {
 		t.Errorf("conditional GET with the old ETag = %d", w.Code)
 	}
-	if created := idx.Entries["app"][0]["created"]; created != e.now.Format(time.RFC3339) {
+	if created := idx.Entries["app"][1]["created"]; created != e.now.Format(time.RFC3339) {
 		t.Errorf("created = %v, want the push time %v", created, e.now)
 	}
 
@@ -279,6 +279,17 @@ func TestHelmImmutable(t *testing.T) {
 	e.pushBlob("frozen/app", other.config)
 	e.pushBlob("frozen/app", other.tgz)
 	want(t, e.do("PUT", "/v2/frozen/app/manifests/1.0.0", other.manifest, "Content-Type", mtOCIManifest), http.StatusConflict, codeDenied)
+
+	// Pushing the same chart again keeps its push time, after the view
+	// is rebuilt too.
+	pushed := e.now
+	e.now = e.now.Add(time.Hour)
+	e.pushChart("frozen/app", c)
+	e.pushChart("frozen/app", newChart("app", "1.1.0", false, nil))
+	idx, _ = e.helmIndex("/helm/frozen/index.yaml")
+	if created := idx.Entries["app"][0]["created"]; created != pushed.Format(time.RFC3339) {
+		t.Errorf("created = %v after a re-push, want %v", created, pushed)
+	}
 }
 
 // TestHelmChartReadOnce checks that a rebuilt view reads only the charts
@@ -294,8 +305,27 @@ func TestHelmChartReadOnce(t *testing.T) {
 	}
 	e.pushChart("charts/app", newChart("app", "1.1.0", false, nil))
 	idx, _ := e.helmIndex("/helm/charts/index.yaml")
-	if !slices.Equal(versions(idx, "app"), []string{"1.1.0", "1.0.0"}) {
+	if !slices.Equal(versions(idx, "app"), []string{"1.0.0", "1.1.0"}) {
 		t.Errorf("versions = %v", versions(idx, "app"))
+	}
+}
+
+// TestHelmChartMissing checks that a chart whose blob is missing is left
+// out of the view but read again when the view is rebuilt.
+func TestHelmChartMissing(t *testing.T) {
+	e := newEnv(t)
+	c := newChart("app", "1.0.0", false, nil)
+	e.pushChart("charts/app", c)
+	if err := e.blobs.Delete(t.Context(), blob.FromBytes(c.config)); err != nil {
+		t.Fatal(err)
+	}
+	e.pushChart("charts/app", newChart("app", "1.1.0", false, nil))
+	if idx, _ := e.helmIndex("/helm/charts/index.yaml"); !slices.Equal(versions(idx, "app"), []string{"1.1.0"}) {
+		t.Errorf("versions with a blob missing = %v", versions(idx, "app"))
+	}
+	e.pushChart("charts/app", c)
+	if idx, _ := e.helmIndex("/helm/charts/index.yaml"); !slices.Equal(versions(idx, "app"), []string{"1.0.0", "1.1.0"}) {
+		t.Errorf("versions after the chart was pushed again = %v", versions(idx, "app"))
 	}
 }
 
@@ -359,29 +389,4 @@ func TestHelmAuthorization(t *testing.T) {
 	if len(ba.basic) != 0 {
 		t.Errorf("AuthorizeBasic calls = %v", ba.basic)
 	}
-}
-
-func TestCompareVersions(t *testing.T) {
-	// Versions that do not parse sort below those that do, so the index,
-	// newest first, lists them last.
-	ordered := []string{"not.a.version", "zzz", "0.1.0", "v0.2", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta.2",
-		"1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "1.0.0+build", "1.2.0", "1.10.0", "2"}
-	for i := range ordered {
-		for j := range ordered {
-			got := compareVersions(ordered[i], ordered[j])
-			if want := compareInts(i, j); got != want {
-				t.Errorf("compareVersions(%q, %q) = %d, want %d", ordered[i], ordered[j], got, want)
-			}
-		}
-	}
-}
-
-func compareInts(a, b int) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
 }

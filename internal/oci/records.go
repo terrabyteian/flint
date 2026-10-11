@@ -218,7 +218,7 @@ type manifestRecord struct {
 	Subject      blob.Digest // zero if the manifest has no subject
 	Annotations  string      // the manifest's annotations as a JSON object, or ""
 	Refs         []manifestRef
-	Pushed       time.Time // when the record was last written; zero if a version 1 record
+	Pushed       time.Time // when the record was first written; zero if a version 1 record or a proxy's
 }
 
 // manifestRef is a blob or child manifest a manifest references; garbage
