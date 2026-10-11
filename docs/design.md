@@ -497,7 +497,7 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/npm` | npm registry API: packuments, tarballs, publish, dist-tags, deprecate, unpublish, legacy login; hosted repositories. |
 | `internal/maven` | The Maven 2 repository layout, deploys, generated `maven-metadata.xml`, and Maven's version order: hosted, proxy, and virtual repositories. |
 | `internal/gomod` | The GOPROXY protocol and the Go checksum database proxy: proxy and virtual Go module repositories, on the path-cache engine. |
-| `internal/sumdb` | The Go checksum database's public keys, signed notes, and lookup records, hand-written with `crypto/ed25519`, to verify modules before they are cached. |
+| `internal/sumdb` | The Go checksum database's public keys, signed notes, lookup records, and tile proofs (RFC 6962 inclusion and consistency), hand-written with `crypto/ed25519` and `crypto/sha256`, to verify modules before they are cached. |
 | `internal/upstream` | Shared upstream client and caching-proxy pieces: credentials, retries, offline fallback, the fetch policy and concurrency cap, revalidation windows, the shared fetcher with its verifier hook, the document cache, the path-cache engine, the negative cache, free-space watcher, size limits, and proxy metrics. |
 | `internal/hostpattern` | The `proxy.allowHosts` host patterns, parsed alike by configuration validation and the upstream fetch policy. |
 | `internal/metrics` | Prometheus text exposition. |
