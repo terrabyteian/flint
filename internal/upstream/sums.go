@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
+	"net/http"
 	"slices"
 	"strings"
 )
@@ -25,6 +27,9 @@ const (
 	SHA512  = "sha512"
 	MD5     = "md5"
 	GitSHA1 = "git-sha1" // a git blob object's id: sha1 of "blob <size>\x00" and the content
+	// SHA256 is only for Expect.FromResponse, whose sha256 digest sets
+	// Expect.SHA256: the blob store computes sha256 itself.
+	SHA256 = "sha256"
 )
 
 // Sums are the digests computed of content, by algorithm (SHA1 and so
@@ -61,6 +66,47 @@ type Expect struct {
 	// the content through r, size bytes long. An error fails the fetch;
 	// one that should count as a mismatch wraps ErrDigestMismatch.
 	Check func(ctx context.Context, r io.ReaderAt, size int64) error
+	// FromResponse, if not nil, is called once the upstream has answered,
+	// before the content is read, with the response's headers. It returns
+	// further digests the content must match, by algorithm (SHA256
+	// included), such as those a Maven repository announces in
+	// X-Checksum-SHA1 or serves in checksum sidecars. An error fails the
+	// fetch; ErrUnverifiable says
+	// the upstream offers nothing to verify the content against, which a
+	// PathCache answers by passing the content through without caching
+	// it.
+	FromResponse func(ctx context.Context, h http.Header) (Sums, error)
+}
+
+// ErrUnverifiable means the upstream offers nothing to verify content
+// against, such as a file without a checksum, so it must not be cached.
+var ErrUnverifiable = errors.New("the upstream offers no digest to verify the content against")
+
+// withResponse returns e with the digests e.FromResponse derives from the
+// upstream's response headers h added to its Sums.
+func (e *Expect) withResponse(ctx context.Context, h http.Header) (*Expect, error) {
+	if e.FromResponse == nil {
+		return e, nil
+	}
+	more, err := e.FromResponse(ctx, h)
+	if err != nil || len(more) == 0 {
+		return e, err
+	}
+	out := *e
+	out.Sums = maps.Clone(e.Sums)
+	if out.Sums == nil {
+		out.Sums = Sums{}
+	}
+	maps.Copy(out.Sums, more)
+	if sum, ok := out.Sums[SHA256]; ok {
+		delete(out.Sums, SHA256)
+		got := hex.EncodeToString(sum)
+		if out.SHA256 != "" && out.SHA256 != got {
+			return nil, fmt.Errorf("%w: the upstream announces sha256 %s, want %s", ErrDigestMismatch, got, out.SHA256)
+		}
+		out.SHA256 = got
+	}
+	return &out, nil
 }
 
 // hashers computes the digests an Expect needs while content streams

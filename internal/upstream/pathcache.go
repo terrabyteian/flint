@@ -290,14 +290,14 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 		return
 	}
 	var release func()
-	open := func(ctx context.Context) (io.ReadCloser, int64, string, error) {
+	open := func(ctx context.Context) (io.ReadCloser, int64, http.Header, error) {
 		resp, err := rp.Client.GetURL(ctx, rt.URL, rt.Header)
 		if err != nil {
-			return nil, 0, "", err
+			return nil, 0, nil, err
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, 0, "", &Error{Op: "GET " + rt.URL, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %s", resp.Status)}
+			return nil, 0, nil, &Error{Op: "GET " + rt.URL, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %s", resp.Status)}
 		}
 		size := resp.ContentLength
 		if rt.Expect.Size >= 0 {
@@ -306,10 +306,10 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 		rel, ok := pc.admit(rp, size)
 		if !ok {
 			resp.Body.Close()
-			return nil, 0, "", errPassThrough
+			return nil, 0, nil, errPassThrough
 		}
 		release = rel
-		return resp.Body, resp.ContentLength, resp.Header.Get("Content-Type"), nil
+		return resp.Body, resp.ContentLength, resp.Header, nil
 	}
 	done := func(ctx context.Context, res PathResult, err error) {
 		if release != nil {
@@ -338,7 +338,7 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 	fe, _ := pc.fetcher.FetchPath("path\x00"+rp.Name+"\x00"+rt.Path, rp.Name+"/"+rt.Path, rt.Expect, open, done)
 	defer fe.Release()
 	size, err := fe.Wait(ctx)
-	if errors.Is(err, errPassThrough) {
+	if errors.Is(err, errPassThrough) || errors.Is(err, ErrUnverifiable) {
 		pc.passThroughVerified(w, r, rp, rt)
 		return
 	}
@@ -380,7 +380,7 @@ var errPassThrough = errors.New("upstream: content passed through without cachin
 // however many clients waited on it, and remembers a not-found answer.
 func (pc *PathCache) fetchFailed(rp *PathRepo, rt *Route, err error) {
 	switch {
-	case errors.Is(err, errPassThrough):
+	case errors.Is(err, errPassThrough), errors.Is(err, ErrUnverifiable):
 	case errors.Is(err, ErrNotFound):
 		pc.remember(rp, rt, err)
 	default:
@@ -462,7 +462,8 @@ const maxCheckInMemory = 64 << 20
 // caching it, verified against rt.Expect on the way: the final bytes are
 // sent only once the content has matched. Content with an Expect.Check
 // is held in memory, up to maxCheckInMemory, and checked before any of
-// it is sent.
+// it is sent. Content the upstream offers nothing to verify against
+// (ErrUnverifiable) is passed through as it is.
 func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request, rp *PathRepo, rt *Route) {
 	ctx := r.Context()
 	resp, err := rp.Client.GetURL(ctx, rt.URL, rt.Header)
@@ -480,6 +481,15 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	defer resp.Body.Close()
+	expect, err := rt.Expect.withResponse(ctx, resp.Header)
+	if errors.Is(err, ErrUnverifiable) {
+		expect, err = &rt.Expect, nil
+	}
+	if err != nil {
+		pc.m.UpstreamErrors.With(rp.Name).Inc()
+		pc.fail(w, r, rp, rt, err)
+		return
+	}
 	size := resp.ContentLength
 	if rt.Expect.Size >= 0 {
 		if size >= 0 && size != rt.Expect.Size {
@@ -493,18 +503,18 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 	if ct == "" {
 		ct = orOctetStream(resp.Header.Get("Content-Type"))
 	}
-	er, err := newExpectReader(resp.Body, &rt.Expect, rp.Name+"/"+rt.Path)
+	er, err := newExpectReader(resp.Body, expect, rp.Name+"/"+rt.Path)
 	if err != nil {
 		pc.fail(w, r, rp, rt, err)
 		return
 	}
-	if rt.Expect.Check != nil {
+	if expect.Check != nil {
 		b, err := io.ReadAll(io.LimitReader(er, maxCheckInMemory+1))
 		switch {
 		case err == nil && len(b) > maxCheckInMemory:
 			err = fmt.Errorf("%w: %s cannot be verified without being cached while the data directory is nearly full", ErrNoSpace, rt.Path)
 		case err == nil:
-			err = rt.Expect.Check(ctx, bytes.NewReader(b), int64(len(b)))
+			err = expect.Check(ctx, bytes.NewReader(b), int64(len(b)))
 		}
 		if err != nil {
 			if !errors.Is(err, ErrNoSpace) {

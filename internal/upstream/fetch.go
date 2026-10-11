@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"time"
 
@@ -120,20 +121,29 @@ type PathResult struct {
 func (f *Fetcher) FetchPath(key, label string, e Expect, open PathSource, done func(ctx context.Context, r PathResult, err error)) (fe *Fetch, joined bool) {
 	nf := &Fetch{key: key, label: label, expect: &e}
 	src := func(ctx context.Context) (io.ReadCloser, int64, error) {
-		body, size, ct, err := open(ctx)
-		if err == nil {
-			nf.mu.Lock()
-			nf.ctype = ct
-			nf.mu.Unlock()
+		body, size, h, err := open(ctx)
+		if err != nil {
+			return nil, 0, err
 		}
-		return body, size, err
+		// Only the fetch's goroutine reads the expectation.
+		x, err := nf.expect.withResponse(ctx, h)
+		if err != nil {
+			body.Close()
+			return nil, 0, err
+		}
+		nf.expect = x
+		nf.mu.Lock()
+		nf.ctype = h.Get("Content-Type")
+		nf.mu.Unlock()
+		return body, size, nil
 	}
 	return f.start(nf, src, done)
 }
 
-// PathSource is a Source that also reports the content's media type,
-// such as the upstream's Content-Type.
-type PathSource func(ctx context.Context) (body io.ReadCloser, size int64, contentType string, err error)
+// PathSource is a Source that also reports the upstream response's
+// headers, for the content's media type (Content-Type) and
+// Expect.FromResponse; nil means none.
+type PathSource func(ctx context.Context) (body io.ReadCloser, size int64, header http.Header, err error)
 
 // ContentType returns the media type the PathSource of a fetch by path
 // reported, once Wait has returned without an error.
@@ -183,9 +193,18 @@ func (f *Fetcher) download(ctx context.Context, cancel func(), fe *Fetch, open S
 	watchdog := time.AfterFunc(f.idle, cancel)
 	defer watchdog.Stop()
 	want := fe.d
+	body, size, err := open(withWatchdog(ctx, watchdog, f.idle))
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return blob.Info{}, fmt.Errorf("%w: no answer from the upstream for %v while fetching %s", ErrUnavailable, f.idle, fe.label)
+		}
+		return blob.Info{}, err
+	}
+	defer body.Close()
+	// The expectation is complete once the upstream has answered (see
+	// Expect.FromResponse).
 	var hs *hashers
 	if e := fe.expect; e != nil {
-		var err error
 		if hs, err = newHashers(e); err != nil {
 			return blob.Info{}, err
 		}
@@ -195,14 +214,6 @@ func (f *Fetcher) download(ctx context.Context, cancel func(), fe *Fetch, open S
 			}
 		}
 	}
-	body, size, err := open(withWatchdog(ctx, watchdog, f.idle))
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return blob.Info{}, fmt.Errorf("%w: no answer from the upstream for %v while fetching %s", ErrUnavailable, f.idle, fe.label)
-		}
-		return blob.Info{}, err
-	}
-	defer body.Close()
 	if e := fe.expect; e != nil && e.Size >= 0 {
 		if size >= 0 && size != e.Size {
 			return blob.Info{}, fmt.Errorf("%w: the upstream announced %d bytes of %s, want %d", ErrDigestMismatch, size, fe.label, e.Size)
