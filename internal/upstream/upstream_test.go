@@ -101,8 +101,8 @@ func TestCredentialedTokenFlow(t *testing.T) {
 	}
 	c := newClient(t, reg.URL, upstream.Options{Username: "bot", PasswordFile: pwFile})
 	_, err := c.GetManifest(ctx, "team/app", "v1")
-	if !errors.Is(err, upstream.ErrDenied) {
-		t.Fatalf("with a wrong password: %v, want ErrDenied", err)
+	if !errors.Is(err, upstream.ErrAuth) || errors.Is(err, upstream.ErrDenied) {
+		t.Fatalf("with a wrong password: %v, want ErrAuth", err)
 	}
 	if strings.Contains(err.Error(), "wrong") {
 		t.Errorf("the error reveals the password: %v", err)
@@ -153,6 +153,12 @@ func TestBasicChallenge(t *testing.T) {
 	if _, err := anon.HeadBlob(ctx, "x", d); !errors.Is(err, upstream.ErrDenied) {
 		t.Errorf("anonymous against Basic: %v, want ErrDenied", err)
 	}
+	if err := os.WriteFile(pwFile, []byte("wrong"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.HeadBlob(ctx, "x", d); !errors.Is(err, upstream.ErrAuth) {
+		t.Errorf("wrong password against Basic: %v, want ErrAuth", err)
+	}
 }
 
 func TestInsecureRealmRefused(t *testing.T) {
@@ -169,7 +175,7 @@ func TestInsecureRealmRefused(t *testing.T) {
 	defer tlsSrv.Close()
 	c := newClient(t, tlsSrv.URL, upstream.Options{HTTPClient: tlsSrv.Client()})
 	_, err := c.GetManifest(ctx, "a", "b")
-	if !errors.Is(err, upstream.ErrDenied) || !strings.Contains(err.Error(), "not https") {
+	if !errors.Is(err, upstream.ErrAuth) || !strings.Contains(err.Error(), "not https") {
 		t.Errorf("err = %v, want a refused realm", err)
 	}
 	if tokenRequests.Load() != 0 {

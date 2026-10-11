@@ -150,10 +150,10 @@ func (c *Client) fetchToken(ctx context.Context, ch challenge, scope string) (st
 	realm, err := url.Parse(ch.params["realm"])
 	op := "GET token from " + ch.params["realm"]
 	if err != nil || (realm.Scheme != "https" && realm.Scheme != "http") || realm.Host == "" {
-		return "", &Error{Op: op, Err: fmt.Errorf("%w: invalid token realm", ErrDenied)}
+		return "", &Error{Op: op, Err: fmt.Errorf("%w: invalid token realm", ErrAuth)}
 	}
 	if c.base.Scheme == "https" && realm.Scheme != "https" {
-		return "", &Error{Op: op, Err: fmt.Errorf("%w: the token realm is not https", ErrDenied)}
+		return "", &Error{Op: op, Err: fmt.Errorf("%w: the token realm is not https", ErrAuth)}
 	}
 	q := realm.Query()
 	if svc := ch.params["service"]; svc != "" {
@@ -181,8 +181,10 @@ func (c *Client) fetchToken(ctx context.Context, ch challenge, scope string) (st
 	}
 	defer drain(resp)
 	switch {
+	case (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && c.username != "":
+		return "", &Error{Op: op, Status: resp.StatusCode, Err: fmt.Errorf("%w: the token service refused the credentials", ErrAuth)}
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return "", &Error{Op: op, Status: resp.StatusCode, Err: fmt.Errorf("%w: the token service refused the credentials", ErrDenied)}
+		return "", &Error{Op: op, Status: resp.StatusCode, Err: fmt.Errorf("%w: the token service refused anonymous access", ErrDenied)}
 	case retryable(resp.StatusCode):
 		return "", &Error{Op: op, Status: resp.StatusCode, Err: ErrUnavailable}
 	case resp.StatusCode != http.StatusOK:

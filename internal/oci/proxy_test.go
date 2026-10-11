@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -399,12 +400,20 @@ func TestProxyOutage(t *testing.T) {
 
 	// A tag deleted upstream is not found, although it is cached; its
 	// manifest stays cached by digest.
+	errs := func() int {
+		n, _ := strconv.Atoi(pe.metric(`flint_proxy_upstream_errors_total{repository="hub"}`))
+		return n
+	}
+	base := errs()
 	pe.up.DeleteTag("app", "v1")
 	pe.advance(time.Hour)
 	want(t, pe.do("GET", "/v2/hub/app/manifests/v1", nil), 404, codeManifestUnknown)
 	want(t, pe.do("HEAD", "/v2/hub/app/manifests/v1", nil), 404, "")
 	pe.get("/v2/hub/app/manifests/"+img.Digest, img.Manifest)
-	// So is one the upstream denies access to.
+	if n := errs() - base; n != 0 {
+		t.Errorf("a deleted tag counted %d upstream errors", n)
+	}
+	// So is one the upstream denies access to, which is counted.
 	pe.up.SetStatus(func(r *http.Request) int {
 		if strings.Contains(r.URL.Path, "/manifests/") {
 			return http.StatusForbidden
@@ -414,6 +423,9 @@ func TestProxyOutage(t *testing.T) {
 	pe.advance(testWindow)
 	want(t, pe.do("GET", "/v2/hub/app/manifests/v2", nil), 404, codeManifestUnknown)
 	pe.get("/v2/hub/app/manifests/"+other.Digest, other.Manifest)
+	if n := errs() - base; n != 1 {
+		t.Errorf("a denied tag counted %d upstream errors, want 1", n)
+	}
 }
 
 // TestProxyStalledUpstream checks that an upstream that accepts requests
@@ -445,8 +457,30 @@ func TestProxyStalledUpstream(t *testing.T) {
 	want(t, pe.do("GET", "/v2/hub/app/manifests/"+other.Digest, nil), 503, codeUnavailable)
 	want(t, pe.do("GET", "/v2/hub/app/blobs/"+other.Layers[0], nil), 503, codeUnavailable)
 	pe.settle()
-	if got := pe.metric(`flint_proxy_upstream_errors_total{repository="hub"}`); got != "5" {
-		t.Errorf("upstream errors = %q, want 5", got)
+	if got := pe.metric(`flint_proxy_upstream_errors_total{repository="hub"}`); got != "4" {
+		t.Errorf("upstream errors = %q, want 4", got)
+	}
+
+	// A blob fetch the idle timeout ends marks the upstream offline too,
+	// and counts once however many clients wait on it.
+	pe.h = pe.newHandler(0, nil)
+	pe.h.fetcher = upstream.NewFetcher(pe.blobs, 100*time.Millisecond)
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Go(func() {
+			w := pe.do("GET", "/v2/hub/app/blobs/"+other.Layers[0], nil)
+			if w.Code != http.StatusServiceUnavailable {
+				t.Errorf("stalled blob: status %d", w.Code)
+			}
+		})
+	}
+	wg.Wait()
+	pe.settle()
+	if !pe.h.repos["hub"].proxy.client.Offline() {
+		t.Error("a stalled blob fetch did not mark the upstream offline")
+	}
+	if got := pe.metric(`flint_proxy_upstream_errors_total{repository="hub"}`); got != "1" {
+		t.Errorf("upstream errors of one stalled blob = %q, want 1", got)
 	}
 }
 
@@ -881,6 +915,33 @@ func TestProxyCredentials(t *testing.T) {
 	}
 	pe.h = pe.newHandler(0, func(p *config.Proxy) { p.Username, p.PasswordFile = "bot", pw })
 	pe.pull("hub/private/app", "v1", img)
+
+	// When the credentials stop working, the cached tag and its listing
+	// keep being served, and the failure is logged and counted.
+	if err := os.WriteFile(pw, []byte("expired\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	pe.h = pe.newHandler(0, func(p *config.Proxy) { p.Username, p.PasswordFile = "bot", pw })
+	pe.h.log = slog.New(slog.NewTextHandler(&logs, nil))
+	pe.get("/v2/hub/private/app/manifests/v1", img.Manifest)
+	w := pe.do("GET", "/v2/hub/private/app/tags/list", nil)
+	want(t, w, 200, "")
+	if !strings.Contains(w.Body.String(), `"tags":["v1"]`) {
+		t.Errorf("tags with expired credentials: %s", w.Body)
+	}
+	if got := pe.metric(`flint_proxy_requests_total{repository="hub",result="stale"}`); got != "2" {
+		t.Errorf("stale = %q, want 2", got)
+	}
+	if got := pe.metric(`flint_proxy_upstream_errors_total{repository="hub"}`); got != "2" {
+		t.Errorf("upstream errors = %q, want 2", got)
+	}
+	if !strings.Contains(logs.String(), "authentication failed: the token service refused the credentials") {
+		t.Errorf("no warning names the refused credentials:\n%s", logs.String())
+	}
+	if err := os.WriteFile(pw, []byte("token-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// A missing password file fails startup.
 	h, err := New(Options{Meta: pe.meta, Blobs: pe.blobs, Authorizer: pe.auth, Logger: quiet,

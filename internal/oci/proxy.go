@@ -158,15 +158,31 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, rn *repoNam
 }
 
 // upstreamFailure turns a failed upstream request into the response
-// error: notFound when the upstream does not have the content, and an
-// unavailable or bad-gateway error otherwise, which it logs and counts.
-// Only a cancelled ctx means the client went away; a ctx past its
-// deadline is an upstream that took too long.
+// error with upstreamError, and logs and counts the failure unless the
+// upstream does not have the content. Only a cancelled ctx means the
+// client went away; a ctx past its deadline is an upstream that took too
+// long.
 func (h *Handler) upstreamFailure(ctx context.Context, rn *repoName, err error, notFound *apiError) error {
-	p := rn.cfg.proxy
-	switch {
-	case errors.Is(ctx.Err(), context.Canceled):
+	if errors.Is(ctx.Err(), context.Canceled) {
 		return ctx.Err()
+	}
+	if _, ok := err.(*apiError); !ok && !errors.Is(err, upstream.ErrNotFound) {
+		h.upstreamErrors.With(rn.repo).Inc()
+		h.log.WarnContext(ctx, "proxy upstream request failed", "repository", rn.repo,
+			"upstream", rn.cfg.proxy.client.Host(), "err", err)
+	}
+	return h.upstreamError(rn, err, notFound)
+}
+
+// upstreamError maps a failed upstream request to the response error:
+// notFound when the upstream does not have the content or denies access
+// to it, and an unavailable or bad-gateway error otherwise.
+func (h *Handler) upstreamError(rn *repoName, err error, notFound *apiError) error {
+	p := rn.cfg.proxy
+	if _, ok := err.(*apiError); ok {
+		return err
+	}
+	switch {
 	case errors.Is(err, upstream.ErrNotFound):
 		return notFound
 	case errors.Is(err, upstream.ErrDenied):
@@ -175,13 +191,6 @@ func (h *Handler) upstreamFailure(ctx context.Context, rn *repoName, err error, 
 		return newError(notFound.status, notFound.Code,
 			"%s: the upstream registry %s denied access; the name may not exist, or may need credentials",
 			notFound.Message, p.client.Host()).withDetail(notFound.Detail)
-	}
-	if _, ok := err.(*apiError); ok {
-		return err
-	}
-	h.upstreamErrors.With(rn.repo).Inc()
-	h.log.WarnContext(ctx, "proxy upstream request failed", "repository", rn.repo, "upstream", p.client.Host(), "err", err)
-	switch {
 	case errors.Is(err, upstream.ErrUnavailable):
 		return newError(http.StatusServiceUnavailable, codeUnavailable,
 			"the upstream registry %s is unavailable, and the content is not cached", p.client.Host())
@@ -327,7 +336,10 @@ func (h *Handler) fetchBlob(w http.ResponseWriter, r *http.Request, rn *repoName
 			release()
 		}
 		if err != nil {
-			if !errors.Is(err, errPassThrough) && !errors.Is(err, upstream.ErrNotFound) && !errors.Is(err, upstream.ErrDenied) {
+			if errors.Is(err, upstream.ErrUnavailable) {
+				p.client.MarkOffline()
+			}
+			if !errors.Is(err, errPassThrough) && !errors.Is(err, upstream.ErrNotFound) {
 				h.upstreamErrors.With(rn.repo).Inc()
 				h.log.Warn("proxy blob fetch failed", "repository", rn.full, "digest", d.String(),
 					"upstream", p.client.Host(), "err", err)
@@ -347,7 +359,12 @@ func (h *Handler) fetchBlob(w http.ResponseWriter, r *http.Request, rn *repoName
 		return
 	}
 	if err != nil {
-		h.writeError(w, r, h.upstreamFailure(ctx, rn, err, blobUnknownError(d)))
+		// The fetch logs and counts its failure once, however many
+		// clients wait on it.
+		if ctx.Err() == nil {
+			err = h.upstreamError(rn, err, blobUnknownError(d))
+		}
+		h.writeError(w, r, err)
 		return
 	}
 	setBlobHeaders(w, d, size)

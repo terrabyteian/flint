@@ -49,9 +49,14 @@ var (
 	// ErrNotFound means the upstream answered 404: it does not have the
 	// content, or the name does not exist.
 	ErrNotFound = errors.New("not found upstream")
-	// ErrDenied means the upstream refused access even after
-	// authentication.
+	// ErrDenied means the upstream refused access to the content even
+	// after authentication, or refused anonymous access to it.
 	ErrDenied = errors.New("access denied by the upstream")
+	// ErrAuth means flint could not authenticate to the upstream: the
+	// upstream or its token service refused the configured credentials,
+	// its challenge was unusable, or its token realm is invalid. It is a
+	// failure of flint's own access, not an answer about the content.
+	ErrAuth = errors.New("upstream authentication failed")
 	// ErrUnavailable means the upstream could not be reached or kept
 	// failing: network errors, timeouts, rate limits, or server errors.
 	ErrUnavailable = errors.New("upstream unavailable")
@@ -228,6 +233,11 @@ func (c *Client) Offline() bool {
 	return c.now().Before(c.offlineUntil)
 }
 
+// MarkOffline marks the upstream offline, as a request that fails with
+// ErrUnavailable does. Callers use it for such failures they detect
+// themselves, such as a response body that stalls.
+func (c *Client) MarkOffline() { c.setOffline(true) }
+
 func (c *Client) setOffline(offline bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -256,7 +266,7 @@ func (c *Client) password() (string, error) {
 // "repository:library/alpine:pull"). It answers authentication
 // challenges and retries transient failures. A response with a 2xx or
 // 3xx status is returned for the caller to read and close; any other is
-// an *Error wrapping ErrNotFound, ErrDenied, ErrUnavailable, or a
+// an *Error wrapping ErrNotFound, ErrDenied, ErrAuth, ErrUnavailable, or a
 // generic error for other statuses. A request whose ctx deadline passes
 // fails with ErrUnavailable.
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, header http.Header, scope string) (*http.Response, error) {
@@ -331,7 +341,7 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 	ch, ok := parseChallenge(resp.Header.Values("WWW-Authenticate"))
 	drain(resp)
 	if !ok {
-		return nil, &Error{Op: op, Status: http.StatusUnauthorized, Err: fmt.Errorf("%w: no usable authentication challenge", ErrDenied)}
+		return nil, &Error{Op: op, Status: http.StatusUnauthorized, Err: fmt.Errorf("%w: no usable authentication challenge", ErrAuth)}
 	}
 	switch ch.scheme {
 	case "bearer":
@@ -353,6 +363,10 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 	resp, err = c.roundTrip(ctx, method, u.String(), header, auth)
 	if err != nil {
 		return nil, &Error{Op: op, Err: fmt.Errorf("%w: %v", ErrUnavailable, err)}
+	}
+	if ch.scheme == "basic" && resp.StatusCode == http.StatusUnauthorized {
+		drain(resp)
+		return nil, &Error{Op: op, Status: http.StatusUnauthorized, Err: fmt.Errorf("%w: the upstream refused the credentials", ErrAuth)}
 	}
 	return resp, nil
 }
