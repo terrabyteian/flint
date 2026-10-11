@@ -69,7 +69,7 @@ func (a *testAuth) reset() []string {
 //	remote    proxy of the fake upstream index up
 //	small     proxy of up with a size limit
 //	all       virtual: local, remote
-//	open      virtual: local, remote, without dependency-confusion protection
+//	open      virtual: local, remote, without dependency-confusion protection, with anonymous pull
 type env struct {
 	t     *testing.T
 	fs    *fsys.Mem
@@ -117,7 +117,7 @@ func (e *env) restart() {
 			Proxy: &config.Proxy{URL: e.up.URL + "/simple", RevalidateAfter: config.Duration{Duration: testWindow},
 				SizeLimit: config.ByteSize{Bytes: 2500}}},
 		{Name: "all", Format: config.FormatPyPI, Type: config.TypeVirtual, Virtual: &config.Virtual{Members: []string{"local", "remote"}}},
-		{Name: "open", Format: config.FormatPyPI, Type: config.TypeVirtual,
+		{Name: "open", Format: config.FormatPyPI, Type: config.TypeVirtual, AnonymousPull: true,
 			Virtual: &config.Virtual{Members: []string{"local", "remote"}, DependencyConfusionProtection: &off}},
 		{Name: "oci", Format: config.FormatOCI, Type: config.TypeHosted},
 	}

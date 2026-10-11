@@ -192,7 +192,7 @@ func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, d blob.Diges
 		}
 		defer f.Close()
 	}
-	setFileHeaders(w, d.Hex(), filename)
+	h.setFileHeaders(w, r, d.Hex(), filename)
 	if r.Method == http.MethodHead {
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
@@ -206,8 +206,8 @@ func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, d blob.Diges
 	return true
 }
 
-// setFileHeaders sets the headers of a file download.
-func setFileHeaders(w http.ResponseWriter, sha string, filename string) {
+// setFileHeaders sets the headers of a file download for request r.
+func (h *Handler) setFileHeaders(w http.ResponseWriter, r *http.Request, sha string, filename string) {
 	hd := w.Header()
 	if strings.HasSuffix(filename, ".metadata") {
 		hd.Set("Content-Type", "text/plain; charset=utf-8")
@@ -217,7 +217,13 @@ func setFileHeaders(w http.ResponseWriter, sha string, filename string) {
 	if sha != "" {
 		hd.Set("ETag", `"sha256:`+sha+`"`)
 	}
-	// Distribution files never change: a file name is never reused.
-	hd.Set("Cache-Control", "public, max-age=31536000, immutable")
+	// Distribution files never change: a file name is never reused. Shared
+	// caches may keep them only when anyone may download them.
+	cc := "private, max-age=31536000, immutable"
+	name, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/pypi/"), "/")
+	if rp := h.repos[name]; rp != nil && rp.anonymous {
+		cc = "public, max-age=31536000, immutable"
+	}
+	hd.Set("Cache-Control", cc)
 	hd.Set("X-Content-Type-Options", "nosniff")
 }

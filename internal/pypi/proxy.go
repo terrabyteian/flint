@@ -401,7 +401,7 @@ func (h *Handler) proxyFile(w http.ResponseWriter, r *http.Request, rp *reposito
 	}
 	d, _ := blob.ParseDigest("sha256:" + f.SHA256)
 	if r.Method == http.MethodHead {
-		setFileHeaders(w, f.SHA256, filename)
+		h.setFileHeaders(w, r, f.SHA256, filename)
 		if f.Size >= 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(f.Size, 10))
 		}
@@ -494,7 +494,7 @@ func (h *Handler) fetchFile(w http.ResponseWriter, r *http.Request, rp *reposito
 		h.fail(w, r, err)
 		return
 	}
-	setFileHeaders(w, f.SHA256, filename)
+	h.setFileHeaders(w, r, f.SHA256, filename)
 	if size >= 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	}
@@ -529,7 +529,7 @@ func (h *Handler) passThrough(w http.ResponseWriter, r *http.Request, rp *reposi
 	if !d.IsZero() {
 		sha = d.Hex()
 	}
-	setFileHeaders(w, sha, filename)
+	h.setFileHeaders(w, r, sha, filename)
 	if size >= 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	}
@@ -597,7 +597,7 @@ func (h *Handler) proxyMetadata(w http.ResponseWriter, r *http.Request, rp *repo
 		h.fail(w, r, err)
 		return
 	}
-	setFileHeaders(w, d.Hex(), filename+".metadata")
+	h.setFileHeaders(w, r, d.Hex(), filename+".metadata")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {

@@ -48,6 +48,7 @@ The examples use `https://registry.example` for flint, and the repositories abov
 
 PyPI clients authenticate with HTTP basic credentials: an [API token](auth.md#api-tokens) with the user name `__token__`, or a user name and its password or token.
 A repository with `anonymousPull` needs no credentials to install from.
+Files and core-metadata files never change, so flint lets clients cache them for a year; only files downloaded through a repository with `anonymousPull` are marked `public`, so a shared cache, such as a caching reverse proxy, never hands a private file to a client that could not download it.
 Installing needs the `read` role, publishing `write`, and yanking and deleting `delete` ([permissions](auth.md#permissions)).
 A request without credentials that needs them gets `401` with `WWW-Authenticate: Basic realm="flint"`, which makes pip and uv look for credentials in `.netrc` or a keyring.
 

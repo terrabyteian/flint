@@ -102,10 +102,11 @@ type Options struct {
 
 // repository is a configured PyPI repository.
 type repository struct {
-	name    string
-	typ     string        // config.TypeHosted, TypeProxy, or TypeVirtual
-	proxy   *proxyRepo    // for a proxy repository
-	virtual *repo.Virtual // for a virtual repository
+	name      string
+	typ       string        // config.TypeHosted, TypeProxy, or TypeVirtual
+	anonymous bool          // anyone may pull
+	proxy     *proxyRepo    // for a proxy repository
+	virtual   *repo.Virtual // for a virtual repository
 }
 
 // Handler serves PyPI repositories.
@@ -177,7 +178,7 @@ func New(opts Options) (*Handler, error) {
 		if rc.Format != config.FormatPyPI {
 			continue
 		}
-		r := &repository{name: rc.Name, typ: rc.Type}
+		r := &repository{name: rc.Name, typ: rc.Type, anonymous: rc.AnonymousPull}
 		switch rc.Type {
 		case config.TypeHosted:
 		case config.TypeProxy:

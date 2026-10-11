@@ -390,6 +390,38 @@ func TestProxyMetadataFetchIsPerProject(t *testing.T) {
 	}
 }
 
+func TestFileCacheControl(t *testing.T) {
+	e := newEnv(t)
+	hosted := wheel("pkg", "1.0", nil)
+	e.mustUpload("local", hosted)
+	proxied := wheel("up", "1.0", nil)
+	e.up.add("up", upFile{dist: proxied, metadata: true})
+	const private, public = "private, max-age=31536000, immutable", "public, max-age=31536000, immutable"
+	for _, tc := range []struct{ path, want string }{
+		{"/pypi/local/files/pkg/" + hosted.filename, private},
+		{"/pypi/local/files/pkg/" + hosted.filename + ".metadata", private},
+		{"/pypi/all/files/pkg/" + hosted.filename, private},
+		{"/pypi/remote/files/up/" + proxied.filename, private},
+		{"/pypi/remote/files/up/" + proxied.filename + ".metadata", private},
+		{"/pypi/remote/files/up/" + proxied.filename, private}, // from the cache
+		// Only a repository anyone may pull from lets shared caches keep
+		// its files, also those of its members.
+		{"/pypi/open/files/pkg/" + hosted.filename, public},
+		{"/pypi/open/files/pkg/" + hosted.filename + ".metadata", public},
+		{"/pypi/open/files/up/" + proxied.filename, public},
+		{"/pypi/open/files/up/" + proxied.filename + ".metadata", public},
+	} {
+		if got := e.get(tc.path, http.StatusOK).Header().Get("Cache-Control"); got != tc.want {
+			t.Errorf("GET %s: Cache-Control %q, want %q", tc.path, got, tc.want)
+		}
+		e.settle()
+	}
+	// Errors are not cached as files are.
+	if got := e.get("/pypi/open/files/pkg/pkg-9.0.tar.gz", http.StatusNotFound).Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("a missing file: Cache-Control %q", got)
+	}
+}
+
 func TestProxyDiskPressure(t *testing.T) {
 	e := newEnv(t)
 	a := wheel("pkg", "1.0", nil)
