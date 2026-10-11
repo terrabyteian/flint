@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -274,7 +273,7 @@ func TestGCUsage(t *testing.T) {
 
 func TestFormatBytes(t *testing.T) {
 	for n, want := range map[int64]string{0: "0 B", 1023: "1023 B", 1024: "1.0 KiB", 1536: "1.5 KiB", 5 << 30: "5.0 GiB", 3 << 50: "3.0 PiB",
-		1 << 62: fmt.Sprintf("%.1f PiB", float64(1<<62)/float64(1<<50))} {
+		1 << 62: "4.0 EiB"} {
 		if got := formatBytes(n); got != want {
 			t.Errorf("formatBytes(%d) = %q, want %q", n, got, want)
 		}
