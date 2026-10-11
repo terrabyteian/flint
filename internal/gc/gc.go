@@ -221,7 +221,7 @@ func New(opts Options) (*Collector, error) {
 	if opts.Meta == nil || opts.Blobs == nil {
 		return nil, errors.New("gc: Meta and Blobs are required")
 	}
-	reg, err := newRegistry(opts.Markers)
+	marks, err := newRegistry(opts.Markers)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,7 @@ func New(opts Options) (*Collector, error) {
 	c := &Collector{
 		meta:      opts.Meta,
 		blobs:     opts.Blobs,
-		reg:       reg,
+		reg:       marks,
 		grace:     opts.GracePeriod,
 		interval:  max(opts.Interval, 0),
 		roundSize: opts.RoundSize,
@@ -268,23 +268,23 @@ func New(opts Options) (*Collector, error) {
 		}
 	}
 
-	reg2 := opts.Metrics
-	if reg2 == nil {
-		reg2 = metrics.NewRegistry() // unexposed; keeps the metrics usable
+	reg := opts.Metrics
+	if reg == nil {
+		reg = metrics.NewRegistry() // unexposed; keeps the metrics usable
 	}
-	c.runs = reg2.Counter("flint_gc_runs_total",
+	c.runs = reg.Counter("flint_gc_runs_total",
 		"Garbage collection runs, by mode (sweep, dry_run) and result (succeeded, refused, failed, cancelled).",
 		"mode", "result")
-	c.duration = reg2.Histogram("flint_gc_duration_seconds", "Duration of garbage collection runs, by mode (sweep, dry_run).",
+	c.duration = reg.Histogram("flint_gc_duration_seconds", "Duration of garbage collection runs, by mode (sweep, dry_run).",
 		[]float64{1, 5, 15, 60, 300, 900, 3600, 4 * 3600, 12 * 3600}, "mode")
-	c.reclaimed = reg2.Counter("flint_gc_reclaimed_blobs_total", "Blobs garbage collection deleted.").With()
-	c.reclaimedB = reg2.Counter("flint_gc_reclaimed_bytes_total", "Bytes of the blobs garbage collection deleted.").With()
-	c.lastSuccess = reg2.Gauge("flint_gc_last_success_timestamp_seconds",
+	c.reclaimed = reg.Counter("flint_gc_reclaimed_blobs_total", "Blobs garbage collection deleted.").With()
+	c.reclaimedB = reg.Counter("flint_gc_reclaimed_bytes_total", "Bytes of the blobs garbage collection deleted.").With()
+	c.lastSuccess = reg.Gauge("flint_gc_last_success_timestamp_seconds",
 		"Unix time the last successful garbage collection run that was not a dry run finished, or 0 if none has.").With()
 	if c.last != nil && c.last.State == StateSucceeded {
 		c.lastSuccess.Set(float64(c.last.Finished.Unix()))
 	}
-	reg2.GaugeFunc("flint_gc_running", "1 while a garbage collection run is in progress, else 0.", func() float64 {
+	reg.GaugeFunc("flint_gc_running", "1 while a garbage collection run is in progress, else 0.", func() float64 {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.running != nil {
