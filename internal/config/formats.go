@@ -43,6 +43,14 @@ var formats = []formatSpec{
 		check: checkGeneric},
 	{name: FormatCargo, types: []string{TypeHosted, TypeProxy, TypeVirtual}},
 	{name: FormatNPM, types: []string{TypeHosted}},
+	{name: FormatMaven, types: []string{TypeHosted, TypeProxy, TypeVirtual},
+		settings: func(r *Repository) any {
+			if r.Maven == nil {
+				return nil
+			}
+			return r.Maven
+		},
+		check: checkMaven},
 }
 
 // Generic holds the settings of a generic files repository.
@@ -76,6 +84,46 @@ func checkGeneric(v *validator, path string, r *Repository) {
 	if p := r.Proxy; r.Type == TypeProxy && p != nil && (p.SizeLimit.set || p.SizeLimit.Bytes != 0) && (r.Generic == nil || !r.Generic.Immutable) {
 		base, _ := strings.CutSuffix(path, "."+FormatGeneric)
 		v.addf(base+".proxy.sizeLimit", "needs generic.immutable: only files cached forever count against a size limit")
+	}
+}
+
+// Maven version policies: which versions a hosted Maven repository
+// accepts.
+const (
+	VersionPolicyRelease  = "release"
+	VersionPolicySnapshot = "snapshot"
+	VersionPolicyMixed    = "mixed"
+)
+
+// Maven holds a Maven repository's settings.
+type Maven struct {
+	// VersionPolicy is which versions a hosted repository accepts:
+	// "release" (default) for release versions only, "snapshot" for
+	// snapshot versions (ending in "SNAPSHOT") only, or "mixed" for
+	// both. Hosted repositories only.
+	VersionPolicy string `json:"versionPolicy,omitempty"`
+}
+
+// Policy returns the version policy, with the default filled in.
+func (m *Maven) Policy() string {
+	if m == nil || m.VersionPolicy == "" {
+		return VersionPolicyRelease
+	}
+	return m.VersionPolicy
+}
+
+// checkMaven validates a Maven repository's settings.
+func checkMaven(v *validator, path string, r *Repository) {
+	m := r.Maven
+	if m == nil || m.VersionPolicy == "" {
+		return
+	}
+	switch {
+	case r.Type != TypeHosted:
+		v.addf(path+".versionPolicy", "is only allowed for a hosted repository")
+	case m.VersionPolicy != VersionPolicyRelease && m.VersionPolicy != VersionPolicySnapshot && m.VersionPolicy != VersionPolicyMixed:
+		v.addf(path+".versionPolicy", "%q is not one of %s, %s, %s", m.VersionPolicy,
+			VersionPolicyRelease, VersionPolicySnapshot, VersionPolicyMixed)
 	}
 }
 

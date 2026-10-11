@@ -24,7 +24,9 @@ A blob is **referenced**, and kept, while any of these records points at it, in 
 - a `.crate` file that a Cargo proxy repository cached, until the cache evicts it;
 - a Cargo index file, or an upstream's `config.json`, that a proxy repository cached, until a newer copy replaces it;
 - an npm version in a hosted repository, which references its tarball, its manifest, and its provenance bundle, until the version is unpublished;
-- an npm package in a hosted repository, which references the readme of the last publish that created or moved its `latest` dist-tag.
+- an npm package in a hosted repository, which references the readme of the last publish that created or moved its `latest` dist-tag;
+- a Maven file in a hosted repository, which references the file's bytes, until the file is deleted;
+- a Maven file that a proxy repository cached, until the cache evicts it, or a `maven-metadata.xml` it cached, until a newer copy replaces it.
 
 Everything else in the blob store is **unreferenced**.
 Garbage collection deletes an unreferenced blob once its grace period is over: by default 24 hours after the blob was stored.

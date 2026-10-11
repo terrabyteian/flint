@@ -26,7 +26,7 @@ flint builds with the Go standard library and nothing else.
 - `golang.org/x/...` modules count as external and are not allowed either.
 - If you need something the standard library lacks, write it in flint, with tests.
 
-Tools that never ship in the binary are fine in CI: real clients such as docker, crane, oras, pip, uv, twine, cargo, npm, pnpm, Yarn, and Bun, and the OCI distribution conformance suite.
+Tools that never ship in the binary are fine in CI: real clients such as docker, crane, oras, pip, uv, twine, cargo, npm, pnpm, Yarn, Bun, Maven, and Gradle, and the OCI distribution conformance suite.
 
 ## Tests
 
@@ -63,6 +63,7 @@ The `pypi` job runs [`scripts/e2e-pypi.sh`](scripts/e2e-pypi.sh), which publishe
 The `generic` job runs [`scripts/e2e-generic.sh`](scripts/e2e-generic.sh), which uploads, downloads, and lists files with curl and wget in hosted and virtual generic files repositories, and downloads flint's own release binaries through proxy repositories of its GitHub releases, checking them against their published checksums, then downloads again after restarting flint with its upstreams unreachable.
 The `cargo` job runs [`scripts/e2e-cargo.sh`](scripts/e2e-cargo.sh), which publishes crates with `cargo publish`, yanks and searches them, and builds crates depending on them and on crates.io through hosted, proxy, and virtual Cargo repositories, then builds again after restarting flint with its upstream unreachable.
 The `npm` job runs [`scripts/e2e-npm.sh`](scripts/e2e-npm.sh) with npm 10 and npm 11 against a hosted npm repository: it publishes, changes dist-tags, deprecates, unpublishes, and logs in with npm, and installs and publishes with npm, pnpm, Yarn classic, Yarn Berry, and Bun.
+The `maven` job runs [`scripts/e2e-maven.sh`](scripts/e2e-maven.sh), which deploys a library, its sources and javadoc, and a snapshot twice with Maven, publishes with Gradle 8 and Gradle 9, and builds projects with real dependencies from Maven Central through hosted, proxy, and virtual Maven repositories, then builds again with empty local caches after restarting flint with its upstream unreachable.
 
 ## Pull requests
 

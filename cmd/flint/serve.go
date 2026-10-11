@@ -23,6 +23,7 @@ import (
 	"github.com/terrabyteian/flint/internal/fsys"
 	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/generic"
+	"github.com/terrabyteian/flint/internal/maven"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/npm"
@@ -130,6 +131,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	janitors.Go(func() { a.oci.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
 	janitors.Go(func() { a.oci.RunProxy(janitorCtx) })
 	janitors.Go(func() { a.pypi.RunProxy(janitorCtx) })
+	janitors.Go(func() { a.maven.RunProxy(janitorCtx) })
 	janitors.Go(func() { a.docs.Run(janitorCtx, a.revalidate) })
 	janitors.Go(func() { a.paths.Run(janitorCtx) })
 	if a.space != nil {
@@ -177,6 +179,7 @@ type app struct {
 	oci     *oci.Handler
 	pypi    *pypi.Handler
 	cargo   *cargo.Handler
+	maven   *maven.Handler
 	space   *upstream.Space // nil without proxy repositories
 	audit   *audit.Log
 	backups *backup.Manager // nil unless backups are configured
@@ -370,6 +373,27 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		return nil, err
 	}
 	crates.Register(srv)
+	mvn, err := maven.New(maven.Options{
+		Meta:         store,
+		Blobs:        blobs,
+		Repositories: cfg.Repositories,
+		// Maven and Gradle send credentials only after a Basic challenge.
+		Authorizer:     authz.Authorizer(auth.Challenge{Style: auth.ChallengeBasic}),
+		Actor:          authz.Actor,
+		Logger:         logger,
+		Metrics:        reg,
+		Upstream:       upOpts,
+		Space:          space,
+		Now:            now,
+		Fetcher:        fetcher,
+		ProxyMetrics:   proxyMetrics,
+		Docs:           docs,
+		VirtualMetrics: virtualMetrics,
+	})
+	if err != nil {
+		return nil, err
+	}
+	mvn.Register(srv)
 	npmRegistry, err := npm.New(npm.Options{
 		Meta:         store,
 		Blobs:        blobs,
@@ -422,8 +446,8 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	}
 	authz.HandleAdmin(srv, gc.StatusPattern, collector.HandleStatus)
 	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
-	return &app{srv: srv, oci: registry, pypi: index, cargo: crates, space: space, audit: auditLog, backups: backups,
-		gc: collector, docs: docs, revalidate: revalidate, paths: paths}, nil
+	return &app{srv: srv, oci: registry, pypi: index, cargo: crates, maven: mvn, space: space, audit: auditLog,
+		backups: backups, gc: collector, docs: docs, revalidate: revalidate, paths: paths}, nil
 }
 
 // gcMarkers are the garbage-collection markers of every package that
@@ -431,14 +455,14 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 // them registers. A format adds its marker here when it is wired in.
 func gcMarkers() []gc.Marker {
 	return []gc.Marker{oci.GCMarker(), pypi.GCMarker(), generic.GCMarker(), cargo.GCMarker(), npm.GCMarker(),
-		upstream.Marks, auth.GCMarker()}
+		maven.GCMarker(), upstream.Marks, auth.GCMarker()}
 }
 
 // blobReferences report the blobs every format package's records, and
 // the proxy cache the formats share, reference, for backups to check that
 // they hold them all.
 var blobReferences = []backup.References{oci.References, pypi.References, generic.References, cargo.References,
-	npm.References, upstream.References}
+	npm.References, maven.References, upstream.References}
 
 // npmLogin serves npm's legacy login with tokens minted by auth.
 func npmLogin(authz *auth.Service) func(*http.Request, string, string, string) (string, error) {

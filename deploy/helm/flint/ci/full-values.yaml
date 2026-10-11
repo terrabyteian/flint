@@ -95,6 +95,31 @@ config:
           - name: crates-io
             exclude: ["acme-*"]
         publishTo: cargo-local
+    - name: maven-releases
+      format: maven
+      type: hosted
+    - name: maven-snapshots
+      format: maven
+      type: hosted
+      maven:
+        versionPolicy: snapshot
+    - name: maven-central
+      format: maven
+      type: proxy
+      proxy:
+        url: https://repo.maven.apache.org/maven2
+        sizeLimit: 500GiB
+    - name: maven-all
+      format: maven
+      type: virtual
+      anonymousPull: true
+      virtual:
+        publishTo: maven-releases
+        members:
+          - maven-releases
+          - maven-snapshots
+          - name: maven-central
+            exclude: ["com.acme.*"]
   proxyCache:
     minFreeSpace: 20GiB
   gc:

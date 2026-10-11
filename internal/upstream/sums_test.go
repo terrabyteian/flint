@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -118,8 +119,8 @@ func TestParseIntegrity(t *testing.T) {
 
 // pathSource returns a PathSource serving data, announcing size.
 func pathSource(data []byte, size int64) upstream.PathSource {
-	return func(context.Context) (io.ReadCloser, int64, string, error) {
-		return io.NopCloser(bytes.NewReader(data)), size, "application/test", nil
+	return func(context.Context) (io.ReadCloser, int64, http.Header, error) {
+		return io.NopCloser(bytes.NewReader(data)), size, http.Header{"Content-Type": {"application/test"}}, nil
 	}
 }
 

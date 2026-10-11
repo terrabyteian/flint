@@ -91,6 +91,26 @@ config:
   #   virtual:
   #     members: [cargo-local, crates-io]
   #     publishTo: cargo-local
+  # # Maven: hosted release and snapshot repositories, a Maven Central proxy,
+  # # and a virtual repository merging them behind one URL (docs/maven.md).
+  # - name: maven-releases
+  #   format: maven
+  #   type: hosted
+  # - name: maven-snapshots
+  #   format: maven
+  #   type: hosted
+  #   maven:
+  #     versionPolicy: snapshot
+  # - name: maven-central
+  #   format: maven
+  #   type: proxy
+  #   proxy:
+  #     url: https://repo.maven.apache.org/maven2
+  # - name: maven-all
+  #   format: maven
+  #   type: virtual
+  #   virtual:
+  #     members: [maven-releases, maven-snapshots, maven-central]
   auth:
     permissions: []
   # proxyCache:

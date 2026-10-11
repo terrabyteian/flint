@@ -287,12 +287,12 @@ func TestSlotWaitIsNotSilence(t *testing.T) {
 	hold()
 	f := upstream.NewFetcher(e.blobs, silence)
 	var doneErr error
-	fe, _ := f.FetchPath("k", "file", upstream.Expect{Size: -1}, func(ctx context.Context) (io.ReadCloser, int64, string, error) {
+	fe, _ := f.FetchPath("k", "file", upstream.Expect{Size: -1}, func(ctx context.Context) (io.ReadCloser, int64, http.Header, error) {
 		resp, err := c.GetURL(ctx, e.up.URL+"/file", nil)
 		if err != nil {
-			return nil, 0, "", err
+			return nil, 0, nil, err
 		}
-		return resp.Body, resp.ContentLength, "", nil
+		return resp.Body, resp.ContentLength, resp.Header, nil
 	}, func(_ context.Context, _ upstream.PathResult, err error) { doneErr = err })
 	var out strings.Builder
 	_, err := fe.Stream(ctx, &out)

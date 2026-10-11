@@ -2,12 +2,16 @@ package upstream_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/sha512"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,12 +22,14 @@ import (
 )
 
 // fileUpstream is a fake path-addressed upstream: it serves files by
-// path, can corrupt them, answer 410, or redirect to another server.
+// path, with the headers set for them, can corrupt them, answer 410, or
+// redirect to another server.
 type fileUpstream struct {
 	*httptest.Server
 
 	mu       sync.Mutex
 	files    map[string][]byte
+	headers  map[string]http.Header
 	gone     map[string]bool
 	redirect map[string]string
 	corrupt  bool
@@ -32,7 +38,8 @@ type fileUpstream struct {
 }
 
 func newFileUpstream(t *testing.T) *fileUpstream {
-	u := &fileUpstream{files: map[string][]byte{}, gone: map[string]bool{}, redirect: map[string]string{}}
+	u := &fileUpstream{files: map[string][]byte{}, headers: map[string]http.Header{}, gone: map[string]bool{},
+		redirect: map[string]string{}}
 	u.Server = httptest.NewServer(http.HandlerFunc(u.serve))
 	t.Cleanup(u.Close)
 	return u
@@ -62,6 +69,7 @@ func (u *fileUpstream) serve(w http.ResponseWriter, r *http.Request) {
 	u.mu.Lock()
 	u.requests = append(u.requests, r.Method+" "+r.URL.Path)
 	b, ok := u.files[r.URL.Path]
+	hdr := u.headers[r.URL.Path]
 	gone, target, corrupt, down := u.gone[r.URL.Path], u.redirect[r.URL.Path], u.corrupt, u.down
 	u.mu.Unlock()
 	switch {
@@ -76,6 +84,9 @@ func (u *fileUpstream) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		if corrupt {
 			b = append(bytes.Clone(b[:len(b)-1]), b[len(b)-1]^1)
+		}
+		for k, v := range hdr {
+			w.Header()[k] = v
 		}
 		w.Header().Set("Content-Type", "application/x-test")
 		w.Header().Set("Content-Length", fmt.Sprint(len(b)))
@@ -249,6 +260,84 @@ func TestPathCacheVerifierMismatch(t *testing.T) {
 	e.files.set(func(u *fileUpstream) { u.corrupt = false; u.down = false })
 	e.clock.Add(upstream.DefaultOfflineFor)
 	e.want("/remote/pkg.tgz", http.StatusOK, string(data))
+}
+
+// TestPathCacheFromResponse checks that digests derived from the
+// upstream's response are verified like any other, and that content the
+// upstream offers nothing to verify against is passed through without
+// being cached.
+func TestPathCacheFromResponse(t *testing.T) {
+	e := newPathEnv(t, 0, upstream.Policy{})
+	// The test's verifier expects the sha1 the upstream announces in
+	// X-Checksum-SHA1, and refuses content without one.
+	fromHeader := func(_ context.Context, h http.Header) (upstream.Sums, error) {
+		v := h.Get("X-Checksum-SHA1")
+		if v == "" {
+			return nil, upstream.ErrUnverifiable
+		}
+		sum, err := hex.DecodeString(v)
+		if err != nil {
+			return nil, errors.New("a malformed checksum header")
+		}
+		return upstream.Sums{upstream.SHA1: sum}, nil
+	}
+	data := bytes.Repeat([]byte("pom!"), 30000)
+	s1 := sha1.Sum(data)
+	for _, p := range []string{"good.pom", "bad.pom", "none.pom", "malformed.pom"} {
+		e.files.put("/"+p, data)
+		e.expect[p] = upstream.Expect{Size: -1, FromResponse: fromHeader}
+	}
+	// none.pom's verifier asks for a sidecar first, as a Maven proxy's
+	// does when the upstream sends no checksum header.
+	e.expect["none.pom"] = upstream.Expect{Size: -1, FromResponse: func(ctx context.Context, h http.Header) (upstream.Sums, error) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, e.files.URL+"/none.pom.sha1", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		resp.Body.Close()
+		return fromHeader(ctx, h)
+	}}
+	e.files.headers["/good.pom"] = http.Header{"X-Checksum-Sha1": {hex.EncodeToString(s1[:])}}
+	e.files.headers["/bad.pom"] = http.Header{"X-Checksum-Sha1": {strings.Repeat("0", 40)}}
+	e.files.headers["/malformed.pom"] = http.Header{"X-Checksum-Sha1": {"zz"}}
+
+	e.want("/remote/good.pom", http.StatusOK, string(data))
+	e.settle()
+	if rec, _ := e.pc.Lookup(e.repos["remote"], "good.pom"); rec == nil || !bytes.Equal(rec.Sums[upstream.SHA1], s1[:]) {
+		t.Errorf("verified content: record %+v", rec)
+	}
+
+	if _, b, err := e.fetch(http.MethodGet, "/remote/bad.pom"); err == nil || len(b) >= len(data) {
+		t.Errorf("content that does not match its announced digest: %d bytes, %v; want a cut-off response", len(b), err)
+	}
+	if status, _, _ := e.fetch(http.MethodGet, "/remote/malformed.pom"); status != http.StatusBadGateway {
+		t.Errorf("a failing FromResponse: %d, want 502", status)
+	}
+	e.files.took()
+	e.want("/remote/none.pom", http.StatusOK, string(data))
+	e.settle()
+	if got := e.files.took(); !slices.Equal(got, []string{"GET /none.pom", "GET /none.pom.sha1", "GET /none.pom"}) {
+		t.Errorf("upstream requests for unverifiable content %q; want its sidecar asked for once", got)
+	}
+	for _, p := range []string{"bad.pom", "none.pom", "malformed.pom"} {
+		if rec, _ := e.pc.Lookup(e.repos["remote"], p); rec != nil {
+			t.Errorf("%s was cached", p)
+		}
+	}
+
+	// Passed through under disk pressure, content is verified against
+	// the derived digests too.
+	e.free.Store(0)
+	e.clock.Add(time.Second)
+	if _, b, err := e.fetch(http.MethodGet, "/remote/bad.pom"); err == nil || len(b) >= len(data) {
+		t.Errorf("a pass-through that does not match its announced digest: %d bytes, %v; want it cut off", len(b), err)
+	}
+	e.files.took()
+	e.want("/remote/none.pom", http.StatusOK, string(data))
+	if got := e.files.took(); !slices.Equal(got, []string{"GET /none.pom", "GET /none.pom.sha1"}) {
+		t.Errorf("upstream requests for unverifiable content passed through %q", got)
+	}
 }
 
 func TestPathCacheNegative(t *testing.T) {

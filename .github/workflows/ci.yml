@@ -700,3 +700,106 @@ jobs:
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"
+
+  maven:
+    name: Maven end to end
+    runs-on: ubuntu-latest
+    env:
+      MAVEN_VERSION: "3.9.16"
+      MAVEN_SHA512: "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6"
+      GRADLE8_VERSION: "8.14.5"
+      GRADLE8_SHA256: "6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854"
+      GRADLE9_VERSION: "9.8.0"
+      GRADLE9_SHA256: "bafd5ce9cfaea0fbccfdc8439a1ac42fbd4cd9c89dc9a988228d8a2639a58e6c"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+      # CI-only tools: they never ship in flint, so the zero-dependency rule
+      # does not apply.
+      - name: Install Maven, Gradle 8, and Gradle 9
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSLo maven.tar.gz "https://archive.apache.org/dist/maven/maven-3/$MAVEN_VERSION/binaries/apache-maven-$MAVEN_VERSION-bin.tar.gz"
+          echo "$MAVEN_SHA512  maven.tar.gz" | sha512sum -c -
+          tar -xzf maven.tar.gz
+          echo "$RUNNER_TEMP/apache-maven-$MAVEN_VERSION/bin" >>"$GITHUB_PATH"
+          for g in "$GRADLE8_VERSION:$GRADLE8_SHA256" "$GRADLE9_VERSION:$GRADLE9_SHA256"; do
+            version=${g%%:*}
+            curl -fsSLo "gradle-$version.zip" "https://services.gradle.org/distributions/gradle-$version-bin.zip"
+            echo "${g#*:}  gradle-$version.zip" | sha256sum -c -
+            unzip -q "gradle-$version.zip"
+          done
+          echo "E2E_GRADLE=$RUNNER_TEMP/gradle-$GRADLE8_VERSION/bin/gradle $RUNNER_TEMP/gradle-$GRADLE9_VERSION/bin/gradle" >>"$GITHUB_ENV"
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "maven-releases", "format": "maven", "type": "hosted"},
+              {"name": "maven-snapshots", "format": "maven", "type": "hosted", "maven": {"versionPolicy": "snapshot"}},
+              {"name": "central", "format": "maven", "type": "proxy", "anonymousPull": true,
+               "proxy": {"url": "https://repo.maven.apache.org/maven2", "revalidateAfter": "1s"}},
+              {"name": "maven-all", "format": "maven", "type": "virtual", "anonymousPull": true,
+               "virtual": {"members": ["maven-releases", "maven-snapshots",
+                                       {"name": "central", "exclude": ["com.flint.e2e.*"]}]}}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [{"repositories": ["maven-releases", "maven-snapshots"], "role": "write", "groups": ["ci"]}]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/flint.pid"
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Create a CI user and API token
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          token=$(curl -fsS -u "ci-bot:$bot_password" http://127.0.0.1:5000/api/v1/tokens \
+            -d '{"name": "e2e", "expiresIn": "2h"}' | jq -r .token)
+          echo "::add-mask::$token"
+          echo "E2E_TOKEN=$token" >>"$GITHUB_ENV"
+      - name: Deploy and build with Maven, Gradle 8, and Gradle 9
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-maven" E2E_USER="ci-bot:$E2E_TOKEN" E2E_ADMIN="admin:$ADMIN_PASSWORD" \
+            scripts/e2e-maven.sh online 127.0.0.1:5000 maven-releases maven-snapshots central maven-all
+      - name: Restart flint with its upstream unreachable
+        run: |
+          pid=$(cat "$RUNNER_TEMP/flint.pid")
+          kill "$pid"
+          while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+          # Every upstream request now goes to a proxy that refuses connections.
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 NO_PROXY= \
+            "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >>"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Build again from the cache
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-maven" E2E_USER="ci-bot:$E2E_TOKEN" E2E_ADMIN="admin:$ADMIN_PASSWORD" \
+            scripts/e2e-maven.sh offline 127.0.0.1:5000 maven-releases maven-snapshots central maven-all
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"

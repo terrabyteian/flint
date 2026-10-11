@@ -155,6 +155,12 @@ func (v *Virtual) Admits(m Member, name string) bool {
 	return !matchAny(m.exclude, name)
 }
 
+// Excludes reports whether one of m's exclude patterns matches the
+// package called name.
+func (v *Virtual) Excludes(m Member, name string) bool {
+	return matchAny(m.exclude, v.normalize(name))
+}
+
 // CheckPublish returns an error naming the filter that refuses the
 // package called name if the publishTo member's filters do not admit it,
 // and nil otherwise or if there is no publishTo. A publish through the
