@@ -1,10 +1,13 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -93,8 +96,29 @@ func pypiWheel(version, metadata string) (whl, body []byte, contentType string) 
 	return w.Bytes(), b.Bytes(), mw.FormDataContentType()
 }
 
-// TestGCEndToEnd runs flint serve, pushes images and uploads PyPI files,
-// deletes an image, some blob links, and a PyPI file, ages the stored
+// cargoCrate builds a .crate file of crate pkg at version, and the body
+// of the request that publishes it.
+func cargoCrate(version string) (crate, body []byte) {
+	var c bytes.Buffer
+	gz := gzip.NewWriter(&c)
+	tw := tar.NewWriter(gz)
+	toml := []byte("[package]\nname = \"pkg\"\nversion = \"" + version + "\"\n")
+	tw.WriteHeader(&tar.Header{Name: "pkg-" + version + "/Cargo.toml", Mode: 0o644, Size: int64(len(toml)), Typeflag: tar.TypeReg})
+	tw.Write(toml)
+	tw.Close()
+	gz.Close()
+	md, _ := json.Marshal(map[string]any{"name": "pkg", "vers": version, "deps": []any{}, "features": map[string]any{}})
+	var b bytes.Buffer
+	binary.Write(&b, binary.LittleEndian, uint32(len(md)))
+	b.Write(md)
+	binary.Write(&b, binary.LittleEndian, uint32(c.Len()))
+	b.Write(c.Bytes())
+	return c.Bytes(), b.Bytes()
+}
+
+// TestGCEndToEnd runs flint serve, pushes images, uploads PyPI files, and
+// publishes crates, deletes an image, some blob links, a PyPI file, and
+// a crate version, ages the stored
 // blobs past the grace period, and runs flint gc against the server: a
 // dry run reports what a run deletes and deletes nothing, the run deletes
 // exactly the unreferenced blobs past the grace period, and every image
@@ -112,6 +136,7 @@ func TestGCEndToEnd(t *testing.T) {
 		"repositories": []any{
 			map[string]any{"name": "docker-local", "format": "oci", "type": "hosted"},
 			map[string]any{"name": "pypi-local", "format": "pypi", "type": "hosted"},
+			map[string]any{"name": "cargo-local", "format": "cargo", "type": "hosted"},
 		},
 		"auth": map[string]any{"bootstrapAdmin": map[string]any{"username": "admin", "passwordFile": pwFile}},
 		"gc":   map[string]any{"gracePeriod": "2h"},
@@ -182,6 +207,17 @@ func TestGCEndToEnd(t *testing.T) {
 	if code, out := call("DELETE", "/api/v1/pypi/pypi-local/projects/pkg/files/pkg-0.9-py3-none-any.whl", nil, ""); code != http.StatusOK {
 		t.Fatalf("pypi file delete = %d %s", code, out)
 	}
+	// Publish two crate versions and delete one.
+	keepCrate, keepPublish := cargoCrate("1.0.0")
+	dropCrate, dropPublish := cargoCrate("0.9.0")
+	for _, b := range [][]byte{keepPublish, dropPublish} {
+		if code, out := call("PUT", "/cargo/cargo-local/api/v1/crates/new", b, ""); code != http.StatusOK {
+			t.Fatalf("cargo publish = %d %s", code, out)
+		}
+	}
+	if code, out := call("DELETE", "/api/v1/cargo/cargo-local/crates/pkg/0.9.0", nil, ""); code != http.StatusOK {
+		t.Fatalf("cargo version delete = %d %s", code, out)
+	}
 	// Age every stored blob past the grace period, then add a young
 	// unreferenced one.
 	old := time.Now().Add(-3 * time.Hour)
@@ -194,7 +230,7 @@ func TestGCEndToEnd(t *testing.T) {
 	young := []byte("young and unreferenced")
 	call("POST", "/v2/docker-local/app/blobs/uploads/?digest="+sha(young), young, "")
 	call("DELETE", "/v2/docker-local/app/blobs/"+sha(young), nil, "")
-	garbage := []string{sha(drop.manifest), sha(drop.blobs[0]), sha(drop.blobs[2]), sha(dropWheel), sha([]byte(dropMeta))}
+	garbage := []string{sha(drop.manifest), sha(drop.blobs[0]), sha(drop.blobs[2]), sha(dropWheel), sha([]byte(dropMeta)), sha(dropCrate)}
 
 	gcRun := func(args ...string) (int, string, string) {
 		t.Helper()
@@ -205,7 +241,7 @@ func TestGCEndToEnd(t *testing.T) {
 	auth := []string{"-url", base, "-user", user, "-password-file", pwFile}
 
 	code, out, errOut := gcRun(append([]string{"run", "-dry-run"}, auth...)...)
-	if code != 0 || !strings.Contains(out, "would delete:    5 blobs") || !strings.Contains(out, "succeeded (dry run)") {
+	if code != 0 || !strings.Contains(out, "would delete:    6 blobs") || !strings.Contains(out, "succeeded (dry run)") {
 		t.Fatalf("flint gc run -dry-run = %d\n%s%s", code, out, errOut)
 	}
 	for _, d := range garbage {
@@ -222,7 +258,7 @@ func TestGCEndToEnd(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rep); code != 0 || err != nil {
 		t.Fatalf("flint gc run -json = %d %v\n%s%s", code, err, out, errOut)
 	}
-	if rep.State != gc.StateSucceeded || rep.DryRun || rep.Actor != "admin" || rep.Deleted.Blobs != 5 || rep.InGracePeriod.Blobs != 1 ||
+	if rep.State != gc.StateSucceeded || rep.DryRun || rep.Actor != "admin" || rep.Deleted.Blobs != 6 || rep.InGracePeriod.Blobs != 1 ||
 		rep.GracePeriod != "2h0m0s" {
 		t.Errorf("report = %+v", rep)
 	}
@@ -243,6 +279,9 @@ func TestGCEndToEnd(t *testing.T) {
 			t.Errorf("pypi download of %s = %d %.100s", f.path, code, b)
 		}
 	}
+	if code, b := call("GET", "/cargo/cargo-local/api/v1/crates/pkg/1.0.0/download", nil, ""); code != http.StatusOK || !bytes.Equal(b, keepCrate) {
+		t.Errorf("cargo download = %d %.100s", code, b)
+	}
 	if code, _ := call("GET", "/v2/docker-local/app/manifests/drop", nil, ""); code != http.StatusNotFound {
 		t.Errorf("deleted image pull = %d", code)
 	}
@@ -252,7 +291,7 @@ func TestGCEndToEnd(t *testing.T) {
 		}
 	}
 	_, metricsOut := get(t, http.DefaultClient, base+"/metrics")
-	for _, want := range []string{"flint_gc_reclaimed_blobs_total 5", `flint_gc_runs_total{mode="sweep",result="succeeded"} 1`,
+	for _, want := range []string{"flint_gc_reclaimed_blobs_total 6", `flint_gc_runs_total{mode="sweep",result="succeeded"} 1`,
 		`flint_gc_runs_total{mode="dry_run",result="succeeded"} 1`} {
 		if !strings.Contains(metricsOut, want+"\n") {
 			t.Errorf("metrics lack %q", want)

@@ -16,6 +16,7 @@ import (
 	"github.com/terrabyteian/flint/internal/auth"
 	"github.com/terrabyteian/flint/internal/backup"
 	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/cargo"
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/flock"
 	"github.com/terrabyteian/flint/internal/fsys"
@@ -173,6 +174,7 @@ type app struct {
 	srv     *server.Server
 	oci     *oci.Handler
 	pypi    *pypi.Handler
+	cargo   *cargo.Handler
 	space   *upstream.Space // nil without proxy repositories
 	audit   *audit.Log
 	backups *backup.Manager // nil unless backups are configured
@@ -342,6 +344,30 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		return nil, err
 	}
 	files.Register(srv)
+	crates, err := cargo.New(cargo.Options{
+		Meta:         store,
+		Blobs:        blobs,
+		Repositories: cfg.Repositories,
+		// Cargo sends its token as the raw Authorization header, and is
+		// told where tokens are made by its own challenge.
+		Authorizer:      authz.Authorizer(auth.Challenge{Style: auth.ChallengeCargo}),
+		AdminAuthorizer: authz.Authorizer(auth.Challenge{Style: auth.ChallengeBasic, WriteError: cargo.WriteAdminError}),
+		Actor:           authz.Actor,
+		Logger:          logger,
+		Metrics:         reg,
+		Upstream:        upOpts,
+		Space:           space,
+		Now:             now,
+		Fetcher:         fetcher,
+		Docs:            docs,
+		Paths:           paths,
+		ProxyMetrics:    proxyMetrics,
+		VirtualMetrics:  virtualMetrics,
+	})
+	if err != nil {
+		return nil, err
+	}
+	crates.Register(srv)
 
 	var backups *backup.Manager
 	if cfg.Backup.Directory != "" {
@@ -376,21 +402,23 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	}
 	authz.HandleAdmin(srv, gc.StatusPattern, collector.HandleStatus)
 	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
-	return &app{srv: srv, oci: registry, pypi: index, space: space, audit: auditLog, backups: backups, gc: collector,
-		docs: docs, revalidate: revalidate, paths: paths}, nil
+	return &app{srv: srv, oci: registry, pypi: index, cargo: crates, space: space, audit: auditLog, backups: backups,
+		gc: collector, docs: docs, revalidate: revalidate, paths: paths}, nil
 }
 
 // gcMarkers are the garbage-collection markers of every package that
 // writes metadata: every key family flint writes is under a prefix one of
 // them registers. A format adds its marker here when it is wired in.
 func gcMarkers() []gc.Marker {
-	return []gc.Marker{oci.GCMarker(), pypi.GCMarker(), generic.GCMarker(), upstream.Marks, auth.GCMarker()}
+	return []gc.Marker{oci.GCMarker(), pypi.GCMarker(), generic.GCMarker(), cargo.GCMarker(), upstream.Marks,
+		auth.GCMarker()}
 }
 
 // blobReferences report the blobs every format package's records, and
 // the proxy cache the formats share, reference, for backups to check that
 // they hold them all.
-var blobReferences = []backup.References{oci.References, pypi.References, generic.References, upstream.References}
+var blobReferences = []backup.References{oci.References, pypi.References, generic.References, cargo.References,
+	upstream.References}
 
 // registerStoreMetrics exposes the metadata store's counters and health.
 func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {

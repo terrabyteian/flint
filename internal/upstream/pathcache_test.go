@@ -230,9 +230,11 @@ func TestPathCacheVerifierMismatch(t *testing.T) {
 	s512 := sha512.Sum512(data)
 	e.expect["pkg.tgz"] = upstream.Expect{Size: -1, Sums: upstream.Sums{upstream.SHA512: s512[:]}}
 	e.files.set(func(u *fileUpstream) { u.corrupt = true })
-	_, b, err := e.fetch(http.MethodGet, "/remote/pkg.tgz")
-	if err == nil || len(b) >= len(data) {
-		t.Fatalf("corrupt content: %d bytes, %v; want a cut-off response", len(b), err)
+	// A fetch that fails before the response starts is answered 502;
+	// one that fails later is cut off.
+	status, b, err := e.fetch(http.MethodGet, "/remote/pkg.tgz")
+	if err == nil && status != http.StatusBadGateway || len(b) >= len(data) {
+		t.Fatalf("corrupt content: %d, %d bytes, %v; want 502 or a cut-off response", status, len(b), err)
 	}
 	e.settle()
 	if rec, _ := e.pc.Lookup(e.repos["remote"], "pkg.tgz"); rec != nil {

@@ -41,6 +41,7 @@ var formats = []formatSpec{
 			return r.Generic
 		},
 		check: checkGeneric},
+	{name: FormatCargo, types: []string{TypeHosted, TypeProxy, TypeVirtual}},
 }
 
 // Generic holds the settings of a generic files repository.

@@ -49,11 +49,12 @@ They are read-only, so pushes and deletes are refused whatever the role.
 Pulling through a [virtual repository](configuration.md#virtual-repository-settings) needs `read` on the virtual repository; its members' permissions are not consulted.
 
 For PyPI repositories, installing is pulling and publishing is pushing; yanking and deleting files need `delete`.
+For Cargo repositories, building is pulling, and publishing and yanking are pushing, which need `write`; deleting a version needs `delete`.
 
 For generic files repositories, downloading and listing are pulling, uploading a file is pushing, and deleting one needs `delete`; in a repository with `generic.allowOverwrite`, replacing a file with different content needs only `write`.
 
-Permissions apply to flint repositories: the first component of an image path, or the repository of a PyPI or generic files URL.
-A grant on `docker-local` covers `host/docker-local/team/app`, one on `pypi-local` covers `host/pypi/pypi-local/...`, and one on `files` covers `host/generic/files/...`.
+Permissions apply to flint repositories: the first component of an image path, or the repository of a PyPI, generic files, or Cargo URL.
+A grant on `docker-local` covers `host/docker-local/team/app`, one on `pypi-local` covers `host/pypi/pypi-local/...`, one on `files` covers `host/generic/files/...`, and one on `cargo-local` covers `host/cargo/cargo-local/...`.
 
 ## API tokens
 
@@ -98,6 +99,16 @@ pip, uv, and twine send HTTP basic credentials with their requests: an API token
 A request without valid credentials that needs them gets `401` with `WWW-Authenticate: Basic realm="flint"`, and one whose credentials lack the permission gets `403`.
 Tokens from the Docker token endpoint are not accepted.
 [PyPI](pypi.md#configuring-clients) shows how to configure each client.
+
+## Cargo clients
+
+Cargo sends an API token as the `Authorization` header as it is, which flint accepts, with or without a `Bearer` scheme.
+A request without valid credentials that needs them gets `401` with `WWW-Authenticate: Cargo login_url="..."`, naming flint's [public URL](configuration.md#public-url), or else the scheme and host the client used; one whose credentials lack the permission gets `403`.
+Errors carry Cargo's `{"errors": [{"detail": "..."}]}`, whose detail Cargo shows.
+A repository's `config.json` says `"auth-required": true` unless it has `anonymousPull`, which makes Cargo send its token with every request, not only to publish; that needs Cargo 1.74 or later, with `credential-provider = "cargo:token"`.
+`cargo login` only stores a token Cargo is given, so create one with the [admin API](#tokens) first.
+Crates have no owners in flint: `cargo owner` fails, and who may publish, yank, and delete is decided by permission grants.
+[Cargo](cargo.md#configuring-cargo) shows how to configure it.
 
 ## Docker clients
 
@@ -205,6 +216,7 @@ Request bodies are strict JSON: unknown fields are errors.
 | `PUT, DELETE /api/v1/pypi/{repository}/projects/{project}/releases/{version}/yank` | `delete` role on the repository | Yank or unyank a release of a hosted PyPI repository; see [PyPI](pypi.md#yanking-and-deleting). |
 | `DELETE /api/v1/pypi/{repository}/projects/{project}/releases/{version}` | `delete` role on the repository | Delete a release's files. |
 | `DELETE /api/v1/pypi/{repository}/projects/{project}/files/{filename}` | `delete` role on the repository | Delete one file. |
+| `DELETE /api/v1/cargo/{repository}/crates/{crate}/{version}` | `delete` role on the repository | Delete a version of a crate in a hosted Cargo repository; see [Cargo](cargo.md#deleting-versions). |
 | `GET /api/v1/audit` | admin | Query the [audit log](operations.md#audit-log). |
 | `GET /api/v1/audit/export` | admin | Export the audit log as JSON lines. |
 

@@ -159,6 +159,7 @@ const (
 	FormatOCI     = "oci"
 	FormatPyPI    = "pypi"
 	FormatGeneric = "generic"
+	FormatCargo   = "cargo"
 	TypeHosted    = "hosted"
 	TypeProxy     = "proxy"
 	TypeVirtual   = "virtual"
@@ -207,6 +208,8 @@ type Proxy struct {
 	// For generic files, it is any base URL, such as
 	// "https://example.com/releases/download/", under which a request
 	// for <path> fetches <url>/<path>.
+	// For Cargo, it is the sparse index URL, such as
+	// "sparse+https://index.crates.io/"; the "sparse+" prefix is optional.
 	URL string `json:"url"`
 	// Username and PasswordFile, if set, authenticate to the upstream.
 	// PasswordFile holds the password or access token, such as a mounted
@@ -675,9 +678,13 @@ func validateProxy(v *validator, path, format string, p *Proxy) {
 }
 
 // checkUpstreamURL checks an upstream's URL: a registry's base URL for
-// OCI, or a URL that may have a path: a simple index URL for PyPI, and a
-// base URL for generic files.
+// OCI, or a URL that may have a path: a simple index URL for PyPI, a base
+// URL for generic files, and a sparse index URL, which may also have the
+// "sparse+" prefix, for Cargo.
 func checkUpstreamURL(s, format string) error {
+	if format == FormatCargo {
+		s = strings.TrimPrefix(s, "sparse+")
+	}
 	u, err := url.Parse(s)
 	switch {
 	case err != nil:
@@ -690,7 +697,7 @@ func checkUpstreamURL(s, format string) error {
 		return errors.New("must not contain credentials; use username and passwordFile")
 	case u.RawQuery != "" || u.Fragment != "" || u.ForceQuery:
 		return errors.New("must not have a query or fragment")
-	case format != FormatPyPI && format != FormatGeneric && u.Path != "" && u.Path != "/":
+	case format == FormatOCI && u.Path != "" && u.Path != "/":
 		return errors.New("must be the registry's base URL, without a path: the registry API is served at /v2/")
 	}
 	return nil
@@ -735,6 +742,17 @@ func PyPIIndexURL(s string) string {
 	}
 	u.RawPath = ""
 	return u.String()
+}
+
+// CargoIndexURL returns the sparse index URL of a Cargo proxy
+// repository's upstream: its URL without the "sparse+" prefix, ending in
+// "/".
+func CargoIndexURL(s string) string {
+	s = strings.TrimPrefix(s, "sparse+")
+	if !strings.HasSuffix(s, "/") {
+		s += "/"
+	}
+	return s
 }
 
 // Proxies returns the parsed trusted-proxy prefixes. The configuration

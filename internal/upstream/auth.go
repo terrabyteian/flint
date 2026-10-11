@@ -15,14 +15,14 @@ import (
 
 // challenge is a parsed WWW-Authenticate challenge.
 type challenge struct {
-	scheme string // "bearer" or "basic"
+	scheme string // "bearer", "basic", or "cargo"
 	params map[string]string
 }
 
 // parseChallenge picks the challenge to answer from WWW-Authenticate
-// header values: Bearer if offered, else Basic.
+// header values: Bearer if offered, else Basic, else Cargo's.
 func parseChallenge(values []string) (challenge, bool) {
-	var basic *challenge
+	var basic, cargo *challenge
 	for _, v := range values {
 		for _, ch := range parseChallenges(v) {
 			switch ch.scheme {
@@ -32,11 +32,16 @@ func parseChallenge(values []string) (challenge, bool) {
 				}
 			case "basic":
 				basic = &ch
+			case "cargo":
+				cargo = &ch
 			}
 		}
 	}
-	if basic != nil {
+	switch {
+	case basic != nil:
 		return *basic, true
+	case cargo != nil:
+		return *cargo, true
 	}
 	return challenge{}, false
 }
