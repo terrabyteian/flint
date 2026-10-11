@@ -21,6 +21,7 @@ commands:
   config     check a configuration file (flint config check <file>)
   backup     back up a running server, or list and verify backups (flint backup help)
   restore    restore a backup into a new data directory (flint restore <backup-dir> <data-dir>)
+  gc         run garbage collection on a running server (flint gc run|status)
   version    print the flint version
 `
 
@@ -52,6 +53,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return backupCmd(ctx, args[1:], stdout, stderr)
 		}
 		return restoreCmd(ctx, args[1:], stdout, stderr)
+	case "gc":
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return gcCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "flint %s\n", version)
 		return 0

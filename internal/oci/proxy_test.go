@@ -52,7 +52,7 @@ func newProxyEnv(t *testing.T, sizeLimit int64) *proxyEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ms.Close() })
-	bs, err := blob.NewFS("/data", blob.Options{FS: pe.fs})
+	bs, err := blob.NewFS("/data", blob.Options{FS: pe.fs, Now: pe.now})
 	if err != nil {
 		t.Fatal(err)
 	}

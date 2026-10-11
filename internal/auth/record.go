@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/terrabyteian/flint/internal/gc"
 )
 
 // Metadata keys. The auth package owns the "auth\x00" namespace.
@@ -14,6 +16,12 @@ const (
 	tokenPrefix     = "auth\x00token\x00"     // + id: token record
 	userTokenPrefix = "auth\x00usertoken\x00" // + user + "\x00" + id: empty, indexes a user's tokens
 )
+
+// GCMarker returns the auth marker for the garbage collector: users and
+// tokens reference no blobs.
+func GCMarker() gc.Marker {
+	return gc.Marker{userPrefix: nil, tokenPrefix: nil, userTokenPrefix: nil}
+}
 
 func userKey(name string) []byte { return []byte(userPrefix + name) }
 func tokenKey(id string) []byte  { return []byte(tokenPrefix + id) }

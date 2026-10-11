@@ -69,6 +69,10 @@ Repositories and permission grants declared here are read-only through the API.
   "backup": {
     "directory": "/var/backups/flint"
   },
+  "gc": {
+    "gracePeriod": "24h",
+    "interval": "24h"
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",

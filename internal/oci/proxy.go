@@ -255,9 +255,11 @@ func (h *Handler) proxyGetBlob(w http.ResponseWriter, r *http.Request, rn *repoN
 		}
 		if usize < 0 || usize == info.Size {
 			// Linking costs no space, but content over the size limit is
-			// served without being linked, as if passed through.
+			// served without being linked, as if passed through. So is a
+			// blob garbage collection is deleting (errRetry), while it
+			// lasts; the next pull fetches it again.
 			if c := p.cache; c == nil || info.Size <= c.limit {
-				if err := h.linkProxyBlob(ctx, h.actor(r), rn, d, info.Size); err != nil {
+				if err := h.linkProxyBlob(ctx, h.actor(r), rn, d, info.Size); err != nil && err != errRetry {
 					h.writeError(w, r, err)
 					return
 				}

@@ -152,6 +152,11 @@ type Handler struct {
 	upstreamBytes  *metrics.Counter
 	evictions      *metrics.Counter
 	cachedBytes    *metrics.Gauge
+
+	// linkHook, if set, is called by every link batch after it read its
+	// view and before it checks that the blobs exist, so tests can
+	// interleave a garbage-collection sweep there.
+	linkHook func(ds []blob.Digest)
 }
 
 // New returns a Handler.

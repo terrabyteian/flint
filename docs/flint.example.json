@@ -50,6 +50,10 @@
   "backup": {
     "directory": "/var/backups/flint"
   },
+  "gc": {
+    "gracePeriod": "24h",
+    "interval": "24h"
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",

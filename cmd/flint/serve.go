@@ -17,6 +17,7 @@ import (
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/flock"
 	"github.com/terrabyteian/flint/internal/fsys"
+	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
@@ -92,7 +93,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		return err
 	}
 
-	srv, registry, backups, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
+	srv, registry, backups, collector, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
 	if err != nil {
 		return err
 	}
@@ -100,15 +101,19 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		// Cancel a running backup before the stores close.
 		defer backups.Close()
 	}
-	// Expire abandoned uploads, and run the proxy repositories' upkeep,
-	// in the background until the stores close.
+	// Expire abandoned uploads, run the proxy repositories' upkeep, and
+	// run scheduled garbage collection, in the background until the
+	// stores close. A garbage collection run in progress is cancelled
+	// first.
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
 	var janitors sync.WaitGroup
 	janitors.Go(func() { registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
 	janitors.Go(func() { registry.RunProxy(janitorCtx) })
+	janitors.Go(func() { collector.RunSchedule(janitorCtx) })
 	defer func() {
 		stopJanitor()
 		janitors.Wait()
+		collector.Close()
 	}()
 	addr, err := srv.Listen()
 	if err != nil {
@@ -139,10 +144,12 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 
 // newServer builds the HTTP server and its metrics over open stores. The
 // format and auth packages register their routes, middleware, and
-// readiness checks on it here, using store and blobs. fsy is the data
-// directory's filesystem. The backup manager is nil unless backups are
-// configured; the caller closes it before the stores.
-func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, *backup.Manager, error) {
+// readiness checks on it here, using store and blobs, and the garbage
+// collector is set up with the marker of every package that writes
+// metadata. fsy is the data directory's filesystem. The backup manager is
+// nil unless backups are configured; the caller closes it, and the
+// collector, before the stores.
+func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, *backup.Manager, *gc.Collector, error) {
 	reg := metrics.NewRegistry()
 	metrics.RegisterRuntime(reg, version)
 	registerStoreMetrics(reg, store)
@@ -161,7 +168,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	// the fault shows in flint_meta_store_poisoned and the logs.
 	srv, err := server.New(opts)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	authz, err := auth.New(auth.Options{
@@ -173,14 +180,14 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Metrics: reg,
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if b := cfg.Auth.BootstrapAdmin; b != nil {
 		if _, err := authz.Bootstrap(ctx, b.Username, b.PasswordFile); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	} else if ok, err := authz.HasAdmin(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	} else if !ok {
 		logger.Warn("no administrator exists; set auth.bootstrapAdmin in the configuration to create one")
 	}
@@ -209,7 +216,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Space:        space,
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	registry.Register(srv)
 
@@ -225,11 +232,26 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 			Metrics:    reg,
 		})
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 	backup.Register(srv, backups, authz.AdminHandler, authz.Actor)
-	return srv, registry, backups, nil
+
+	collector, err := gc.New(gc.Options{
+		Meta:        store,
+		Blobs:       blobs,
+		Markers:     []gc.Marker{oci.GCMarker(), auth.GCMarker()},
+		GracePeriod: cfg.GC.GracePeriod.Duration,
+		Interval:    cfg.GC.Interval.Duration,
+		Logger:      logger,
+		Metrics:     reg,
+	})
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	authz.HandleAdmin(srv, gc.StatusPattern, collector.HandleStatus)
+	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
+	return srv, registry, backups, collector, nil
 }
 
 // blobReferences report the blobs every format package's records

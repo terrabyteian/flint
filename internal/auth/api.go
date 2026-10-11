@@ -47,6 +47,20 @@ func (s *Service) registerAPI(srv *server.Server) {
 	}
 }
 
+// HandleAdmin adds an admin API endpoint, for the global admin role only,
+// that another package serves, such as garbage collection's. pattern is a
+// net/http pattern under /api/v1/. h receives the request and the
+// client's actor name, as batch origins record it, and returns the status
+// and the value to encode as the JSON response; nil writes no body.
+// Errors are {"error": "message"}, as the rest of the admin API writes
+// them. The request body is limited to 64 KiB.
+func (s *Service) HandleAdmin(srv *server.Server, pattern string, h func(r *http.Request, actor string) (int, any)) {
+	srv.Handle(pattern, s.api(s.admin(func(r *http.Request, p *Principal) (int, any, error) {
+		status, v := h(r, actorOf(p))
+		return status, v, nil
+	})))
+}
+
 // apiHandler serves an authenticated admin API request. It returns the
 // status and the value to encode as the JSON response, or an error.
 type apiHandler func(r *http.Request, p *Principal) (int, any, error)

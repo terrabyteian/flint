@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
 )
 
@@ -15,20 +16,18 @@ import (
 // metadata precondition fails.
 const maxLinkAttempts = 4
 
-// gcGuard applies the garbage-collection precondition to a batch that
-// links digests: it reads the GC epoch and each digest's doomed entry from
-// v, fails with errRetry if a digest is doomed, and requires the epoch to
-// be unchanged when b commits. The caller must read v before checking that
-// the blobs exist, so a sweep that starts after this read fails the
-// precondition, and one already running is caught by its doomed entry.
+// gcGuard applies the garbage-collection precondition (gc.Guard) to a
+// batch that links digests, failing with errRetry if a digest is doomed.
+// The caller must read v before checking that the blobs exist, so a sweep
+// that starts after this read fails the precondition, and one already
+// running is caught by its doomed entry.
 func gcGuard(v meta.View, b *meta.Batch, ds ...blob.Digest) error {
-	for _, d := range ds {
-		if _, doomed := v.Get(doomedKey(d)); doomed {
+	if err := gc.Guard(v, b, ds...); err != nil {
+		if errors.Is(err, gc.ErrDoomed) {
 			return errRetry
 		}
+		return err
 	}
-	epoch, _ := v.Get([]byte(gcEpochKey))
-	b.Require([]byte(gcEpochKey), epoch.Version) // version 0 requires it absent
 	return nil
 }
 
@@ -49,6 +48,9 @@ func (h *Handler) commitLink(ctx context.Context, ds []blob.Digest,
 		v.Release()
 		if err != nil {
 			return err
+		}
+		if h.linkHook != nil {
+			h.linkHook(ds)
 		}
 		if err := exists(attempt); err != nil {
 			return err

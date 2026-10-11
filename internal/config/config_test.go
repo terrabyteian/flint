@@ -19,9 +19,10 @@ func TestMinimalDefaults(t *testing.T) {
 	want := &Config{
 		Listen:          DefaultListen,
 		DataDir:         "/data",
-		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout},
+		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout, set: true},
 		Log:             Log{Level: DefaultLogLevel},
 		ProxyCache:      ProxyCache{MinFreeSpace: FreeSpace{Percent: 5, text: "5%"}},
+		GC:              GC{GracePeriod: Duration{Duration: DefaultGCGracePeriod, set: true}},
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("got %+v, want %+v", c, want)
@@ -52,6 +53,9 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
+	}
+	if c.GC.GracePeriod.Duration != 24*time.Hour || c.GC.Interval.Duration != 24*time.Hour {
+		t.Errorf("unexpected gc settings: %+v", c.GC)
 	}
 }
 
@@ -216,6 +220,15 @@ func TestValidation(t *testing.T) {
 			[]string{`backup.directory: "/data/" must be outside the data directory`}},
 		{"backup contains data", `{"dataDir": "/srv/data", "backup": {"directory": "/srv"}}`,
 			[]string{`backup.directory: "/srv" must be outside the data directory`}},
+		{"gc good", `{"dataDir": "/d", "gc": {"gracePeriod": "48h", "interval": "24h"}}`, nil},
+		{"gc grace period at the minimum", `{"dataDir": "/d", "gc": {"gracePeriod": "1h"}}`, nil},
+		{"gc grace period too short", `{"dataDir": "/d", "gc": {"gracePeriod": "59m"}}`,
+			[]string{"gc.gracePeriod: 59m0s is shorter than the minimum, 1h0m0s"}},
+		{"gc zero grace period", `{"dataDir": "/d", "gc": {"gracePeriod": "0s"}}`,
+			[]string{"gc.gracePeriod: 0s is shorter than the minimum"}},
+		{"gc bad durations", `{"dataDir": "/d", "gc": {"gracePeriod": "a day", "interval": 5}}`,
+			[]string{`gc.gracePeriod: "a day" is not a duration`, "gc.interval: 5 is not a duration string"}},
+		{"gc negative interval", `{"dataDir": "/d", "gc": {"interval": "-1h"}}`, []string{"gc.interval: must be positive"}},
 		{"repo good", `{"dataDir": "/d", "repositories": [{"name": "my.repo_1-x", "format": "oci", "type": "hosted"}]}`, nil},
 		{"permission empty", `{"dataDir": "/d", "auth": {"permissions": [{}]}}`,
 			[]string{"auth.permissions[0].repositories: must name at least one", `auth.permissions[0].role: "" is not one of`,

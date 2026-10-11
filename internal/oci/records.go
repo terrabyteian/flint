@@ -24,11 +24,8 @@ import (
 //
 // <repo> is the configured repository and <name> the image name below it,
 // so "docker-local/team/app" is repo "docker-local", name "team/app".
-//
-// The garbage collector's keys, which every link batch reads:
-//
-//	gc\0epoch               GC epoch counter, incremented when a sweep starts
-//	gc\0doomed\0<digest>    doomed set of the running sweep
+// Every link batch also reads the garbage collector's keys (gc.Guard), and
+// GCMarker tells the garbage collector what each record references.
 const (
 	nsBlob     = "oci\x00blob\x00"
 	nsManifest = "oci\x00manifest\x00"
@@ -36,8 +33,6 @@ const (
 	nsReferrer = "oci\x00referrer\x00"
 	nsUpload   = "oci\x00upload\x00"
 
-	gcEpochKey   = "gc\x00epoch"
-	gcDoomedNS   = "gc\x00doomed\x00"
 	recordFormat = 1 // the schema version byte that starts every value
 )
 
@@ -70,8 +65,6 @@ func referrerKey(r *repoName, subject, d blob.Digest) []byte {
 }
 
 func uploadKey(id string) []byte { return []byte(nsUpload + id) }
-
-func doomedKey(d blob.Digest) []byte { return []byte(gcDoomedNS + d.String()) }
 
 var errBadRecord = errors.New("oci: malformed metadata record")
 
