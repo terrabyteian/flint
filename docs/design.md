@@ -497,10 +497,10 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - **PyPI clients.** HTTP basic auth with the `__token__` username convention and an API token as the password.
 - **Permissions.** Per-repository roles (`read` < `write` < `delete` < `admin`) are granted to users or groups. Grants can target a pattern such as `team-a-*`. One global `admin` role administers everything. Anonymous pull is a per-repository setting, off by default.
 - **First administrator.** Created at startup from a password file named in the configuration when no administrator exists, so Kubernetes can mount it from a Secret.
-
-[auth.md](auth.md) describes the client-visible behavior and the admin API.
 - **SAML.** Never hand-written. SAML depends on XML signature verification and canonicalization, a long-running source of authentication bypasses even in mature libraries; writing it from scratch would be irresponsible. Enterprises that need SAML run an OIDC bridge such as Keycloak or Dex.
 - **Later.** GitHub Actions trusted publishing shortly after v1; LDAP after that.
+
+[auth.md](auth.md) describes the client-visible behavior and the admin API.
 
 ## Operations
 
