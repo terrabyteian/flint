@@ -113,12 +113,11 @@ A proxy repository caches one upstream module proxy, given by the URL you would 
 Before a `.mod` or `.zip` is cached, and before a client receives any of it, flint checks it against the Go checksum database, as the go command checks what it downloads:
 
 1. It looks up the module version's record, through the repository's own cache of the checksum database.
-2. It verifies the signature of the tree head the record comes with, with the database's public key (Ed25519), as the go command does.
+2. It proves the record, as the go command does: it verifies the signature of the tree head the record comes with, with the database's public key (Ed25519); it reads the database's tiles, and checks that they prove the record is in that tree; and it checks, with the tiles, that the tree is consistent with the latest tree head the repository has seen since flint started, so the database cannot show it two different logs.
 3. It computes the `h1:` hash of the fetched `go.mod` file, or of the files in the module zip, and compares it with the record's.
 
 Content that does not match is refused with `502`, and never enters the cache, so an upstream proxy, or someone between it and flint, cannot plant a module that every later build would download from flint.
-A module version the checksum database has no record of is refused the same way, with a message naming it and the database.
-flint does not check that the record is in the database's log: the go command fetches the tiles that prove it, and always checks that itself.
+A module version the checksum database has no record of, or whose record the database's tiles do not prove, is refused the same way, with a message naming it and the database, and nothing is cached; that holds for a mirror given as `go.sumdb.url` too, which cannot pair a made-up record with a genuine signed tree head.
 
 The checksum database is sum.golang.org, fetched from `https://sum.golang.org`, unless the repository's `go.sumdb` names another, by its public key as `GOSUMDB` names one, and optionally the URL to fetch it from, such as a mirror:
 
@@ -134,8 +133,8 @@ Modules matching one of the repository's `go.noSumCheck` patterns are cached wit
 Every proxy repository also serves its checksum database to clients, under `sumdb/<name>/`, where `<name>` is the database's name, such as `sum.golang.org`:
 
 - `supported` answers `200`, which is how the go command finds out that it can fetch the database through the repository.
-- Lookups and tiles never change, so once cached they are served forever. A lookup is cached only once its tree head's signature verifies.
-- The latest signed tree head is a document served for a minute after the database last confirmed it, and as last fetched while the database is unreachable. One whose signature does not verify never replaces the cached one.
+- Lookups and tiles never change, so once cached they are served forever. A lookup is cached only once it is proven, as the previous section says. Of the tiles flint reads to prove records, it caches the full tiles the proof authenticates, and never the partial tiles at the edge of a tree, which the database replaces as the log grows; the tiles clients ask for are cached as fetched, since the go command proves them itself.
+- The latest signed tree head is a document served for a minute after the database last confirmed it, and as last fetched while the database is unreachable. One whose signature does not verify, or that the tiles do not prove consistent with the latest tree head seen, never replaces the cached one.
 
 ## Virtual repositories
 

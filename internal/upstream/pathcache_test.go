@@ -583,6 +583,23 @@ func TestPathCacheRead(t *testing.T) {
 	if got := e.files.took(); len(got) != 1 {
 		t.Errorf("requests: %q, want one for the missing content", got)
 	}
+	// Pass-through content is fetched every time, and never cached.
+	e.files.put("/record", []byte("changed record"))
+	pass := route("record")
+	pass.Kind = upstream.PassThrough
+	if b, result, err := e.pc.Read(ctx, rp, pass, "tester", 100); err != nil || string(b) != "changed record" || result != upstream.ResultPassthrough {
+		t.Errorf("pass-through Read = %q, %s, %v", b, result, err)
+	}
+	e.files.put("/fresh", []byte("fresh"))
+	pass = route("fresh")
+	pass.Kind = upstream.PassThrough
+	if b, _, err := e.pc.Read(ctx, rp, pass, "tester", 100); err != nil || string(b) != "fresh" {
+		t.Errorf("pass-through Read = %q, %v", b, err)
+	}
+	e.settle()
+	if rec, _ := e.pc.Lookup(rp, "fresh"); rec != nil {
+		t.Error("pass-through content was cached")
+	}
 	// Verified, with the check, before it is returned or cached.
 	z := moduleZip(t, goModule.files)
 	e.files.put("/m.zip", z)

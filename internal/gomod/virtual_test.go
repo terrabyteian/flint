@@ -117,7 +117,6 @@ func TestGCMarker(t *testing.T) {
 	e.up.add(m, pseudo)
 	e.up.set(func(p *goProxy) { p.queries["example.com/m@main"] = pseudo.version })
 	e.db.add(m, pseudo)
-	e.db.set(func(db *sumDB) { db.tiles["8/0/000.p/2"] = []byte("tile") })
 	var bodies []string
 	for _, repo := range []string{"goproxy", "small"} {
 		for _, path := range []string{"example.com/m/@v/list", "example.com/m/@latest", "example.com/m/@v/main.info",

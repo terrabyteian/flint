@@ -67,7 +67,8 @@ type Expect struct {
 	// one that should count as a mismatch wraps ErrDigestMismatch.
 	// Content with a check is sent to a client only once it passed, so
 	// a failure is answered with an error status, not a response cut
-	// off.
+	// off. It runs once the upstream's response is closed, so it may
+	// itself fetch from the same upstream.
 	Check func(ctx context.Context, r io.ReaderAt, size int64) error
 	// FromResponse, if not nil, is called once the upstream has answered,
 	// before the content is read, with the response's headers. It returns

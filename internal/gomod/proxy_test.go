@@ -1,6 +1,8 @@
 package gomod
 
 import (
+	"bytes"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -28,8 +30,8 @@ func TestProxy(t *testing.T) {
 	}
 	e.settle()
 	// The checksum database was asked once for the version's record,
-	// which verified both files.
-	if got := e.db.took(); !slices.Equal(got, []string{"/lookup/example.com/!lib@v1.0.0"}) {
+	// and the tile that proves it, which verified both files.
+	if got := e.db.took(); !slices.Equal(got, []string{"/lookup/example.com/!lib@v1.0.0", "/tile/8/0/000.p/2"}) {
 		t.Errorf("checksum database requests %q", got)
 	}
 	if got := e.auth.reset(); len(got) == 0 || got[0] != "goproxy:pull" {
@@ -188,10 +190,8 @@ func TestSumDB(t *testing.T) {
 	e := newEnv(t)
 	m := newModule(t, "example.com/m", "v1.0.0")
 	e.db.add(m)
-	e.db.set(func(db *sumDB) {
-		db.tiles["8/0/000.p/1"] = []byte("partial tile")
-		db.tiles["8/data/x001/234"] = []byte("data tile")
-	})
+	e.db.set(func(db *sumDB) { db.tiles["8/data/x001/234"] = []byte("data tile") })
+	tile, _ := e.db.tile("8/0/000.p/1")
 	base := "/go/goproxy/sumdb/sum.example.com"
 	e.get(base+"/supported", http.StatusOK, "")
 	e.get("/go/goproxy/sumdb/sum.golang.org/supported", http.StatusNotFound, "")
@@ -203,7 +203,7 @@ func TestSumDB(t *testing.T) {
 	if !strings.Contains(lookup, "example.com/m v1.0.0/go.mod h1:") {
 		t.Errorf("lookup %q", lookup)
 	}
-	e.get(base+"/tile/8/0/000.p/1", http.StatusOK, "partial tile")
+	e.get(base+"/tile/8/0/000.p/1", http.StatusOK, string(tile))
 	e.get(base+"/tile/8/data/x001/234", http.StatusOK, "data tile")
 	e.get(base+"/tile/8/0/001", http.StatusNotFound, "")
 	for _, bad := range []string{"/tile/8/0/1", "/tile/x/0/001", "/tile/8/0/x01/234", "/tile/8/0/001.p/0", "/lookup/example.com/m@main",
@@ -215,7 +215,7 @@ func TestSumDB(t *testing.T) {
 	e.db.took()
 	e.db.set(func(db *sumDB) { db.down = true })
 	e.get(base+"/lookup/example.com/m@v1.0.0", http.StatusOK, lookup)
-	e.get(base+"/tile/8/0/000.p/1", http.StatusOK, "partial tile")
+	e.get(base+"/tile/8/0/000.p/1", http.StatusOK, string(tile))
 	e.get(base+"/latest", http.StatusOK, latest)
 	if got := e.db.took(); len(got) != 0 {
 		t.Errorf("checksum database requests for cached content: %q", got)
@@ -245,6 +245,99 @@ func TestSumDB(t *testing.T) {
 	}
 }
 
+// TestSumDBProof checks that a record of the checksum database is
+// trusted only once the database's tiles prove it is in a tree
+// consistent with the latest tree seen.
+func TestSumDBProof(t *testing.T) {
+	e := newEnv(t)
+	p := e.h.repos["goproxy"].proxy
+	cached := func(path string) bool {
+		t.Helper()
+		e.settle()
+		f, err := e.paths.Lookup(p.path, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f != nil
+	}
+	// 300 records: a full tile of records, and partial tiles.
+	var ms []*module
+	for i := range 300 {
+		ms = append(ms, newModule(t, fmt.Sprintf("example.com/m%d", i), "v1.0.0"))
+	}
+	e.up.add(ms...)
+	e.db.add(ms...)
+	const fullTile = "sumdb/sum.example.com/tile/8/0/000"
+
+	// A full tile that does not prove the tree is refused, and nothing
+	// is cached.
+	e.db.set(func(db *sumDB) { db.tiles["8/0/000"] = bytes.Repeat([]byte{1}, 256*32) })
+	if w := e.do(http.MethodGet, "/go/goproxy/example.com/m5/@v/v1.0.0.zip"); w.Code != http.StatusBadGateway {
+		t.Errorf("a zip proven by a bad tile: %d %q", w.Code, w.Body)
+	}
+	for _, path := range []string{"example.com/m5/@v/v1.0.0.zip", "sumdb/sum.example.com/lookup/example.com/m5@v1.0.0", fullTile} {
+		if cached(path) {
+			t.Errorf("%s was cached with a bad tile", path)
+		}
+	}
+
+	// A record the tiles prove is trusted: the full tile that proves it
+	// is cached, the tree's partial tiles are not.
+	e.db.set(func(db *sumDB) { clear(db.tiles) })
+	e.advance(testWindow)
+	e.get("/go/goproxy/example.com/m5/@v/v1.0.0.zip", http.StatusOK, string(ms[5].zip))
+	e.get("/go/goproxy/example.com/m299/@v/v1.0.0.mod", http.StatusOK, string(ms[299].mod))
+	if !cached(fullTile) {
+		t.Error("the full tile was not cached")
+	}
+	for _, path := range []string{"sumdb/sum.example.com/tile/8/0/001.p/44", "sumdb/sum.example.com/tile/8/1/000.p/1"} {
+		if cached(path) {
+			t.Errorf("the partial tile %s was cached", path)
+		}
+	}
+
+	// The tiles are fetched while the lookup is: a repository allowed
+	// one checksum database request at a time proves records too.
+	e.get("/go/small/example.com/m9/@v/v1.0.0.zip", http.StatusOK, string(ms[9].zip))
+	e.get("/go/small/sumdb/sum.example.com/lookup/example.com/m10@v1.0.0", http.StatusOK, "")
+
+	// A forged record, with the database's genuine signed tree head, is
+	// not in the tree: content matching it is refused, and neither it nor
+	// the record is cached.
+	evil := newModule(t, "example.com/m7", "v1.0.0")
+	evil.build(t, string(evil.mod), "package x // evil\n")
+	e.up.set(func(up *goProxy) { up.modules["example.com/m7"] = []*module{evil} })
+	e.db.set(func(db *sumDB) { db.lie["example.com/m7@v1.0.0"] = evil.record() })
+	for _, path := range []string{"example.com/m7/@v/v1.0.0.zip", "sumdb/sum.example.com/lookup/example.com/m7@v1.0.0"} {
+		if w := e.do(http.MethodGet, "/go/goproxy/"+path); w.Code != http.StatusBadGateway {
+			t.Errorf("%s with a forged record: %d %q", path, w.Code, w.Body)
+		}
+		if cached(path) {
+			t.Errorf("%s was cached with a forged record", path)
+		}
+	}
+
+	// A tree head that is not consistent with the latest seen, as a
+	// database that rewrote its log signs, is refused: its records are
+	// not trusted, and it does not replace the cached tree head.
+	base := "/go/goproxy/sumdb/sum.example.com"
+	latest := e.get(base+"/latest", http.StatusOK, "").Body.String()
+	n := newModule(t, "example.com/n", "v1.0.0")
+	e.up.add(n)
+	e.db.set(func(db *sumDB) { db.order[0], db.order[1] = db.order[1], db.order[0] })
+	e.db.add(n)
+	for _, path := range []string{"example.com/n/@v/v1.0.0.zip", "sumdb/sum.example.com/lookup/example.com/n@v1.0.0"} {
+		if w := e.do(http.MethodGet, "/go/goproxy/"+path); w.Code != http.StatusBadGateway {
+			t.Errorf("%s with an inconsistent tree head: %d %q", path, w.Code, w.Body)
+		}
+		if cached(path) {
+			t.Errorf("%s was cached with an inconsistent tree head", path)
+		}
+	}
+	e.advance(sumdbRevalidate)
+	e.get(base+"/latest", http.StatusOK, latest)
+}
+
 func TestRequests(t *testing.T) {
 	e := newEnv(t)
 	for _, path := range []string{
@@ -261,6 +354,8 @@ func TestRequests(t *testing.T) {
 		"/go/goproxy/example.com/m/@v/main.zip",   // a query names no zip
 		"/go/goproxy/example.com/m/@v/v1.0.zip",   // not canonical
 		"/go/goproxy/example.com/m/@v/.info",
+		"/go/goproxy/example.com/m/@v/info", // no extension
+		"/go/goproxy/example.com/m/@v/v1.0.0",
 		"/go/goproxy/sumdb/",
 		"/go/goproxy/sumdb/sum.example.com",
 	} {

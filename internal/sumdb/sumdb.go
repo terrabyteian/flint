@@ -1,8 +1,8 @@
 // Package sumdb reads what the Go checksum database serves: its public
-// keys, the signed notes that carry its tree heads, and the records its
-// lookup endpoint answers with. flint uses it to verify Go modules before
-// it caches them, and configuration validation uses it to check a
-// checksum database's key.
+// keys, the signed notes that carry its tree heads, the records its
+// lookup endpoint answers with, and the tiles that prove them. flint uses
+// it to verify Go modules before it caches them, and configuration
+// validation uses it to check a checksum database's key.
 //
 // A signed note is a text, ending in a newline, followed by a blank line
 // and one or more signature lines:
@@ -23,9 +23,9 @@
 //
 // A lookup answer is a record's number on a line of its own, the
 // record's text (the go.sum lines of one module version), a blank line,
-// and a signed note of a tree that contains the record. This package
-// checks the note's signature, but not that the record is in the tree:
-// the go command, which fetches the tiles that prove it, always does.
+// and a signed note of a tree that contains the record. OpenLookup
+// checks the note's signature, and a Prover of the tree that the tree
+// contains the record, as the go command checks both.
 package sumdb
 
 import (
@@ -48,8 +48,8 @@ const DefaultKey = "sum.golang.org+033de0ae+Ac4zctda0e5eza+HJyk9SxEdh+s3Ux18htTT
 // algEd25519 is the algorithm byte of an Ed25519 key.
 const algEd25519 = 1
 
-// ErrBadNote means a signed note or lookup answer is malformed or not
-// signed by the expected key.
+// ErrBadNote means a signed note, lookup answer, or tile is malformed,
+// not signed by the expected key, or not proven by the database's tiles.
 var ErrBadNote = errors.New("sumdb: malformed or unverified note")
 
 // Verifier verifies the signatures of one checksum database.
@@ -158,7 +158,7 @@ type Tree struct {
 	// N is the number of records in the log.
 	N int64
 	// Hash is the root hash of the log's tree.
-	Hash [sha256.Size]byte
+	Hash Hash
 }
 
 // OpenTree returns the tree head of signed note msg, as the checksum
@@ -198,11 +198,14 @@ type Record struct {
 	Zip, Mod string
 	// Tree is the tree head the answer came with.
 	Tree Tree
+
+	data []byte // the record's text, which its hash covers
 }
 
 // OpenLookup reads a lookup answer for module path at version, checking
 // that v signed its tree head and that its record names the module
-// version and both its hashes.
+// version and both its hashes; a Prover of the tree head checks that the
+// tree contains the record.
 func (v *Verifier) OpenLookup(b []byte, path, version string) (*Record, error) {
 	idLine, rest, ok := bytes.Cut(b, []byte("\n"))
 	id, err := strconv.ParseInt(string(idLine), 10, 64)
@@ -220,7 +223,7 @@ func (v *Verifier) OpenLookup(b []byte, path, version string) (*Record, error) {
 	if id >= tree.N {
 		return nil, fmt.Errorf("%w: record %d is not in a tree of %d records", ErrBadNote, id, tree.N)
 	}
-	r := &Record{ID: id, Path: path, Version: version, Tree: tree}
+	r := &Record{ID: id, Path: path, Version: version, Tree: tree, data: append(bytes.Clone(text), '\n')}
 	for _, line := range strings.Split(string(text), "\n") {
 		f := strings.Fields(line)
 		if len(f) != 3 || f[0] != path || !strings.HasPrefix(f[2], "h1:") {

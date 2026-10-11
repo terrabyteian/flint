@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/config"
@@ -24,8 +25,7 @@ import (
 //     GOPROXY protocol requires of a proxy, so they are cached forever.
 //     Before a .mod or .zip is cached, or a client receives its final
 //     byte, its h1: hash is computed from the fetched bytes and compared
-//     with the module version's record in the checksum database, whose
-//     signed tree head is verified with the database's public key;
+//     with the module version's record in the checksum database;
 //     content that does not match is never cached. Modules matching the
 //     repository's go.noSumCheck patterns are cached unverified. A
 //     canonical .info must name its version.
@@ -36,10 +36,17 @@ import (
 //     version's .info, so a build that resolved a branch online finds
 //     the version's .info offline.
 //   - The checksum database's lookups and tiles never change, so they
-//     are cached forever; a lookup only once its tree head verifies. Its
-//     signed tree head (latest) is a document revalidated every minute.
-//     The database is fetched from go.sumdb.url, not from the module
-//     proxy, which need not proxy it.
+//     are cached forever. A lookup is cached, and its record trusted,
+//     only once it is proven as the go command proves it: the
+//     database's public key verifies the signature of its tree head,
+//     the database's tiles prove that the tree contains the record, and
+//     that the tree is consistent with the latest tree head the
+//     repository has seen since flint started. A full tile is cached
+//     once it is proven too; a partial tile, read to prove a tree, is
+//     not. The signed tree head (latest) is a document revalidated
+//     every minute, replaced only by one proven consistent with it. The
+//     database is fetched from go.sumdb.url, not from the module proxy,
+//     which need not proxy it.
 //   - An upstream 404 or 410 is passed on as it is, so the go command
 //     falls back to the next GOPROXY entry as it would from any proxy.
 
@@ -53,6 +60,7 @@ const (
 	maxList   = 16 << 20  // a version list
 	maxLookup = 64 << 10  // a checksum database lookup
 	maxNote   = 64 << 10  // the checksum database's tree head
+	maxTile   = 8 << 10   // a tile of the checksum database: 256 hashes
 	maxZip    = 500 << 20 // a module zip, as the go command bounds it
 )
 
@@ -74,6 +82,11 @@ type proxyRepo struct {
 	sumdbURL   string
 	verifier   *sumdb.Verifier
 	noSumCheck []string
+
+	// latest is the latest tree head of the checksum database seen, or
+	// nil; every tree head trusted is consistent with it.
+	mu     sync.Mutex
+	latest *sumdb.Tree
 }
 
 func newProxyRepo(rc config.Repository, defaults upstream.Options) (*proxyRepo, error) {
@@ -225,11 +238,8 @@ func (h *Handler) alsoInfo(escMod string) func(ctx context.Context, d *upstream.
 // ver: it must name the version.
 func checkInfo(ver string) func(ctx context.Context, r io.ReaderAt, size int64) error {
 	return func(_ context.Context, r io.ReaderAt, size int64) error {
-		if size > maxInfo {
-			return fmt.Errorf("%w: a .info file of %d bytes", upstream.ErrTooLarge, size)
-		}
-		b := make([]byte, size)
-		if _, err := r.ReadAt(b, 0); err != nil && err != io.EOF {
+		b, err := readAt(r, size, maxInfo, "a .info file")
+		if err != nil {
 			return err
 		}
 		i, err := readInfo(b)
@@ -268,7 +278,7 @@ func (h *Handler) checkSum(p *proxyRepo, req *request, actor string) func(ctx co
 // database.
 func (h *Handler) lookup(ctx context.Context, p *proxyRepo, mod, ver, escMod, escVer, actor string) (*sumdb.Record, error) {
 	rt := h.sumdbRoute(p, "lookup/"+escMod+"@"+escVer)
-	rt.Expect.Check = checkLookup(p.verifier, mod, ver)
+	rt.Expect.Check = h.checkLookup(p, mod, ver, actor)
 	b, _, err := h.paths.Read(ctx, p.path, rt, actor, maxLookup)
 	if err != nil {
 		return nil, err
@@ -277,22 +287,94 @@ func (h *Handler) lookup(ctx context.Context, p *proxyRepo, mod, ver, escMod, es
 }
 
 // checkLookup returns the Expect.Check of a lookup of module mod at
-// version ver: it must be the module version's record, with a tree head
-// the database signed.
-func checkLookup(v *sumdb.Verifier, mod, ver string) func(ctx context.Context, r io.ReaderAt, size int64) error {
-	return func(_ context.Context, r io.ReaderAt, size int64) error {
-		if size > maxLookup {
-			return fmt.Errorf("%w: a lookup of %d bytes", upstream.ErrTooLarge, size)
-		}
-		b := make([]byte, size)
-		if _, err := r.ReadAt(b, 0); err != nil && err != io.EOF {
+// version ver in p's checksum database: it must be the module version's
+// record, with a tree head the database signed, in that tree, which must
+// be consistent with the latest one p has seen.
+func (h *Handler) checkLookup(p *proxyRepo, mod, ver, actor string) func(ctx context.Context, r io.ReaderAt, size int64) error {
+	return func(ctx context.Context, r io.ReaderAt, size int64) error {
+		b, err := readAt(r, size, maxLookup, "a lookup")
+		if err != nil {
 			return err
 		}
-		if _, err := v.OpenLookup(b, mod, ver); err != nil {
+		rec, err := p.verifier.OpenLookup(b, mod, ver)
+		var pt *sumdb.Prover
+		if err == nil {
+			pt, err = sumdb.NewProver(ctx, rec.Tree, h.readTile(p, actor))
+		}
+		if err == nil {
+			err = pt.Includes(ctx, rec)
+		}
+		if err == nil {
+			err = h.trust(ctx, p, pt)
+		}
+		if errors.Is(err, sumdb.ErrBadNote) {
 			return fmt.Errorf("%w: %v", upstream.ErrDigestMismatch, err)
 		}
-		return nil
+		return err
 	}
+}
+
+// trust checks that the tree pt proves, which p's checksum database
+// signed, is consistent with the latest tree head p has seen, and makes
+// it the latest if it is newer.
+func (h *Handler) trust(ctx context.Context, p *proxyRepo, pt *sumdb.Prover) error {
+	for {
+		p.mu.Lock()
+		latest := p.latest
+		p.mu.Unlock()
+		if latest != nil {
+			if err := pt.Consistent(ctx, *latest); err != nil {
+				return err
+			}
+		}
+		p.mu.Lock()
+		if p.latest == latest {
+			if t := pt.Tree(); latest == nil || t.N > latest.N {
+				p.latest = &t
+			}
+			p.mu.Unlock()
+			return nil
+		}
+		// Another tree became the latest meanwhile: check against it.
+		p.mu.Unlock()
+	}
+}
+
+// readTile returns the reader of the tiles of p's checksum database,
+// which proves its answers: through the cache clients' tile requests
+// use for a full tile, which is cached only once its check passes, and
+// never cached for a partial one.
+func (h *Handler) readTile(p *proxyRepo, actor string) sumdb.TileReader {
+	return func(ctx context.Context, path string, check func([]byte) error) ([]byte, error) {
+		rt := h.sumdbRoute(p, path)
+		if check == nil {
+			rt.Kind = upstream.PassThrough
+		} else {
+			rt.Expect.Check = func(_ context.Context, r io.ReaderAt, size int64) error {
+				b, err := readAt(r, size, maxTile, "a tile")
+				if err == nil {
+					if err = check(b); err != nil {
+						err = fmt.Errorf("%w: %v", upstream.ErrDigestMismatch, err)
+					}
+				}
+				return err
+			}
+		}
+		b, _, err := h.paths.Read(ctx, p.path, rt, actor, maxTile)
+		return b, err
+	}
+}
+
+// readAt reads content of size bytes, at most max, named what in errors.
+func readAt(r io.ReaderAt, size, max int64, what string) ([]byte, error) {
+	if size > max {
+		return nil, fmt.Errorf("%w: %s of %d bytes", upstream.ErrTooLarge, what, size)
+	}
+	b := make([]byte, size)
+	if _, err := r.ReadAt(b, 0); err != nil && err != io.EOF {
+		return nil, err
+	}
+	return b, nil
 }
 
 // sumdbRoute returns the route of path below p's checksum database,
@@ -318,10 +400,19 @@ func (h *Handler) serveSumDB(w http.ResponseWriter, r *http.Request, p *proxyRep
 	case sub == "latest":
 		rt = h.sumdbRoute(p, sub)
 		rt.Kind, rt.ContentType, rt.MaxSize, rt.Revalidate = upstream.Mutable, ctText, maxNote, sumdbRevalidate
+		actor := h.actor(r)
 		rt.Validate = func(ctx context.Context, d *upstream.Doc) error {
 			b, err := h.readDoc(ctx, d, maxNote)
+			var tree sumdb.Tree
 			if err == nil {
-				_, err = p.verifier.OpenTree(b)
+				tree, err = p.verifier.OpenTree(b)
+			}
+			var pt *sumdb.Prover
+			if err == nil {
+				pt, err = sumdb.NewProver(ctx, tree, h.readTile(p, actor))
+			}
+			if err == nil {
+				err = h.trust(ctx, p, pt)
 			}
 			return err
 		}
@@ -334,7 +425,7 @@ func (h *Handler) serveSumDB(w http.ResponseWriter, r *http.Request, p *proxyRep
 			return
 		}
 		rt = h.sumdbRoute(p, sub)
-		rt.ContentType, rt.Expect.Check = ctText, checkLookup(p.verifier, mod, ver)
+		rt.ContentType, rt.Expect.Check = ctText, h.checkLookup(p, mod, ver, h.actor(r))
 	case strings.HasPrefix(sub, "tile/") && validTile(strings.TrimPrefix(sub, "tile/")):
 		rt = h.sumdbRoute(p, sub)
 		rt.ContentType = "application/octet-stream"

@@ -575,6 +575,7 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 	}
 	if expect.Check != nil {
 		b, err := io.ReadAll(io.LimitReader(er, maxCheckInMemory+1))
+		resp.Body.Close()
 		switch {
 		case err == nil && len(b) > maxCheckInMemory:
 			err = fmt.Errorf("%w: %s cannot be verified without being cached while the data directory is nearly full", ErrNoSpace, rt.Path)
@@ -707,13 +708,17 @@ func (pc *PathCache) adopt(ctx context.Context, rp *PathRepo, path string, d *Do
 // for a format that reads it itself rather than serving it, such as a
 // record it verifies other content against, and how it was found
 // (ResultHit, ResultFetched, or ResultPassthrough): from the cache, or
-// else fetched, verified, and cached as Serve would cache it. Content
-// larger than max fails with ErrTooLarge. Unlike Serve, Read counts no
-// request: the format counts what it serves.
+// else fetched, verified, and cached as Serve would cache it; content
+// rt classifies as PassThrough is fetched and verified, but never
+// cached. Content larger than max fails with ErrTooLarge. Unlike Serve,
+// Read counts no request: the format counts what it serves.
 func (pc *PathCache) Read(ctx context.Context, rp *PathRepo, rt *Route, actor string, max int64) ([]byte, string, error) {
-	f, err := pc.Lookup(rp, rt.Path)
-	if err != nil {
-		return nil, "", err
+	var f *FileRecord
+	if rt.Kind != PassThrough {
+		var err error
+		if f, err = pc.Lookup(rp, rt.Path); err != nil {
+			return nil, "", err
+		}
 	}
 	if f != nil {
 		if f.Size > max {
@@ -732,7 +737,7 @@ func (pc *PathCache) Read(ctx context.Context, rp *PathRepo, rt *Route, actor st
 	if err := pc.remembered(rp, rt); err != nil {
 		return nil, "", err
 	}
-	if pc.space != nil && pc.space.Pressure() {
+	if rt.Kind == PassThrough || pc.space != nil && pc.space.Pressure() {
 		b, err := pc.readThrough(ctx, rp, rt, max)
 		return b, ResultPassthrough, err
 	}
@@ -794,6 +799,7 @@ func (pc *PathCache) readThrough(ctx context.Context, rp *PathRepo, rt *Route, m
 		return nil, err
 	}
 	b, err := io.ReadAll(io.LimitReader(er, max+1))
+	resp.Body.Close()
 	switch {
 	case err == nil && int64(len(b)) > max:
 		err = tooLarge(rt, max)

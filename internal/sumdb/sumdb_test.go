@@ -2,13 +2,16 @@ package sumdb
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -31,7 +34,7 @@ func TestRealAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the latest tree head: %v", err)
 	}
-	if tree.N != 68325086 {
+	if tree.N != 68336369 {
 		t.Errorf("tree size %d", tree.N)
 	}
 	lookup, err := os.ReadFile("testdata/lookup-uuid-v1.6.0")
@@ -170,4 +173,236 @@ func sigLine(text, name string, priv ed25519.PrivateKey) string {
 	sig := binary.BigEndian.AppendUint32(nil, keyHash(name, raw))
 	sig = append(sig, ed25519.Sign(priv, []byte(text))...)
 	return "— " + name + " " + base64.StdEncoding.EncodeToString(sig) + "\n"
+}
+
+// TestRealProof proves a record sum.golang.org served with the tiles it
+// served, and the record's tree head consistent with a later one.
+func TestRealProof(t *testing.T) {
+	v, err := ParseKey(DefaultKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile("testdata/latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, err := v.OpenTree(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup, err := os.ReadFile("testdata/lookup-uuid-v1.6.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := v.OpenLookup(lookup, "github.com/google/uuid", "v1.6.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(_ context.Context, path string, check func([]byte) error) ([]byte, error) {
+		return os.ReadFile("testdata/" + path)
+	}
+	p, err := NewProver(ctx, r.Tree, read)
+	if err != nil {
+		t.Fatalf("the record's tree head: %v", err)
+	}
+	if err := p.Includes(ctx, r); err != nil {
+		t.Errorf("the record: %v", err)
+	}
+	if err := p.Consistent(ctx, latest); err != nil {
+		t.Errorf("the latest tree head: %v", err)
+	}
+	// A record with other hashes, under the genuine signed tree head,
+	// is not in the tree.
+	forged := bytes.Replace(lookup, []byte("h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr"), []byte("h1:AAAAJDMOsjHA8n1jAhLSgzrAzy1Hgr"), 1)
+	fr, err := v.OpenLookup(forged, "github.com/google/uuid", "v1.6.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Includes(ctx, fr); !errors.Is(err, ErrBadNote) {
+		t.Errorf("a forged record: %v, want ErrBadNote", err)
+	}
+	// Neither is the genuine record under another number.
+	fr.ID--
+	fr.data = r.data
+	if err := p.Includes(ctx, fr); !errors.Is(err, ErrBadNote) {
+		t.Errorf("a record under another number: %v, want ErrBadNote", err)
+	}
+}
+
+var ctx = context.Background()
+
+// testLog is a checksum database's log, built from scratch with RFC
+// 6962's definitions, which serves its tiles.
+type testLog struct {
+	records [][]byte
+}
+
+func newTestLog(n int) *testLog {
+	l := &testLog{}
+	for i := 0; i < n; i++ {
+		l.records = append(l.records, fmt.Appendf(nil, "example.com/m%d v1.0.0 h1:zip=\nexample.com/m%d v1.0.0/go.mod h1:mod=\n", i, i))
+	}
+	return l
+}
+
+// mth returns the Merkle tree hash of records [lo, hi).
+func (l *testLog) mth(lo, hi int64) Hash {
+	if hi-lo == 1 {
+		return sha256.Sum256(append([]byte{0}, l.records[lo]...))
+	}
+	k := int64(1)
+	for k*2 < hi-lo {
+		k *= 2
+	}
+	left, right := l.mth(lo, lo+k), l.mth(lo+k, hi)
+	return sha256.Sum256(append(append([]byte{1}, left[:]...), right[:]...))
+}
+
+func (l *testLog) tree(n int64) Tree {
+	if n == 0 {
+		return Tree{}
+	}
+	return Tree{N: n, Hash: l.mth(0, n)}
+}
+
+// reader returns a TileReader of the log's tiles, recording the paths
+// read and whether each came with a check; with noPartial, only full
+// tiles are served.
+func (l *testLog) reader(reads *[]string, noPartial bool) TileReader {
+	return func(_ context.Context, path string, check func([]byte) error) ([]byte, error) {
+		*reads = append(*reads, fmt.Sprintf("%s %v", path, check != nil))
+		var level, w int
+		var idx string
+		rest, _ := strings.CutPrefix(path, "tile/8/")
+		lv, rest, _ := strings.Cut(rest, "/")
+		fmt.Sscan(lv, &level)
+		idx, ws, partial := strings.Cut(rest, ".p/")
+		w = tileWidth
+		if partial {
+			if noPartial {
+				return nil, errors.New("no partial tiles")
+			}
+			fmt.Sscan(ws, &w)
+		}
+		i, _ := strconv.ParseInt(strings.ReplaceAll(strings.ReplaceAll(idx, "x", ""), "/", ""), 10, 64)
+		size := int64(1) << (tileHeight * level)
+		var b []byte
+		for j := i * tileWidth; j < i*tileWidth+int64(w); j++ {
+			if (j+1)*size > int64(len(l.records)) {
+				return nil, errors.New("not found")
+			}
+			h := l.mth(j*size, (j+1)*size)
+			b = append(b, h[:]...)
+		}
+		return b, nil
+	}
+}
+
+func TestProver(t *testing.T) {
+	const n = 1<<16 + 300
+	l := newTestLog(n)
+	for _, size := range []int64{1, 2, 3, 255, 256, 257, 1000, 1 << 16, n} {
+		var reads []string
+		p, err := NewProver(ctx, l.tree(size), l.reader(&reads, false))
+		if err != nil {
+			t.Fatalf("tree of %d: %v", size, err)
+		}
+		for _, id := range []int64{0, size / 3, size - 1} {
+			r := &Record{ID: id, Path: "example.com/m", Version: "v1.0.0", data: l.records[id]}
+			if err := p.Includes(ctx, r); err != nil {
+				t.Errorf("record %d of %d: %v", id, size, err)
+			}
+			if id > 0 {
+				r.data = l.records[id-1]
+				if err := p.Includes(ctx, r); !errors.Is(err, ErrBadNote) {
+					t.Errorf("record %d of %d with record %d's text: %v", id, size, id-1, err)
+				}
+			}
+		}
+		for _, other := range []int64{1, size / 2, size - 1, size, size + 1, n} {
+			if other == 0 || other > n {
+				continue
+			}
+			if err := p.Consistent(ctx, l.tree(other)); err != nil {
+				t.Errorf("trees of %d and %d: %v", size, other, err)
+			}
+		}
+		// Partial tiles come without a check, full ones with one.
+		for _, rd := range reads {
+			if strings.Contains(rd, ".p/") != strings.HasSuffix(rd, "false") {
+				t.Errorf("tree of %d: read %s", size, rd)
+			}
+		}
+	}
+	// A partial tile that is gone is read from the full tile.
+	var reads []string
+	p, err := NewProver(ctx, l.tree(1000), l.reader(&reads, true))
+	if err != nil {
+		t.Fatalf("without partial tiles: %v", err)
+	}
+	if err := p.Includes(ctx, &Record{ID: 999, data: l.records[999]}); err != nil {
+		t.Errorf("without partial tiles: %v", err)
+	}
+	// A signed tree head of another log is not consistent.
+	if p, err = NewProver(ctx, l.tree(1000), l.reader(&reads, false)); err != nil {
+		t.Fatal(err)
+	}
+	fork := newTestLog(n)
+	fork.records[500] = []byte("example.com/evil v1.0.0 h1:zip=\n")
+	for _, size := range []int64{501, 1000, n} {
+		if err := p.Consistent(ctx, fork.tree(size)); !errors.Is(err, ErrBadNote) {
+			t.Errorf("a fork of %d records: %v, want ErrBadNote", size, err)
+		}
+	}
+	fp, err := NewProver(ctx, fork.tree(n), fork.reader(&reads, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fp.Consistent(ctx, l.tree(1000)); !errors.Is(err, ErrBadNote) {
+		t.Errorf("a fork's tiles and a tree of the log: %v, want ErrBadNote", err)
+	}
+	if err := p.Consistent(ctx, Tree{N: 1000, Hash: fork.tree(1000).Hash}); !errors.Is(err, ErrBadNote) {
+		t.Errorf("another hash of the same size: %v", err)
+	}
+	// Tiles that do not compute the tree's hash prove nothing.
+	if _, err := NewProver(ctx, fork.tree(1000), l.reader(&reads, false)); !errors.Is(err, ErrBadNote) {
+		t.Errorf("tiles of another tree: %v", err)
+	}
+	// A full tile that does not match the tile above it is refused,
+	// even if its reader skipped the check.
+	p, err = NewProver(ctx, l.tree(n), l.reader(&reads, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := func(c context.Context, path string, check func([]byte) error) ([]byte, error) {
+		b, err := l.reader(&reads, false)(c, path, check)
+		if err == nil && path == "tile/8/0/000" {
+			b[0] ^= 1
+			if check == nil || check(b) == nil {
+				t.Errorf("the check passed a tampered tile")
+			}
+		}
+		return b, err
+	}
+	p.read = tampered
+	if err := p.Includes(ctx, &Record{ID: 0, data: l.records[0]}); !errors.Is(err, ErrBadNote) {
+		t.Errorf("a tampered full tile: %v, want ErrBadNote", err)
+	}
+}
+
+func TestTilePath(t *testing.T) {
+	for want, tile := range map[string]struct {
+		t int
+		i int64
+		w int
+	}{
+		"tile/8/0/000":            {0, 0, 256},
+		"tile/8/1/x001/234.p/12":  {1, 1234, 12},
+		"tile/8/2/x001/x000/000":  {2, 1000000, 256},
+		"tile/8/0/x266/891.p/230": {0, 266891, 230},
+	} {
+		if got := tilePath(tile.t, tile.i, tile.w); got != want {
+			t.Errorf("tilePath(%v) = %q, want %q", tile, got, want)
+		}
+	}
 }

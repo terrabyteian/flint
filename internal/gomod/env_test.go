@@ -43,12 +43,20 @@ type module struct {
 // file.
 func newModule(t *testing.T, path, version string) *module {
 	t.Helper()
-	m := &module{path: path, version: version, time: "2026-01-02T03:04:05Z",
-		mod: []byte("module " + path + "\n\ngo 1.22\n")}
+	m := &module{path: path, version: version, time: "2026-01-02T03:04:05Z"}
+	m.build(t, "module "+path+"\n\ngo 1.22\n", "package x // "+version+"\n")
+	return m
+}
+
+// build sets the module's go.mod file, and its zip with that and one
+// source file.
+func (m *module) build(t *testing.T, mod, src string) {
+	t.Helper()
+	m.mod = []byte(mod)
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	for name, body := range map[string][]byte{"go.mod": m.mod, "x.go": []byte("package x // " + version + "\n")} {
-		w, err := zw.Create(path + "@" + version + "/" + name)
+	for name, body := range map[string][]byte{"go.mod": m.mod, "x.go": []byte(src)} {
+		w, err := zw.Create(m.path + "@" + m.version + "/" + name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -58,7 +66,6 @@ func newModule(t *testing.T, path, version string) *module {
 		t.Fatal(err)
 	}
 	m.zip = buf.Bytes()
-	return m
 }
 
 func (m *module) info() string {
@@ -194,7 +201,9 @@ func (p *goProxy) serve(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
-// sumDB is a fake checksum database, signing with its own key.
+// sumDB is a fake checksum database, signing with its own key: its log
+// is a Merkle tree of its records, in order, built as RFC 6962 says, and
+// it serves the tiles of the tree.
 type sumDB struct {
 	*httptest.Server
 	name string
@@ -204,8 +213,9 @@ type sumDB struct {
 	mu       sync.Mutex
 	records  map[string]string // "<path>@<version>" to the record's text
 	order    []string
-	forge    map[string]bool // lookups answered with another key's signature
-	tiles    map[string][]byte
+	forge    map[string]bool   // lookups answered with another key's signature
+	lie      map[string]string // lookups answered with this record's text instead
+	tiles    map[string][]byte // tiles served instead of the tree's
 	down     bool
 	requests []string
 }
@@ -217,8 +227,9 @@ func newSumDB(t *testing.T, name string) *sumDB {
 	}
 	raw := append([]byte{1}, pub...)
 	h := sha256.Sum256(append([]byte(name+"\n"), raw...))
-	db := &sumDB{name: name, priv: priv, records: map[string]string{}, forge: map[string]bool{}, tiles: map[string][]byte{},
-		key: fmt.Sprintf("%s+%08x+%s", name, binary.BigEndian.Uint32(h[:]), base64.StdEncoding.EncodeToString(raw))}
+	db := &sumDB{name: name, priv: priv, records: map[string]string{}, forge: map[string]bool{}, lie: map[string]string{},
+		tiles: map[string][]byte{},
+		key:   fmt.Sprintf("%s+%08x+%s", name, binary.BigEndian.Uint32(h[:]), base64.StdEncoding.EncodeToString(raw))}
 	db.Server = httptest.NewServer(http.HandlerFunc(db.serve))
 	t.Cleanup(db.Close)
 	return db
@@ -229,14 +240,60 @@ func (db *sumDB) add(ms ...*module) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	for _, m := range ms {
-		zh, err := upstream.GoZipH1(bytes.NewReader(m.zip), int64(len(m.zip)))
-		if err != nil {
-			panic(err)
-		}
 		k := m.path + "@" + m.version
-		db.records[k] = fmt.Sprintf("%s %s %s\n%s %s/go.mod %s\n", m.path, m.version, zh, m.path, m.version, upstream.GoModH1(m.mod))
+		db.records[k] = m.record()
 		db.order = append(db.order, k)
 	}
+}
+
+// record returns the checksum database's record of the module version.
+func (m *module) record() string {
+	zh, err := upstream.GoZipH1(bytes.NewReader(m.zip), int64(len(m.zip)))
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%s %s %s\n%s %s/go.mod %s\n", m.path, m.version, zh, m.path, m.version, upstream.GoModH1(m.mod))
+}
+
+// hash returns the hash of records [lo, hi) of the log, as RFC 6962
+// defines it.
+func (db *sumDB) hash(lo, hi int) [32]byte {
+	if hi-lo == 1 {
+		return sha256.Sum256(append([]byte{0}, db.records[db.order[lo]]...))
+	}
+	k := 1
+	for 2*k < hi-lo {
+		k *= 2
+	}
+	l, r := db.hash(lo, lo+k), db.hash(lo+k, hi)
+	return sha256.Sum256(append(append([]byte{1}, l[:]...), r[:]...))
+}
+
+// tile returns the tile at path below "tile/", such as "8/0/000.p/3", or
+// false if the tree has no such tile.
+func (db *sumDB) tile(path string) ([]byte, bool) {
+	var level, w int
+	lv, rest, _ := strings.Cut(strings.TrimPrefix(path, "8/"), "/")
+	if _, err := fmt.Sscan(lv, &level); err != nil {
+		return nil, false
+	}
+	idx, ws, partial := strings.Cut(rest, ".p/")
+	w = 256
+	if partial {
+		fmt.Sscan(ws, &w)
+	}
+	var i int
+	fmt.Sscan(strings.ReplaceAll(strings.ReplaceAll(idx, "x", ""), "/", ""), &i)
+	size := 1 << (8 * level)
+	var b []byte
+	for j := i * 256; j < i*256+w; j++ {
+		if (j+1)*size > len(db.order) {
+			return nil, false
+		}
+		h := db.hash(j*size, (j+1)*size)
+		b = append(b, h[:]...)
+	}
+	return b, true
 }
 
 func (db *sumDB) set(f func(db *sumDB)) {
@@ -256,7 +313,11 @@ func (db *sumDB) took() []string {
 // tree returns the signed tree head of the records so far, signed with
 // priv as name.
 func (db *sumDB) tree(name string, priv ed25519.PrivateKey) string {
-	text := fmt.Sprintf("go.sum database tree\n%d\n%s\n", len(db.order), base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	var root [32]byte
+	if len(db.order) > 0 {
+		root = db.hash(0, len(db.order))
+	}
+	text := fmt.Sprintf("go.sum database tree\n%d\n%s\n", len(db.order), base64.StdEncoding.EncodeToString(root[:]))
 	raw := append([]byte{1}, priv.Public().(ed25519.PublicKey)...)
 	h := sha256.Sum256(append([]byte(name+"\n"), raw...))
 	sig := append(h[:4:4], ed25519.Sign(priv, []byte(text))...)
@@ -292,9 +353,15 @@ func (db *sumDB) serve(w http.ResponseWriter, r *http.Request) {
 		if db.forge[k] {
 			_, priv, _ = ed25519.GenerateKey(rand.Reader)
 		}
+		if lie, ok := db.lie[k]; ok {
+			text = lie
+		}
 		fmt.Fprintf(w, "%d\n%s\n%s", id, text, db.tree(db.name, priv))
 	case strings.HasPrefix(p, "/tile/"):
 		b, ok := db.tiles[strings.TrimPrefix(p, "/tile/")]
+		if !ok {
+			b, ok = db.tile(strings.TrimPrefix(p, "/tile/"))
+		}
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -345,7 +412,7 @@ func (a *testAuth) reset() []string {
 //	goproxy  proxy of the fake module proxy up, verified against the fake checksum database db
 //	second   proxy of the fake module proxy up2, verified against db
 //	corp     proxy of up2 with noSumCheck for corp.example.com/*
-//	small    proxy of up with a size limit
+//	small    proxy of up with a size limit, one upstream request at a time
 //	go-all   virtual: goproxy except corp.example.com/*, second
 //	corp-all virtual: corp for corp.example.com/* only, goproxy for everything else
 type env struct {
@@ -410,7 +477,7 @@ func (e *env) repos() []config.Repository {
 			Go:    &config.Go{SumDB: sum.SumDB, NoSumCheck: []string{"corp.example.com/*"}},
 			Proxy: &config.Proxy{URL: e.up2.URL, RevalidateAfter: window}},
 		{Name: "small", Format: config.FormatGo, Type: config.TypeProxy, Go: sum,
-			Proxy: &config.Proxy{URL: e.up.URL, RevalidateAfter: window, SizeLimit: config.ByteSize{Bytes: 1 << 20}}},
+			Proxy: &config.Proxy{URL: e.up.URL, RevalidateAfter: window, SizeLimit: config.ByteSize{Bytes: 1 << 20}, MaxConcurrent: 1}},
 		{Name: "go-all", Format: config.FormatGo, Type: config.TypeVirtual, Virtual: &config.Virtual{Members: []config.VirtualMember{
 			{Name: "goproxy", Exclude: []string{"corp.example.com/*"}}, {Name: "second"}}}},
 		{Name: "corp-all", Format: config.FormatGo, Type: config.TypeVirtual, Virtual: &config.Virtual{Members: []config.VirtualMember{

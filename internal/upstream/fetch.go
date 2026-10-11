@@ -274,6 +274,7 @@ func (f *Fetcher) download(ctx context.Context, cancel func(), fe *Fetch, open S
 		return blob.Info{}, fmt.Errorf("%w: %s ended after %d of %d bytes", ErrUnavailable, fe.label, up.Size(), size)
 	}
 	watchdog.Stop()
+	body.Close()
 	if hs != nil {
 		// Verified before the commit: content that fails never enters
 		// the blob store, and the final byte stays held back meanwhile.

@@ -220,10 +220,13 @@ func parseRequest(p string) (*request, bool) {
 		if file == "list" {
 			req.kind = kindList
 		} else {
-			ext := file[strings.LastIndexByte(file, '.')+1:]
-			switch ext {
+			dot := strings.LastIndexByte(file, '.')
+			if dot < 0 {
+				return nil, false
+			}
+			switch ext := file[dot+1:]; ext {
 			case "info", "mod", "zip":
-				req.kind, req.escVer = ext, strings.TrimSuffix(file, "."+ext)
+				req.kind, req.escVer = ext, file[:dot]
 			default:
 				return nil, false
 			}
