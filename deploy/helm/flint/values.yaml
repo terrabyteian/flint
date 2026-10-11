@@ -46,6 +46,21 @@ config:
   #     # upstreamSecrets below.
   #     username: my-docker-hub-user
   #     passwordFile: /etc/flint/upstream/dockerhub/password
+  # # PyPI: a hosted repository, a pypi.org proxy, and a virtual repository
+  # # merging them behind one index URL (docs/pypi.md).
+  # - name: pypi-local
+  #   format: pypi
+  #   type: hosted
+  # - name: pypi
+  #   format: pypi
+  #   type: proxy
+  #   proxy:
+  #     url: https://pypi.org/simple/
+  # - name: pypi-all
+  #   format: pypi
+  #   type: virtual
+  #   virtual:
+  #     members: [pypi-local, pypi]
   auth:
     permissions: []
   # proxyCache:
