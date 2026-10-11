@@ -187,8 +187,8 @@ type pkgRecord struct {
 	Created  time.Time
 	Modified time.Time
 	Tags     []distTag // sorted by tag
-	// Readme is the readme published last, a blob of ReadmeSize bytes,
-	// or zero if no version had one.
+	// Readme is the readme of the version "latest" pointed at when it was
+	// published, a blob of ReadmeSize bytes, or zero if it had none.
 	Readme         blob.Digest
 	ReadmeSize     int64
 	ReadmeFilename string

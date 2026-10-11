@@ -47,6 +47,10 @@ func (h *Handler) serveDistTags(w http.ResponseWriter, r *http.Request, rp *repo
 				h.fail(w, r, err)
 				return
 			}
+			if ver == "" {
+				writeError(w, http.StatusBadRequest, "the dist-tag must be set to a version; remove it with DELETE instead")
+				return
+			}
 			if !validTag(tag) {
 				writeError(w, http.StatusBadRequest, "invalid dist-tag %q: use a letter, then letters, digits, \".\", \"_\", and \"-\", in a name that is not a version range", abbrev(tag))
 				return

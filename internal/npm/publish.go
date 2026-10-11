@@ -250,7 +250,8 @@ func predicateType(bundle []byte) (string, error) {
 
 // servePublish publishes a version: it stores its tarball, manifest,
 // readme, and provenance bundle, records the version, and points the
-// dist-tags at it, "latest" too if the package has none.
+// dist-tags at it, "latest" too if the package has none. The package's
+// readme becomes the version's if the version becomes the latest.
 func (h *Handler) servePublish(w http.ResponseWriter, r *http.Request, rp *repository, name string, body *putBody) {
 	ctx := r.Context()
 	pub, err := checkPublish(body, name, h.user(r))
@@ -296,7 +297,7 @@ func (h *Handler) servePublish(w http.ResponseWriter, r *http.Request, rp *repos
 		if np.tag("latest") == "" {
 			np.setTag("latest", pub.version)
 		}
-		if !readme.Digest.IsZero() {
+		if np.tag("latest") == pub.version {
 			np.Readme, np.ReadmeSize, np.ReadmeFilename = readme.Digest, readme.Size, pub.readmeFilename
 		}
 		return &change{

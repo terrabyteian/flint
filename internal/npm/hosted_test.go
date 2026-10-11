@@ -341,6 +341,9 @@ func TestDistTags(t *testing.T) {
 		{"PUT", "/npm/local/-/package/@s%2fp/dist-tags/other", `"9.9.9"`, http.StatusNotFound},
 		{"PUT", "/npm/local/-/package/@s%2fp/dist-tags/1.x", `"1.0.0"`, http.StatusBadRequest},
 		{"PUT", "/npm/local/-/package/@s%2fp/dist-tags/other", `1`, http.StatusBadRequest},
+		{"PUT", "/npm/local/-/package/@s%2fp/dist-tags/latest", `""`, http.StatusBadRequest},
+		{"PUT", "/npm/local/-/package/@s%2fp/dist-tags/latest", `null`, http.StatusBadRequest},
+		{"PUT", "/npm/local/-/package/@s%2fp/dist-tags/next", `""`, http.StatusBadRequest},
 		{"PUT", "/npm/local/-/package/missing/dist-tags/other", `"1.0.0"`, http.StatusNotFound},
 		{"GET", "/npm/local/-/package/missing/dist-tags", "", http.StatusNotFound},
 		{"GET", "/npm/local/-/package/@s%2fp/dist-tags/x/y", "", http.StatusNotFound},
@@ -350,8 +353,37 @@ func TestDistTags(t *testing.T) {
 			t.Errorf("%s %s %s: %d %s, want %d", c.method, c.path, c.body, w.Code, w.Body, c.status)
 		}
 	}
+	if got := tags(); len(got) != 3 || got["latest"] != "2.0.0" || got["next"] != "2.0.0" {
+		t.Errorf("after refused changes: %v", got)
+	}
 	e.auth.setDeny(ActionPush)
 	e.expect("PUT", "/npm/local/-/package/@s%2fp/dist-tags/other", strings.NewReader(`"1.0.0"`), http.StatusForbidden)
+}
+
+// TestReadmeOfLatest checks that the packument serves the latest
+// version's readme: publishing an older line with --tag leaves it, and
+// publishing a new latest replaces it.
+func TestReadmeOfLatest(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct {
+		version, readme, tag, want string
+	}{
+		{"1.0.0", "# one", "", "# one"},
+		{"2.0.0", "# two", "", "# two"},
+		{"1.0.5", "# one, maintained", "maint", "# two"},
+		{"3.0.0-rc.1", "# three", "next", "# two"},
+		{"2.1.0", "", "", ""},
+	} {
+		p := newPkg("p", c.version)
+		p.readme = c.readme
+		if c.tag != "" {
+			p.tags = []string{c.tag}
+		}
+		e.publish("local", p, http.StatusOK)
+		if got := e.packument("local", "p", false).Readme; got != c.want {
+			t.Errorf("after publishing %s: readme %q, want %q", c.version, got, c.want)
+		}
+	}
 }
 
 // TestDeprecate edits deprecation messages as npm deprecate does: it

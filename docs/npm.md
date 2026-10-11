@@ -154,7 +154,7 @@ Publishing a version that is already published fails with `409 Conflict`, and so
 Publish a new version instead.
 Of concurrent publishes of one version, exactly one succeeds.
 
-The version's manifest is stored as it was published, except for the fields flint sets when it serves it (`dist` and `deprecated`) and the readme, which is kept with the package and served in the packument.
+The version's manifest is stored as it was published, except for the fields flint sets when it serves it (`dist` and `deprecated`) and the readme, which is kept with the package and served in the packument: the package's readme is the latest version's, replaced by a publish that points `latest` at its version, so publishing an older line with `--tag` leaves it as it is.
 `_npmUser` records the user who published the version, which `npm view` and `npm search` show.
 
 A repository owns a package from its first publish, and keeps owning it after every version is unpublished.
@@ -176,7 +176,7 @@ npm dist-tag rm @acme/widget stable
 ```
 
 - Publishing points the tag given with `--tag`, by default `latest`, at the version, and `latest` too when the package has none, so a package always has `latest` while it has a version.
-- Setting and removing a tag needs `write`. A tag cannot point at a version that is not published.
+- Setting and removing a tag needs `write`. A tag cannot point at a version that is not published, and only removing it, never setting it to an empty version, takes it away.
 - `latest` cannot be removed, only pointed at another version.
 - A tag is a letter followed by letters, digits, `.`, `_`, and `-`, and must not look like a version or a version range, such as `v1` or `x`, which npm would read as one.
 
