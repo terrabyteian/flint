@@ -864,6 +864,8 @@ func TestGCLinkReadsForgotten(t *testing.T) {
 		d := digestOf(t, pe.up.PutBlob("app", b))
 		layers = append(layers, d)
 		pe.get("/v2/small/app/blobs/"+d.String(), b)
+		// The second pull reads the link the first one's fetch writes.
+		pe.settle()
 		pe.get("/v2/small/app/blobs/"+d.String(), b)
 		pe.settle()
 		pe.advance(time.Minute)
