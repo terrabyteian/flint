@@ -71,4 +71,5 @@ Chart versions follow the OCI repository's tags:
 ## Access
 
 The view needs the `read` role on the repository, exactly like a pull, and anonymous clients may read it when the repository has `anonymousPull`.
-Clients send HTTP basic credentials, a password or an [API token](auth.md#api-tokens), as `helm repo add --username --password` does; a request without valid credentials gets `401` with `WWW-Authenticate: Basic realm="flint"`, and one without permission gets `403`.
+Clients send HTTP basic credentials, a password or an [API token](auth.md#api-tokens), as `helm repo add --username --password` does; tokens from the Docker token endpoint are not accepted.
+A request without valid credentials gets `401` with `WWW-Authenticate: Basic realm="flint"`, and one without permission gets `403`.

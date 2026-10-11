@@ -221,10 +221,8 @@ Proxy repositories use the same permissions as hosted ones: pulling needs the `r
 
 ### Helm chart repositories
 
-A hosted OCI repository with `helmIndex` also serves the Helm charts pushed to it with `helm push` as a classic Helm chart repository: `index.yaml`, `charts/<name>-<version>.tgz`, and provenance files, at `/helm/<repository>/` for the charts directly below the repository and at `/helm/<repository>/<path>/` for those below a deeper path.
-The index is built from the repository's metadata, kept in memory until a tag in it changes, and served as JSON with an `ETag`.
-Reading it needs the `read` role or `anonymousPull`, with HTTP basic credentials.
-[Helm chart repositories](helm-repository.md) describes the view and client setup.
+A hosted OCI repository with `helmIndex` also serves the Helm charts pushed to it with `helm push` as a classic Helm chart repository at `/helm/<repository>/`.
+[Helm chart repositories](helm-repository.md) describes the view, its access rules, and client setup.
 
 ### Built-in endpoints
 
