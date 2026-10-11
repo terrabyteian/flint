@@ -14,6 +14,7 @@ import (
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
+	"github.com/terrabyteian/flint/internal/oci"
 	"github.com/terrabyteian/flint/internal/server"
 )
 
@@ -81,10 +82,21 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		return err
 	}
 
-	srv, err := newServer(cfg, logger, store, blobs)
+	srv, registry, err := newServer(cfg, logger, store, blobs)
 	if err != nil {
 		return err
 	}
+	// Expire abandoned uploads in the background until the stores close.
+	janitorCtx, stopJanitor := context.WithCancel(context.Background())
+	janitorDone := make(chan struct{})
+	go func() {
+		defer close(janitorDone)
+		registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge)
+	}()
+	defer func() {
+		stopJanitor()
+		<-janitorDone
+	}()
 	addr, err := srv.Listen()
 	if err != nil {
 		return err
@@ -115,7 +127,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 // newServer builds the HTTP server and its metrics over open stores. The
 // format and auth packages register their routes, middleware, and
 // readiness checks on it here, using store and blobs.
-func newServer(cfg *config.Config, logger *slog.Logger, store meta.Store, blobs blob.Store) (*server.Server, error) {
+func newServer(cfg *config.Config, logger *slog.Logger, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, error) {
 	reg := metrics.NewRegistry()
 	metrics.RegisterRuntime(reg, version)
 	registerStoreMetrics(reg, store)
@@ -132,7 +144,24 @@ func newServer(cfg *config.Config, logger *slog.Logger, store meta.Store, blobs 
 	// The metadata store adds no readiness check: a store poisoned by a
 	// failed write keeps serving reads, so the server stays ready, and
 	// the fault shows in flint_meta_store_poisoned and the logs.
-	return server.New(opts)
+	srv, err := server.New(opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	registry, err := oci.New(oci.Options{
+		Meta:         store,
+		Blobs:        blobs,
+		Repositories: cfg.Repositories,
+		// Every request is allowed until authentication lands.
+		Authorizer: oci.AllowAll{},
+		Logger:     logger,
+		Metrics:    reg,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	registry.Register(srv)
+	return srv, registry, nil
 }
 
 // registerStoreMetrics exposes the metadata store's counters and health.

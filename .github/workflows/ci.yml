@@ -84,3 +84,78 @@ jobs:
           out=$(docker run --rm flint:ci version)
           echo "$out"
           test "$out" = "flint ${GITHUB_SHA}"
+
+  oci:
+    name: OCI conformance and real clients
+    runs-on: ubuntu-latest
+    env:
+      # The official OCI distribution-spec conformance suite, v1.1.1.
+      CONFORMANCE_REF: a139cc423184af6078077b9b7ee336eddbd03f8f
+      CRANE_VERSION: v0.22.1
+      ORAS_VERSION: v1.3.4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "conformance", "format": "oci", "type": "hosted"},
+              {"name": "e2e", "format": "oci", "type": "hosted"}
+            ]
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+          curl -fsS http://127.0.0.1:5000/v2/
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: opencontainers/distribution-spec
+          ref: ${{ env.CONFORMANCE_REF }}
+          path: distribution-spec
+          persist-credentials: false
+      - name: Build the conformance suite
+        working-directory: distribution-spec/conformance
+        run: go test -c -o "$RUNNER_TEMP/conformance.test" .
+      - name: Run the conformance suite
+        env:
+          OCI_ROOT_URL: http://127.0.0.1:5000
+          OCI_NAMESPACE: conformance/myorg/myrepo
+          OCI_CROSSMOUNT_NAMESPACE: conformance/myorg/other
+          OCI_TEST_PULL: "1"
+          OCI_TEST_PUSH: "1"
+          OCI_TEST_CONTENT_DISCOVERY: "1"
+          OCI_TEST_CONTENT_MANAGEMENT: "1"
+          OCI_AUTOMATIC_CROSSMOUNT: "0"
+          OCI_HIDE_SKIPPED_WORKFLOWS: "0"
+        run: |
+          mkdir -p "$RUNNER_TEMP/conformance"
+          cd "$RUNNER_TEMP/conformance"
+          OCI_REPORT_DIR="$PWD" "$RUNNER_TEMP/conformance.test"
+      - name: Install crane and oras
+        run: |
+          go install "github.com/google/go-containerregistry/cmd/crane@$CRANE_VERSION"
+          go install "oras.land/oras/cmd/oras@$ORAS_VERSION"
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+      - name: Push and pull with crane, oras, and docker
+        run: scripts/e2e-oci.sh 127.0.0.1:5000 e2e
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: oci-conformance-report
+          path: ${{ runner.temp }}/conformance
+          if-no-files-found: ignore

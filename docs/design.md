@@ -160,9 +160,11 @@ Illustrative v1 key space:
 | Key | Value | Owner |
 | --- | --- | --- |
 | `repo\0<repo>` | repository created at runtime | `internal/repo` |
-| `oci\0blob\0<repo>\0<name>\0<digest>` | blob link | `internal/oci` |
-| `oci\0manifest\0<repo>\0<name>\0<digest>` | manifest record (media type, size, subject, referenced digests) | `internal/oci` |
+| `oci\0blob\0<repo>\0<name>\0<digest>` | blob link (blob size) | `internal/oci` |
+| `oci\0manifest\0<repo>\0<name>\0<digest>` | manifest record (media type, size, artifact type, subject, annotations, referenced digests) | `internal/oci` |
 | `oci\0tag\0<repo>\0<name>\0<tag>` | manifest digest | `internal/oci` |
+| `oci\0referrer\0<repo>\0<name>\0<subject>\0<digest>` | referrers index entry: manifest `<digest>` has subject `<subject>` | `internal/oci` |
+| `oci\0upload\0<id>` | upload session (repository name, start time) | `internal/oci` |
 | `pypi\0file\0<repo>\0<filename>` | file record, kept as a tombstone after delete | `internal/pypi` |
 | `gc\0epoch` | GC epoch counter, incremented when a sweep starts | `internal/gc` |
 | `gc\0doomed\0<digest>` | doomed set of the running sweep; cleared when the sweep ends | `internal/gc` |
@@ -370,6 +372,36 @@ They must prove the durability contract: a write is acknowledged only after it i
 
 Power-cut testing on a VM or with dm-flakey is out of scope for now.
 
+## Interfaces for the M1 OCI and auth tasks
+
+`internal/oci` and `internal/auth` are built in parallel as separate M1 tasks.
+`internal/oci` consumes authorization through this interface, which `internal/auth` implements; until it lands, `flint serve` wires in `oci.AllowAll`.
+
+```go
+// Authorizer decides whether a request may act on a repository.
+// repo is the full repository name as addressed, such as "docker-local/team/app";
+// its first path component is the configured repository that permissions apply to.
+// actions are "pull", "push", and "delete"; pushes ask for pull and push together.
+// The base check, GET /v2/, asks with an empty repo and no actions.
+// A false return means Authorize has written the response: a 401 with a
+// Docker-compatible WWW-Authenticate Bearer challenge naming the scope
+// (repository:docker-local/team/app:pull,push), or a 403.
+type Authorizer interface {
+	Authorize(w http.ResponseWriter, r *http.Request, repo string, actions ...string) bool
+}
+
+// CatalogAuthorizer is optional. Without it, GET /v2/_catalog is not served.
+// AuthorizeCatalog writes the response when it returns false; visible filters
+// the listed repository names.
+type CatalogAuthorizer interface {
+	AuthorizeCatalog(w http.ResponseWriter, r *http.Request) (visible func(repo string) bool, ok bool)
+}
+```
+
+Deletes ask for `delete`, which only admins hold.
+A cross-repository mount asks, with a response writer it discards, whether the caller may pull from the source; if not, it falls back to a normal upload.
+`oci.Options.Actor` names the principal recorded in batch origins for the audit log.
+
 ## Package layout
 
 Packages are created when there is code for them; this is the target layout, not a list of placeholders.
@@ -397,12 +429,14 @@ Everything is under `internal/` until a stable public Go API is a deliberate dec
 ## Repository types
 
 v1 has hosted and caching-proxy repositories for both formats, plus virtual repositories for PyPI.
-Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, and a per-repository index URL for PyPI. The exact URL layout is settled with each format's milestone.
+Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, and a per-repository index URL for PyPI.
+For OCI, the first path component of a repository name is the configured repository and the rest, at least one component, is an image name below it: `docker-local/team/app` is image `team/app` in repository `docker-local`, served at `/v2/docker-local/team/app/...`.
+The PyPI URL layout is settled with its milestone.
 
 ### Hosted
 
 Clients push and pull first-party artifacts.
-Docker tags are mutable by default; a per-repository immutable-tags setting makes a pushed tag permanent.
+Docker tags are mutable by default; a per-repository immutable-tags setting makes a pushed tag permanent: it can be neither moved to another manifest nor deleted, and a manifest it points to cannot be deleted. Turning the setting off is the escape hatch for removing an image that must not stay.
 PyPI filenames are never reusable, even after the file is deleted: a deleted file leaves a tombstone, because a re-uploaded file with different content under the same name breaks hash-pinned installs.
 Deletes are admin-only, hide the artifact immediately, and leave space reclamation to garbage collection.
 
