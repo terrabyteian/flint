@@ -32,6 +32,8 @@ CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.0" -o flint ./cmd/flint
 ./flint version
 ```
 
+Releases publish a multi-arch `FROM scratch` image to `ghcr.io/terrabyteian/flint` and static binaries, signed with cosign; see [releasing](docs/releasing.md) for how to cut and verify one.
+
 ## Contributing
 
 Contributions are welcome under the Developer Certificate of Origin; see [CONTRIBUTING.md](CONTRIBUTING.md).
