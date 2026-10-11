@@ -42,12 +42,13 @@ import (
 //     database's public key verifies the signature of its tree head,
 //     the database's tiles prove that the tree contains the record, and
 //     that the tree is consistent with the latest tree head the
-//     repository has seen since flint started. The tiles of that latest
-//     tree are kept, so records of it, and of the trees before it, are
-//     proven without fetching its partial tiles again. A full tile is
-//     cached once it is proven too, and a cached one that fails its
-//     proof is fetched again and replaced; a partial tile, read to
-//     prove a tree, is not cached. The signed tree head (latest) is a document revalidated
+//     repository has seen since flint started. The partial tiles of
+//     that latest tree are kept in memory, so records of it, and of the
+//     trees before it, are proven without fetching them again; a
+//     partial tile is never cached. A full tile is cached once it is
+//     proven, read from the cache by every proof that needs it, and
+//     fetched again and replaced if the cached copy fails its proof.
+//     The signed tree head (latest) is a document revalidated
 //     every minute, replaced only by one proven consistent with it. The
 //     database is fetched from go.sumdb.url, not from the module proxy,
 //     which need not proxy it.

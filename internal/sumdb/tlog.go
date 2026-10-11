@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strconv"
-	"sync"
 )
 
 // A checksum database's log is a Merkle tree over its records, as RFC
@@ -116,14 +115,14 @@ type tileID struct {
 
 // A Prover reads the authentic hashes of a tree's nodes from the
 // database's tiles, to check that the tree contains records and is
-// consistent with smaller trees of the database. It keeps the tiles it
-// read, so it reads each once, and is safe for concurrent use.
+// consistent with smaller trees of the database. It keeps the tree's
+// partial tiles, which it reads once; full tiles never change, so it
+// reads them again when a proof needs them, from a reader that caches
+// them. It is safe for concurrent use.
 type Prover struct {
-	tree Tree
-	read TileReader
-
-	mu    sync.Mutex
-	tiles map[tileID][]Hash
+	tree  Tree
+	read  TileReader
+	tiles map[tileID][]Hash // the partial tiles, by level and index
 }
 
 // NewProver returns the Prover of tree, a tree head the database
@@ -242,10 +241,7 @@ func (p *Prover) node(ctx context.Context, l int, k int64) (Hash, error) {
 // tree: a partial tile NewProver read, or a full tile, read and checked
 // against the node the tile above it holds.
 func (p *Prover) tile(ctx context.Context, t int, i int64) ([]Hash, error) {
-	p.mu.Lock()
-	hs, ok := p.tiles[tileID{t, i}]
-	p.mu.Unlock()
-	if ok {
+	if hs, ok := p.tiles[tileID{t, i}]; ok {
 		return hs, nil
 	}
 	want, err := p.node(ctx, (t+1)*tileHeight, i)
@@ -268,9 +264,6 @@ func (p *Prover) tile(ctx context.Context, t int, i int64) ([]Hash, error) {
 	if err != nil {
 		return nil, err
 	}
-	hs, _ = parseTile(b, tileWidth, path)
-	p.mu.Lock()
-	p.tiles[tileID{t, i}] = hs
-	p.mu.Unlock()
+	hs, _ := parseTile(b, tileWidth, path)
 	return hs, nil
 }

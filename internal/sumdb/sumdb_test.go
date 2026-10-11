@@ -387,6 +387,22 @@ func TestProver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A long-lived Prover keeps only its tree's partial tiles: the full
+	// tiles its proofs read are read again from the reader, which caches
+	// them.
+	kept := len(p.tiles)
+	reads = nil
+	for id := int64(0); id < n; id += n / 40 {
+		if err := p.Includes(ctx, &Record{ID: id, data: l.records[id]}); err != nil {
+			t.Fatalf("record %d: %v", id, err)
+		}
+	}
+	if len(p.tiles) != kept {
+		t.Errorf("the Prover keeps %d tiles after proving records, want its %d partial tiles", len(p.tiles), kept)
+	}
+	if err := p.Includes(ctx, &Record{ID: 0, data: l.records[0]}); err != nil || reads[len(reads)-1] != "tile/8/0/000 true" {
+		t.Errorf("proving record 0 again: %v, last read %q", err, reads[len(reads)-1])
+	}
 	// It is safe for concurrent use.
 	var mu sync.Mutex
 	locked := l.reader(&reads, false)
