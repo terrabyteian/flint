@@ -75,7 +75,9 @@ import (
 //     hosted member owns it, which a client that checked for them through
 //     the virtual repository was told exist: they are linked into the
 //     publishTo member, as a cross-repository mount would link them, a
-//     child manifest with what it references.
+//     child manifest with what it references, whose blobs a proxy member
+//     holding it fetches first, as a pull would. Nothing is linked unless
+//     everything the manifest references then is.
 //
 // A virtual repository stores nothing of its own; it remembers in memory
 // only which member last served a manifest of each name.
@@ -201,9 +203,13 @@ func (h *Handler) virtualPublish(w http.ResponseWriter, r *http.Request, rn *rep
 // repository name rn, what the manifest that r pushes references that mrn
 // does not hold but another member of the virtual repository holds under
 // the name, whether or not a hosted member owns it: blobs, and child
-// manifests, each with what it references in turn, if every one of those
-// is held. A client that checked for them through the virtual repository
-// was told they exist. It leaves r's body to be read again.
+// manifests, each with what it references in turn. A client that checked
+// for them through the virtual repository was told they exist. The blobs
+// of a child manifest a proxy member holds are fetched into it first, as
+// a pull would; if one cannot be, the push is refused. It links nothing
+// unless the manifest's every reference can then be held, with the size
+// its descriptor gives, so a push that fails leaves no child manifest
+// behind to own the name. It leaves r's body to be read again.
 func (h *Handler) linkFromMembers(r *http.Request, rn, mrn *repoName) error {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxManifestSize+1))
 	if err != nil {
@@ -223,71 +229,22 @@ func (h *Handler) linkFromMembers(r *http.Request, rn, mrn *repoName) error {
 	if len(others) == 0 {
 		return nil
 	}
-	type link struct {
-		d    blob.Digest
-		from string
-		size int64           // a blob's
-		m    *manifestRecord // a child manifest's, or nil for a blob
-	}
-	var links []link
-	held := map[manifestRef]bool{}
-	v := h.view()
-	// hold reports whether mrn holds ref, or will once links are made.
-	var hold func(ref manifestRef) bool
-	hold = func(ref manifestRef) bool {
-		if ok, seen := held[ref]; seen {
-			return ok
-		}
-		held[ref] = false
-		key := blobKey(mrn, ref.Digest)
-		if ref.Kind == refManifest {
-			key = manifestKey(mrn, ref.Digest)
-		}
-		if _, ok := v.Get(key); ok {
-			held[ref] = true
-			return true
-		}
-		for _, o := range others {
-			if ref.Kind == refBlob {
-				rec, ok := v.Get(blobKey(o, ref.Digest))
-				if !ok {
-					continue
+	links, fetches, ok := h.planLinks(mrn, others, pm)
+	if len(fetches) > 0 {
+		for _, f := range fetches {
+			if err := h.cacheBlob(r, f.from, f.d); err != nil {
+				if errors.Is(err, errPassThrough) {
+					err = errors.New("it is not to be cached")
 				}
-				if size, _, err := decodeBlobLink(rec.Value); err == nil {
-					links = append(links, link{d: ref.Digest, from: o.full, size: size})
-					held[ref] = true
-				}
-				break
+				return newError(http.StatusBadRequest, codeManifestBlobUnknown,
+					"blob %s of manifest %s, which the manifest references, could not be fetched from the upstream of %s: %v",
+					f.d, f.of, f.from.repo, err).withDetail(map[string]string{"digest": f.d.String()})
 			}
-			m, err := cachedManifest(v, o, ref.Digest)
-			if err != nil || m == nil {
-				continue
-			}
-			for _, child := range m.Refs {
-				if !hold(child) {
-					return false
-				}
-			}
-			m.Pushed = h.now()
-			links = append(links, link{d: ref.Digest, from: o.full, m: m})
-			held[ref] = true
-			break
 		}
-		return held[ref]
+		links, _, ok = h.planLinks(mrn, others, pm)
 	}
-	for _, desc := range pm.blobs {
-		if d, err := blob.ParseDigest(desc.Digest); err == nil {
-			hold(manifestRef{refBlob, d})
-		}
-	}
-	for _, desc := range pm.members {
-		if d, err := blob.ParseDigest(desc.Digest); err == nil {
-			hold(manifestRef{refManifest, d})
-		}
-	}
-	v.Release()
-	if len(links) == 0 {
-		return nil
+	if !ok || len(links) == 0 {
+		return nil // the push reports what it lacks
 	}
 	linked := make([]blob.Digest, len(links))
 	for i, l := range links {
@@ -310,6 +267,110 @@ func (h *Handler) linkFromMembers(r *http.Request, rn, mrn *repoName) error {
 		return nil // the push reports what it lacks
 	}
 	return err
+}
+
+// memberLink is a blob link or a manifest record of a member of a virtual
+// repository to be linked into its publishTo member.
+type memberLink struct {
+	d    blob.Digest
+	from string
+	size int64           // a blob's
+	m    *manifestRecord // a child manifest's, or nil for a blob
+}
+
+// memberFetch is blob d of child manifest of, which proxy member from
+// holds without having cached the blob.
+type memberFetch struct {
+	from *repoName
+	of   blob.Digest
+	d    blob.Digest
+}
+
+// planLinks returns what linking into mrn the references of pm that
+// others hold takes, the blobs to fetch into proxy members for child
+// manifests they hold, and whether mrn would then hold every reference
+// of pm with the size its descriptor gives.
+func (h *Handler) planLinks(mrn *repoName, others []*repoName, pm *parsedManifest) ([]memberLink, []memberFetch, bool) {
+	type holding struct {
+		size int64
+		ok   bool
+	}
+	var links []memberLink
+	var fetches []memberFetch
+	held := map[manifestRef]holding{}
+	v := h.view()
+	defer v.Release()
+	// hold returns the size of ref, if mrn holds it or will once links
+	// are made.
+	var hold func(ref manifestRef) holding
+	hold = func(ref manifestRef) holding {
+		if hd, seen := held[ref]; seen {
+			return hd
+		}
+		held[ref] = holding{}
+		if ref.Kind == refBlob {
+			if rec, ok := v.Get(blobKey(mrn, ref.Digest)); ok {
+				size, _, err := decodeBlobLink(rec.Value)
+				held[ref] = holding{size, err == nil}
+				return held[ref]
+			}
+			for _, o := range others {
+				if rec, ok := v.Get(blobKey(o, ref.Digest)); ok {
+					if size, _, err := decodeBlobLink(rec.Value); err == nil {
+						links = append(links, memberLink{d: ref.Digest, from: o.full, size: size})
+						held[ref] = holding{size, true}
+					}
+					break
+				}
+			}
+			return held[ref]
+		}
+		if m, err := cachedManifest(v, mrn, ref.Digest); err != nil {
+			return held[ref]
+		} else if m != nil {
+			held[ref] = holding{m.Size, true}
+			return held[ref]
+		}
+		for _, o := range others {
+			m, err := cachedManifest(v, o, ref.Digest)
+			if err != nil || m == nil {
+				continue
+			}
+			all := true
+			for _, child := range m.Refs {
+				if hold(child).ok {
+					continue
+				}
+				all = false
+				if f := (memberFetch{o, ref.Digest, child.Digest}); child.Kind == refBlob && o.cfg.proxy != nil && !slices.Contains(fetches, f) {
+					fetches = append(fetches, f)
+				}
+			}
+			if all {
+				m.Pushed = h.now()
+				links = append(links, memberLink{d: ref.Digest, from: o.full, m: m})
+				held[ref] = holding{m.Size, true}
+			}
+			break
+		}
+		return held[ref]
+	}
+	ok := true
+	check := func(kind refKind, descs []descriptor) {
+		for _, desc := range descs {
+			d, err := blob.ParseDigest(desc.Digest)
+			if err != nil {
+				ok = false
+				continue
+			}
+			if hd := hold(manifestRef{kind, d}); !hd.ok || hd.size != desc.Size {
+				ok = false
+			}
+		}
+	}
+	check(refBlob, pm.blobs)
+	check(refManifest, pm.members)
+	return links, fetches, ok
 }
 
 // authorizeVirtual authorizes actions through virtual repository name rn,

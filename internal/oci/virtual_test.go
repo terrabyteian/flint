@@ -809,15 +809,78 @@ func TestVirtualPushUpstreamIndex(t *testing.T) {
 		})
 	}
 
-	// Platform images a proxy member has not cached with their blobs are
-	// not linked, and the push reports what it lacks.
+	// As crane copy pushes an image never pulled before, checking for
+	// each platform image through the virtual repository, which caches
+	// only its manifest in the proxy member: the platform images' blobs
+	// are fetched into the proxy member as a pull would, and linked.
 	ve := newVirtualEnv(t)
 	index, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
 	for _, img := range platforms {
 		want(t, ve.do("HEAD", "/v2/all/library/nginx/manifests/"+img.Digest, nil), http.StatusOK, "")
 	}
+	if n := ve.hub.Count("GET", "/blobs/"); n != 0 {
+		t.Fatalf("checking for the platform images fetched %d blobs", n)
+	}
+	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", index, "Content-Type", mtOCIIndex), http.StatusCreated, "")
+	ve.pull("local/library/nginx", "1.27", index, nil)
+	for _, img := range platforms {
+		ve.pullImage("local/library/nginx", img.Digest, img)
+		ve.pullImage("hub/library/nginx", img.Digest, img)
+	}
+}
+
+// TestVirtualPushUpstreamIndexRefused checks that a push of an index
+// through a virtual repository is refused, linking nothing into the
+// publishTo member, when a platform image's blob cannot be fetched from
+// the upstream or a platform image is held by no member: the publishTo
+// member does not come to own the name, so the upstream image is still
+// served.
+func TestVirtualPushUpstreamIndexRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		break_ func(ve *virtualEnv, img upstreamtest.Image)
+	}{
+		{"corrupt", func(ve *virtualEnv, img upstreamtest.Image) { ve.hub.Corrupt(img.Layers[0]) }},
+		{"not found", func(ve *virtualEnv, img upstreamtest.Image) {
+			ve.hub.SetStatus(func(r *http.Request) int {
+				if strings.HasSuffix(r.URL.Path, "/blobs/"+img.Layers[0]) {
+					return http.StatusNotFound
+				}
+				return 0
+			})
+		}},
+		{"unavailable", func(ve *virtualEnv, img upstreamtest.Image) { ve.hub.SetDown(true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ve := newVirtualEnv(t)
+			index, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
+			ve.pull("all/library/nginx", "1.27", index, nil)
+			ve.pullImage("all/library/nginx", platforms[0].Digest, platforms[0])
+			want(t, ve.do("HEAD", "/v2/all/library/nginx/manifests/"+platforms[1].Digest, nil), http.StatusOK, "")
+			tc.break_(ve, platforms[1])
+
+			w := ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", index, "Content-Type", mtOCIIndex)
+			want(t, w, http.StatusBadRequest, codeManifestBlobUnknown)
+			msg := errorMessage(t, w)
+			if !strings.Contains(msg, platforms[1].Layers[0]) && !strings.Contains(msg, platforms[1].Config) {
+				t.Errorf("the refusal does not name the blob: %s", msg)
+			}
+			want(t, ve.do("GET", "/v2/local/library/nginx/tags/list", nil), http.StatusNotFound, codeNameUnknown)
+			ve.hub.SetDown(false)
+			ve.hub.SetStatus(nil)
+			ve.pull("all/library/nginx", "1.27", index, nil)
+		})
+	}
+
+	// A platform image no member holds: the push reports it, and the other
+	// platform image, which the proxy member holds, is not linked either.
+	ve := newVirtualEnv(t)
+	index, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
+	ve.pull("all/library/nginx", "1.27", index, nil)
+	ve.pullImage("all/library/nginx", platforms[0].Digest, platforms[0])
 	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", index, "Content-Type", mtOCIIndex), http.StatusBadRequest, codeManifestBlobUnknown)
-	want(t, ve.do("HEAD", "/v2/local/library/nginx/manifests/"+platforms[0].Digest, nil), http.StatusNotFound, "")
+	want(t, ve.do("GET", "/v2/local/library/nginx/tags/list", nil), http.StatusNotFound, codeNameUnknown)
+	ve.pull("all/library/nginx", "1.27", index, nil)
 }
 
 // TestVirtualPushAfterOwnership checks a multi-platform push through a
