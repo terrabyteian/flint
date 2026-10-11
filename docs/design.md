@@ -515,7 +515,7 @@ For PyPI, each repository is served under `/pypi/<repo>/`, following the layout 
 | `/pypi/<repo>/legacy/` | upload, with the legacy API of twine and uv publish; hosted repositories only |
 | `/pypi/<repo>/pypi/<project>/json`, `/pypi/<repo>/pypi/<project>/<version>/json` | JSON API |
 
-Pages link files relatively (`../../files/<project>/<filename>`), so they do not depend on the host name a client used and can be cached as they are; only the JSON API, whose URLs are absolute as on PyPI, uses the request's scheme and host.
+Pages link files relatively (`../../files/<project>/<filename>`), so they do not depend on the host name a client used and can be cached as they are; only the JSON API, whose URLs are absolute as on PyPI, uses `publicURL`, or else the request's scheme and host (see [Repository model](#repository-model)).
 Every format lives under its own path prefix (`/v2/`, `/pypi/`), so the formats that follow PyPI (npm, Maven, Go modules, Cargo) get their own prefixes on the same server; [Repository model](#repository-model) states the rule.
 The admin API's PyPI endpoints, which yank, unyank, and delete, are under `/api/v1/pypi/<repo>/`.
 
