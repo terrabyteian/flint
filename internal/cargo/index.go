@@ -192,9 +192,6 @@ type entry struct {
 	vers  string
 	key   string // the version without build metadata
 	cksum string // lowercase hex sha256 of the .crate file, if valid
-	// line, for a hosted version, is the line decoded, which a virtual
-	// repository may rewrite.
-	line *indexLine
 	// src names the member repository that supplied the line, in a
 	// virtual repository.
 	src string
