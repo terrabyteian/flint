@@ -93,6 +93,10 @@ Repositories and permission grants declared here are read-only through the API.
   "backup": {
     "directory": "/var/backups/flint"
   },
+  "gc": {
+    "gracePeriod": "24h",
+    "interval": "24h"
+  },
   "audit": {
     "retention": {
       "maxAge": "17520h"
@@ -144,6 +148,8 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `auth.loginTokenTTL` | duration string | `"2160h"` | How long an API token minted by a package client's login command stays valid (90 days by default); see [authentication](auth.md#tokens-from-client-login-commands). Must be positive. |
 | `backup.directory` | string | none | Absolute path of the [backup](backup.md) directory, outside the data directory and not containing it. Without it, backups are disabled. |
 | `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
+| `gc.gracePeriod` | duration string | `"24h"` | How long [garbage collection](#garbage-collection) keeps a blob that nothing references after the blob was stored, and a blob link that no manifest references after it was last written or read with a blob `HEAD` or `GET`, or after flint started; so also how long a push may take between uploading or checking its blobs and pushing its manifest. At least `"1h"`. |
+| `gc.interval` | duration string | none | Run garbage collection on a schedule, this long after the previous run started. Without it, garbage collection runs only when an administrator starts it. |
 | `audit.retention.maxAge` | duration string | none | Delete [audit log](operations.md#retention) records once they are older than this, such as `"8760h"`, a file at a time, within about half of this after they pass it. Without it, records are kept forever. |
 | `audit.retention.maxSize` | string or number | none | Delete the oldest audit log records, a file at a time, while the audit log is larger than this size, such as `"10GiB"`, keeping it within about a quarter of this of the limit. Without it, there is no limit. |
 
@@ -240,6 +246,14 @@ A user's role on a repository is the highest one any matching grant gives; [auth
 
 The file is read only while no administrator exists, so it can be removed after the first start, and changing it later does not reset the password.
 
+### Garbage collection
+
+Deleting an image or a blob hides it at once; garbage collection later deletes the blobs nothing references any more.
+Administrators run it with `flint gc` or the admin API, and `gc.interval` runs it on a schedule.
+The scheduled time counts from the start of the previous run, which survives restarts, so a server restarted more often than the interval still collects; a scheduled run never starts within a minute of startup.
+The grace period protects content a push stored a moment ago, and the blob links of a push whose manifest has not arrived yet, whether the push wrote them or found them with a `HEAD`: a push that takes longer than the grace period between uploading or checking a blob and pushing its manifest may find the blob's link removed, and its manifest push fails with `MANIFEST_BLOB_UNKNOWN` until it pushes the blob again. It cannot be set below an hour.
+[Garbage collection](garbage-collection.md) describes what is reclaimed, how to run it, and how to monitor it.
+
 ## Endpoints
 
 ### OCI registry API
@@ -251,7 +265,7 @@ Blobs and manifests are visible only in the repository name they were pushed or 
 A manifest is accepted only when every blob and child manifest it references is already in the same repository name, with the size its descriptor gives; a manifest's `subject` may name a manifest not pushed yet.
 Docker image manifest schema 1 is refused.
 Deleting a tag removes only the tag; deleting a manifest by digest also removes the tags that point to it.
-Deletes hide content at once; the disk space is reclaimed by garbage collection, which arrives with milestone M4.
+Deletes hide content at once; the disk space is reclaimed later by [garbage collection](#garbage-collection).
 
 An upload session expires 24 hours after it starts; flint checks for expired sessions hourly and removes their staged data.
 
@@ -276,7 +290,7 @@ A proxy repository serves pulls of its upstream's images, such as `registry.exam
 - **When flint cannot authenticate to the upstream**, because the upstream or its token service refuses the configured credentials (an expired access token, say) or its authentication challenge is unusable, cached content keeps being served as if the upstream were unreachable, flint logs a warning naming the authentication failure, and it treats the upstream as offline for 30 seconds, so it does not ask the token service again on every pull.
 - **Fetching.** A blob that is not cached streams to the client while flint writes it to the store, and concurrent pulls of the same blob share one upstream request. Every blob and manifest is checked against its digest: a mismatched manifest is refused with `502`, and a mismatched blob is cut off before its last byte, so a client never receives it whole and it never enters the cache. Transient upstream failures (network errors, `429`, and `5xx`) are retried with backoff, and at most `proxy.maxConcurrent` upstream requests run at once. Redirects and token services follow [the fetch policy](#upstream-fetch-policy).
 - **Disk space.** When the free space on the data directory's filesystem would fall below `proxyCache.minFreeSpace`, new content is passed through from the upstream without being cached, cached content keeps being served, flint logs a warning, and `flint_proxy_disk_pressure` is 1. flint never deletes cached content to make room.
-- **Size limit.** With `proxy.sizeLimit`, when the repository's cached content (each blob and manifest, counted once per image name) exceeds the limit, the least recently pulled items are evicted until it fits: a blob's link, or a manifest with the tags pointing to it. Content larger than the limit is passed through. Pull times are kept in memory and saved every minute, so a restart forgets at most the last minute's pulls. Eviction hides content at once; the disk space is reclaimed by garbage collection, which arrives with milestone M4.
+- **Size limit.** With `proxy.sizeLimit`, when the repository's cached content (each blob and manifest, counted once per image name) exceeds the limit, the least recently pulled items are evicted until it fits: a blob's link, or a manifest with the tags pointing to it. Content larger than the limit is passed through. Pull times are kept in memory and saved every minute, so a restart forgets at most the last minute's pulls. Eviction hides content at once; the disk space is reclaimed later by [garbage collection](#garbage-collection).
 - **Read-only.** Pushes and deletes are refused with `405 UNSUPPORTED`.
 
 Proxy repositories use the same permissions as hosted ones: pulling needs the `read` role or `anonymousPull`. With `anonymousPull`, clients pull without credentials or a token, which is how a containerd registry mirror reaches flint; [containerd mirrors](containerd.md) shows the setup.
@@ -336,6 +350,8 @@ Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime
 | `flint_data_free_bytes` | Free bytes on the data directory's filesystem, as last measured. |
 | `flint_proxy_cached_bytes{repository}` | Bytes cached by proxy repositories with a size limit. |
 | `flint_proxy_evictions_total{repository}` | Items evicted to keep proxy repositories within their size limits. |
+
+Garbage collection exports `flint_gc_runs_total{mode,result}`, `flint_gc_duration_seconds{mode}`, `flint_gc_reclaimed_blobs_total`, `flint_gc_reclaimed_bytes_total`, `flint_gc_last_success_timestamp_seconds`, and `flint_gc_running`; [garbage collection](garbage-collection.md#monitoring) describes them.
 
 The disk-pressure gauge is the alert for a nearly full disk, for example as a Prometheus alerting rule:
 

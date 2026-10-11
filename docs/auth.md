@@ -172,7 +172,7 @@ The [classic Helm chart repository view](helm-repository.md#access) at `/helm/<r
 The admin API serves JSON under `/api/v1/`.
 Every request authenticates with a password or an API token, in any of the [forms above](#api-tokens); tokens from the Docker token endpoint are not accepted.
 Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`.
-Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user, token, repository, project, release, or file, or backups are not configured), `405` (yanking or deleting in a repository that is not hosted), `409` (the user exists, the change would remove the last administrator, or a backup is already running), or `413` (the body is over 64 KiB).
+Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user, token, repository, project, release, or file, or backups are not configured), `405` (yanking or deleting in a repository that is not hosted), `409` (the user exists, the change would remove the last administrator, a backup is already running, or a garbage collection is in progress), `413` (the body is over 64 KiB), or `503` (the server is shutting down).
 Request bodies are strict JSON: unknown fields are errors.
 
 | Request | Who | Does |
@@ -192,11 +192,15 @@ Request bodies are strict JSON: unknown fields are errors.
 | `DELETE /api/v1/tokens/{id}` | the owner, or admin | Revoke a token. |
 | `GET /api/v1/backup` | admin | Report the running backup and the last ones; see [backups](backup.md#the-admin-api). |
 | `POST /api/v1/backup` | admin | Start a backup. |
+| `GET /api/v1/gc` | admin | Show the garbage collection in progress, the last one, and the schedule. |
+| `POST /api/v1/gc` | admin | Start a garbage collection: `202` with its report so far, or `409` if one is in progress. The optional body `{"dryRun": true}` asks for a dry run. |
 | `PUT, DELETE /api/v1/pypi/{repository}/projects/{project}/releases/{version}/yank` | `delete` role on the repository | Yank or unyank a release of a hosted PyPI repository; see [PyPI](pypi.md#yanking-and-deleting). |
 | `DELETE /api/v1/pypi/{repository}/projects/{project}/releases/{version}` | `delete` role on the repository | Delete a release's files. |
 | `DELETE /api/v1/pypi/{repository}/projects/{project}/files/{filename}` | `delete` role on the repository | Delete one file. |
 | `GET /api/v1/audit` | admin | Query the [audit log](operations.md#audit-log). |
 | `GET /api/v1/audit/export` | admin | Export the audit log as JSON lines. |
+
+[Garbage collection](garbage-collection.md) describes the garbage-collection reports, and `flint gc` calls the `/api/v1/gc` endpoints.
 
 "admin" means the global admin role: an administrator authenticated with a password, or with a token created with `"admin": true`.
 Creating a token, creating or updating a user or its groups, and setting a password need a password, even for a token created with `"admin": true`, so a leaked token cannot mint longer-lived tokens or take over its owner's or anyone else's account.

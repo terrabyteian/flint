@@ -122,7 +122,9 @@ jobs:
           cache: false
       - name: Start flint
         run: |
-          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          # The e2e build moves its clock by the duration in
+          # FLINT_E2E_CLOCK_FILE, for the garbage-collection test.
+          CGO_ENABLED=0 go build -tags e2e -o "$RUNNER_TEMP/flint" ./cmd/flint
           admin_password=$(openssl rand -hex 16)
           echo "::add-mask::$admin_password"
           printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
@@ -142,7 +144,8 @@ jobs:
             }
           }
           JSON
-          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          FLINT_E2E_CLOCK_FILE="$RUNNER_TEMP/flint-clock" \
+            "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
           for _ in $(seq 50); do
             curl -fsS http://127.0.0.1:5000/readyz && break
             sleep 0.2
@@ -194,6 +197,22 @@ jobs:
         env:
           E2E_USERNAME: ci-bot
         run: E2E_PASSWORD="$E2E_TOKEN" scripts/e2e-oci.sh 127.0.0.1:5000 e2e
+      - name: Delete an image for garbage collection
+        env:
+          E2E_USERNAME: admin
+          E2E_PASSWORD_FILE: ${{ runner.temp }}/admin-password
+          E2E_STATE_DIR: ${{ runner.temp }}/e2e-gc
+        run: scripts/e2e-gc.sh delete "$RUNNER_TEMP/flint" "$RUNNER_TEMP/flint-data" 127.0.0.1:5000 e2e
+      - name: Move flint's clock three days ahead
+        # Past the garbage collector's 24-hour grace period for everything
+        # stored, linked, or read so far, and for the server's start.
+        run: echo 72h >"$RUNNER_TEMP/flint-clock"
+      - name: Garbage collection
+        env:
+          E2E_USERNAME: admin
+          E2E_PASSWORD_FILE: ${{ runner.temp }}/admin-password
+          E2E_STATE_DIR: ${{ runner.temp }}/e2e-gc
+        run: scripts/e2e-gc.sh collect "$RUNNER_TEMP/flint" "$RUNNER_TEMP/flint-data" 127.0.0.1:5000 e2e
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"

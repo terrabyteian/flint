@@ -37,6 +37,11 @@ const (
 	// DefaultMinFreeSpace is the free space below which proxy
 	// repositories stop caching new content.
 	DefaultMinFreeSpace = "5%"
+	// DefaultGCGracePeriod is how long garbage collection keeps an
+	// unreferenced blob after its commit.
+	DefaultGCGracePeriod = 24 * time.Hour
+	// MinGCGracePeriod is the shortest grace period allowed.
+	MinGCGracePeriod = time.Hour
 	// DefaultLoginTokenTTL is how long an API token minted by a client's
 	// login command stays valid.
 	DefaultLoginTokenTTL = 90 * 24 * time.Hour
@@ -71,6 +76,8 @@ type Config struct {
 	ProxyCache ProxyCache `json:"proxyCache"`
 	// Backup configures backups.
 	Backup Backup `json:"backup"`
+	// GC configures garbage collection.
+	GC GC `json:"gc"`
 	// Audit configures the audit log.
 	Audit Audit `json:"audit"`
 }
@@ -81,6 +88,19 @@ type Backup struct {
 	// data directory, normally on another disk or a mounted volume.
 	// Without it, backups are disabled.
 	Directory string `json:"directory,omitempty"`
+}
+
+// GC configures garbage collection, which deletes the blobs nothing in
+// the metadata references any more.
+type GC struct {
+	// GracePeriod is how long an unreferenced blob is kept after its
+	// commit, and a blob link no manifest references after it was
+	// linked or read. Default 24h; at least 1h.
+	GracePeriod Duration `json:"gracePeriod,omitzero"`
+	// Interval, if set, runs garbage collection on a schedule: this long
+	// after the previous run started. Without it, garbage collection runs
+	// only when an administrator starts it.
+	Interval Duration `json:"interval,omitzero"`
 }
 
 // Audit configures the audit log, which records every change to the
@@ -268,6 +288,9 @@ type Duration struct {
 	// records it rather than failing, so Validate can report it with the
 	// field's path, which encoding/json does not give a custom decoder.
 	invalid string
+	// set reports whether the duration was given or defaulted, so an
+	// explicit zero can be told from an absent field.
+	set bool
 }
 
 // UnmarshalJSON parses a Go duration string.
@@ -282,7 +305,7 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 		*d = Duration{invalid: fmt.Sprintf("%q is not a duration: use a number with a unit, such as \"30s\" or \"1m30s\"", s)}
 		return nil
 	}
-	*d = Duration{Duration: v}
+	*d = Duration{Duration: v, set: true}
 	return nil
 }
 
@@ -309,8 +332,8 @@ func Load(path string) (*Config, error) {
 // in defaults.
 func Parse(b []byte) (*Config, error) {
 	c := Config{
-		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout},
-		Auth:            Auth{LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL}},
+		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout, set: true},
+		Auth:            Auth{LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true}},
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -339,11 +362,14 @@ func (c *Config) setDefaults() {
 	}
 	for _, r := range c.Repositories {
 		if p := r.Proxy; p != nil && p.RevalidateAfter.Duration == 0 && p.RevalidateAfter.invalid == "" {
-			p.RevalidateAfter.Duration = DefaultRevalidateAfter
+			p.RevalidateAfter = Duration{Duration: DefaultRevalidateAfter, set: true}
 		}
 	}
 	if c.ProxyCache.MinFreeSpace.IsZero() {
 		c.ProxyCache.MinFreeSpace, _ = ParseFreeSpace(DefaultMinFreeSpace)
+	}
+	if g := &c.GC.GracePeriod; !g.set && g.invalid == "" {
+		*g = Duration{Duration: DefaultGCGracePeriod, set: true}
 	}
 }
 
@@ -526,6 +552,18 @@ func (c *Config) Validate() error {
 	}
 	if f := c.ProxyCache.MinFreeSpace; f.invalid != "" {
 		v.addf("proxyCache.minFreeSpace", "%s", f.invalid)
+	}
+	switch g := c.GC.GracePeriod; {
+	case g.invalid != "":
+		v.addf("gc.gracePeriod", "%s", g.invalid)
+	case g.Duration < MinGCGracePeriod:
+		v.addf("gc.gracePeriod", "%s is shorter than the minimum, %s", g.Duration, MinGCGracePeriod)
+	}
+	switch i := c.GC.Interval; {
+	case i.invalid != "":
+		v.addf("gc.interval", "%s", i.invalid)
+	case i.Duration < 0:
+		v.addf("gc.interval", "must be positive")
 	}
 	switch d := c.Audit.Retention.MaxAge; {
 	case d.invalid != "":

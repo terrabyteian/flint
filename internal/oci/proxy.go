@@ -260,9 +260,11 @@ func (h *Handler) proxyGetBlob(w http.ResponseWriter, r *http.Request, rn *repoN
 		}
 		if usize < 0 || usize == info.Size {
 			// Linking costs no space, but content over the size limit is
-			// served without being linked, as if passed through.
+			// served without being linked, as if passed through. So is a
+			// blob garbage collection is deleting (errRetry), while it
+			// lasts; the next pull fetches it again.
 			if c := p.cache; c == nil || info.Size <= c.Limit() {
-				if err := h.linkProxyBlob(ctx, h.actor(r), rn, d, info.Size); err != nil {
+				if err := h.linkProxyBlob(ctx, h.actor(r), rn, d, info.Size); err != nil && err != errRetry {
 					h.writeError(w, r, err)
 					return
 				}
@@ -300,7 +302,7 @@ func setBlobHeaders(w http.ResponseWriter, d blob.Digest, size int64) {
 // linkProxyBlob links stored blob d, size bytes, in rn.
 func (h *Handler) linkProxyBlob(ctx context.Context, actor string, rn *repoName, d blob.Digest, size int64) error {
 	err := h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) error {
-		b.Put(blobKey(rn, d), encodeBlobLink(size))
+		b.Put(blobKey(rn, d), encodeBlobLink(size, h.now()))
 		b.SetOrigin(proxyOrigin(actor, rn.full+"@"+d.String()))
 		return nil
 	}, h.statExists(ctx, d))
@@ -580,10 +582,7 @@ func (h *Handler) cacheManifest(ctx context.Context, actor string, rn *repoName,
 		target = rn.full + ":" + tag + "@" + d.String()
 	}
 	err = h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) error {
-		b.Put(manifestKey(rn, d), rec.encode())
-		if !rec.Subject.IsZero() {
-			b.Put(referrerKey(rn, rec.Subject, d), newEnc())
-		}
+		putManifestRecord(b, rn, d, &rec)
 		if tag != "" {
 			b.Put(tagKey(rn, tag), encodeTag(d))
 		}

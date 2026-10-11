@@ -19,6 +19,7 @@ import (
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/flock"
 	"github.com/terrabyteian/flint/internal/fsys"
+	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
@@ -29,6 +30,10 @@ import (
 
 // defaultConfigPath is where serve looks for its configuration without -config.
 const defaultConfigPath = "/etc/flint/config.json"
+
+// now is the clock of the blob store, the registry, and the garbage
+// collector. Only a binary built for end-to-end tests changes it.
+var now = time.Now
 
 // serve runs the server until ctx is done, then shuts it down gracefully.
 // It returns the process exit code.
@@ -90,7 +95,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 			err = fmt.Errorf("closing the metadata store: %w", cerr)
 		}
 	}()
-	blobs, err := blob.NewFS(cfg.DataDir, blob.Options{})
+	blobs, err := blob.NewFS(cfg.DataDir, blob.Options{Now: now})
 	if err != nil {
 		return err
 	}
@@ -111,8 +116,10 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		// Cancel a running backup before the stores close.
 		defer a.backups.Close()
 	}
-	// Expire abandoned uploads, run the proxy repositories' upkeep, and
-	// keep the audit log current, in the background until the stores close.
+	// Expire abandoned uploads, run the proxy repositories' upkeep, keep
+	// the audit log current, and run scheduled garbage collection, in
+	// the background until the stores close. A garbage collection run in
+	// progress is cancelled first.
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
 	var janitors sync.WaitGroup
 	janitors.Go(func() { a.oci.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
@@ -123,9 +130,11 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		janitors.Go(func() { a.space.Run(janitorCtx, upstream.SpaceCheckInterval) })
 	}
 	janitors.Go(func() { a.audit.Run(janitorCtx) })
+	janitors.Go(func() { a.gc.RunSchedule(janitorCtx) })
 	defer func() {
 		stopJanitor()
 		janitors.Wait()
+		a.gc.Close()
 	}()
 	addr, err := srv.Listen()
 	if err != nil {
@@ -164,6 +173,7 @@ type app struct {
 	space   *upstream.Space // nil without proxy repositories
 	audit   *audit.Log
 	backups *backup.Manager // nil unless backups are configured
+	gc      *gc.Collector
 	// docs caches the documents proxy repositories of every format
 	// fetch, and revalidate is the longest revalidation window of any.
 	docs       *upstream.DocCache
@@ -172,10 +182,12 @@ type app struct {
 
 // newServer builds the HTTP server and its metrics over open stores. The
 // format and auth packages register their routes, middleware, and
-// readiness checks on it here, using store and blobs. fsy is the data
-// directory's filesystem. It opens the audit log, which the caller must
-// close before the metadata store. The backup manager is nil unless
-// backups are configured; the caller closes it before the stores.
+// readiness checks on it here, using store and blobs, and the garbage
+// collector is set up with the marker of every package that writes
+// metadata. fsy is the data directory's filesystem. It opens the audit
+// log, which the caller must close before the metadata store. The backup
+// manager is nil unless backups are configured; the caller closes it, and
+// the collector, before the stores.
 func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (_ *app, err error) {
 	reg := metrics.NewRegistry()
 	metrics.RegisterRuntime(reg, version)
@@ -273,6 +285,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Metrics:        reg,
 		Upstream:       upOpts,
 		Space:          space,
+		Now:            now,
 		Fetcher:        fetcher,
 		ProxyMetrics:   proxyMetrics,
 	})
@@ -290,6 +303,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Metrics:      reg,
 		Upstream:     upOpts,
 		Space:        space,
+		Now:          now,
 		Fetcher:      fetcher,
 		ProxyMetrics: proxyMetrics,
 		Docs:         docs,
@@ -315,7 +329,24 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		}
 	}
 	backup.Register(srv, backups, authz.AdminHandler, authz.Actor)
-	return &app{srv: srv, oci: registry, pypi: index, space: space, audit: auditLog, backups: backups,
+
+	collector, err := gc.New(gc.Options{
+		Meta:        store,
+		Blobs:       blobs,
+		Markers:     []gc.Marker{oci.GCMarker(), pypi.GCMarker(), upstream.Marks, auth.GCMarker()},
+		Pruners:     []gc.Pruner{registry.GCPruner()},
+		GracePeriod: cfg.GC.GracePeriod.Duration,
+		Interval:    cfg.GC.Interval.Duration,
+		Logger:      logger,
+		Metrics:     reg,
+		Now:         now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	authz.HandleAdmin(srv, gc.StatusPattern, collector.HandleStatus)
+	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
+	return &app{srv: srv, oci: registry, pypi: index, space: space, audit: auditLog, backups: backups, gc: collector,
 		docs: docs, revalidate: revalidate}, nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
 )
 
@@ -138,7 +139,7 @@ func DecodeFileRecord(b []byte) (*FileRecord, error) {
 // function that returns the blob digests a record under it references,
 // or nil if its records reference none: the garbage collector's marker
 // registration for these keys.
-var Marks = map[string]func(key, value []byte) ([]blob.Digest, error){
+var Marks = gc.Marker{
 	NSDoc: func(_, value []byte) ([]blob.Digest, error) {
 		r, err := DecodeDocRecord(value)
 		if err != nil {

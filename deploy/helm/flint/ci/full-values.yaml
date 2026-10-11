@@ -58,6 +58,9 @@ config:
         dependencyConfusionProtection: true
   proxyCache:
     minFreeSpace: 20GiB
+  gc:
+    gracePeriod: 48h
+    interval: 24h
   audit:
     retention:
       maxAge: 8760h

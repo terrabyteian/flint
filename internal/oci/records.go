@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
-	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
 )
 
@@ -17,24 +16,25 @@ import (
 // separated by 0x00, which cannot occur in a repository name, tag, or
 // digest, so a prefix scan never matches a longer name:
 //
-//	oci\0blob\0<repo>\0<name>\0<digest>                     blob link
+//	oci\0blob\0<repo>\0<name>\0<digest>                     blob link: size, link time
 //	oci\0manifest\0<repo>\0<name>\0<digest>                 manifest record
 //	oci\0tag\0<repo>\0<name>\0<tag>                         tag: manifest digest
 //	oci\0referrer\0<repo>\0<name>\0<subject>\0<digest>      referrer index entry
 //	oci\0upload\0<id>                                       upload session
+//	oci\0mgen\0<repo>\0<name>\0                            manifest generation: empty
 //
 // <repo> is the configured repository and <name> the image name below it,
 // so "docker-local/team/app" is repo "docker-local", name "team/app".
-//
-// Every link batch also reads the garbage collector's keys; see package gc.
+// Every link batch also reads the garbage collector's keys (gc.Guard), and
+// GCMarker tells the garbage collector what each record references.
 const (
 	nsBlob     = "oci\x00blob\x00"
 	nsManifest = "oci\x00manifest\x00"
 	nsTag      = "oci\x00tag\x00"
 	nsReferrer = "oci\x00referrer\x00"
 	nsUpload   = "oci\x00upload\x00"
+	nsGen      = "oci\x00mgen\x00"
 
-	gcEpochKey   = gc.EpochKey
 	recordFormat = 1 // the schema version byte that starts every value
 
 	// manifestFormat is the schema version of manifest records, which
@@ -72,8 +72,6 @@ func referrerKey(r *repoName, subject, d blob.Digest) []byte {
 }
 
 func uploadKey(id string) []byte { return []byte(nsUpload + id) }
-
-func doomedKey(d blob.Digest) []byte { return gc.DoomedKey(d) }
 
 var errBadRecord = errors.New("oci: malformed metadata record")
 
@@ -180,13 +178,27 @@ func (d *dec) done() error {
 }
 
 // A blob link makes a committed blob visible in one repository name. Its
-// value records the blob's size, so HEAD needs no filesystem access.
-func encodeBlobLink(size int64) []byte { return newEnc().uvarint(uint64(size)) }
+// value records the blob's size, so HEAD needs no filesystem access, and
+// when it was linked, so garbage collection can tell a link a push is
+// about to reference from one nothing references any more. Its schema
+// version is linkFormat; a link of recordFormat, written before link
+// times were recorded, holds the size only and has the zero link time.
+const linkFormat = 2
 
-func decodeBlobLink(b []byte) (size int64, err error) {
+func encodeBlobLink(size int64, linked time.Time) []byte {
+	return enc{linkFormat}.uvarint(uint64(size)).varint(linked.UnixNano())
+}
+
+func decodeBlobLink(b []byte) (size int64, linked time.Time, err error) {
+	if len(b) > 0 && b[0] == linkFormat {
+		d := &dec{b: b[1:]}
+		size = int64(d.uvarint())
+		linked = time.Unix(0, d.varint())
+		return size, linked, d.done()
+	}
 	d := newDec(b)
 	size = int64(d.uvarint())
-	return size, d.done()
+	return size, time.Time{}, d.done()
 }
 
 // A tag record holds the digest of the manifest the tag points to.

@@ -73,7 +73,7 @@ func backupCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fs.Usage()
 		return 2
 	}
-	c, err := newAdminClient(*server, *user, *passwordFile, *caFile)
+	c, err := newAdminClient(*server, backup.APIPath, *user, *passwordFile, *caFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "flint backup: %v\n", err)
 		return 1
@@ -107,20 +107,22 @@ func backupCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	return 0
 }
 
-// adminClient calls the backup endpoint of the admin API.
+// adminClient calls an endpoint of the admin API.
 type adminClient struct {
 	url        string
 	user, pass string
 	http       *http.Client
 }
 
-func newAdminClient(base, user, passwordFile, caFile string) (*adminClient, error) {
+// newAdminClient returns a client of the endpoint at path of the server
+// at base.
+func newAdminClient(base, path, user, passwordFile, caFile string) (*adminClient, error) {
 	pw, err := os.ReadFile(passwordFile)
 	if err != nil {
 		return nil, err
 	}
 	c := &adminClient{
-		url:  strings.TrimSuffix(base, "/") + backup.APIPath,
+		url:  strings.TrimSuffix(base, "/") + path,
 		user: user,
 		pass: strings.TrimSuffix(strings.TrimSuffix(string(pw), "\n"), "\r"),
 		http: &http.Client{Timeout: time.Minute},
@@ -144,14 +146,26 @@ func newAdminClient(base, user, passwordFile, caFile string) (*adminClient, erro
 	return c, nil
 }
 
-// do sends a request and decodes the JSON response into out. A response
-// other than want is an error carrying the server's message.
-func (c *adminClient) do(ctx context.Context, method string, want int, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.url, nil)
+// do sends a request, with body as JSON if it is not nil, and decodes the
+// JSON response into out. A response other than want is an error
+// carrying the server's message.
+func (c *adminClient) do(ctx context.Context, method string, body any, want int, out any) error {
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.url, rd)
 	if err != nil {
 		return err
 	}
 	req.SetBasicAuth(c.user, c.pass)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -176,7 +190,7 @@ func (c *adminClient) do(ctx context.Context, method string, want int, out any) 
 
 func (c *adminClient) start(ctx context.Context) (backup.Run, error) {
 	var run backup.Run
-	err := c.do(ctx, "POST", http.StatusAccepted, &run)
+	err := c.do(ctx, "POST", nil, http.StatusAccepted, &run)
 	return run, err
 }
 
@@ -194,7 +208,7 @@ func (c *adminClient) wait(ctx context.Context, id string) (backup.Run, error) {
 		case <-time.After(backupPollInterval):
 		}
 		var st backup.Status
-		if err := c.do(ctx, "GET", http.StatusOK, &st); err != nil {
+		if err := c.do(ctx, "GET", nil, http.StatusOK, &st); err != nil {
 			if ctx.Err() != nil {
 				continue
 			}

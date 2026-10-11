@@ -35,6 +35,7 @@ type Limits struct {
 	formatOf  func(string) string
 	pulledKey func([]byte) []byte
 	evictMore func(v meta.View, b *meta.Batch, repo, key string, rec meta.Record)
+	evicted   func(keys []string)
 	now       func() time.Time
 	kick      chan struct{}
 
@@ -61,6 +62,9 @@ type LimitsOptions struct {
 	// the item at key, whose record is rec, needs, such as the tags
 	// pointing to an evicted manifest.
 	EvictMore func(v meta.View, b *meta.Batch, repo, key string, rec meta.Record)
+	// Evicted, if not nil, is called with the keys of items an eviction
+	// removed from their tracker, whose records it deleted or found gone.
+	Evicted func(keys []string)
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 }
@@ -68,7 +72,7 @@ type LimitsOptions struct {
 // NewLimits returns a Limits without repositories.
 func NewLimits(opts LimitsOptions) *Limits {
 	l := &Limits{meta: opts.Meta, m: opts.Metrics, format: opts.Format, formatOf: opts.FormatOf, pulledKey: opts.PulledKey,
-		evictMore: opts.EvictMore, now: opts.Now, kick: make(chan struct{}, 1)}
+		evictMore: opts.EvictMore, evicted: opts.Evicted, now: opts.Now, kick: make(chan struct{}, 1)}
 	if l.now == nil {
 		l.now = time.Now
 	}
@@ -138,6 +142,13 @@ func (l *Limits) Touch(c *CacheTracker, key []byte) {
 	if c != nil {
 		c.Touch(key, l.now())
 	}
+}
+
+// Remove forgets items of c's repository whose records were deleted
+// other than by eviction, such as by garbage collection.
+func (l *Limits) Remove(c *CacheTracker, keys []string) {
+	c.Remove(keys)
+	l.gauge(c)
 }
 
 // LoadPulled loads the persisted pull times of the items whose records
@@ -234,7 +245,7 @@ func (l *Limits) evict(ctx context.Context, c *CacheTracker, keys []string) erro
 		}
 	}
 	v.Release()
-	c.Remove(gone)
+	l.forget(c, gone)
 	if len(gone) == len(keys) {
 		return nil
 	}
@@ -246,11 +257,19 @@ func (l *Limits) evict(ctx context.Context, c *CacheTracker, keys []string) erro
 		}
 		return err
 	}
-	c.Remove(keys)
+	l.forget(c, keys)
 	if l.m != nil {
 		l.m.Evictions.With(c.Repo()).Add(float64(len(keys) - len(gone)))
 	}
 	return nil
+}
+
+// forget removes evicted items from c's tracker.
+func (l *Limits) forget(c *CacheTracker, keys []string) {
+	c.Remove(keys)
+	if l.evicted != nil {
+		l.evicted(keys)
+	}
 }
 
 // Run persists pull times every PullFlushInterval, calling tick after

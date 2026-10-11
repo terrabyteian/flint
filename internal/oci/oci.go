@@ -149,6 +149,13 @@ type Handler struct {
 	actor    func(*http.Request) string
 	now      func() time.Time
 
+	// Blob links' reads, which garbage collection counts like link times,
+	// and when the handler started, before which it knows no reads; see
+	// GCPruner.
+	linkMu    sync.Mutex
+	linkReads map[string]time.Time // by blob link key
+	started   time.Time
+
 	uploadBytes   *metrics.Counter
 	manifestPuts  *metrics.Counter
 	linkConflicts *metrics.CounterSeries
@@ -171,6 +178,11 @@ type Handler struct {
 	proxyResults   *metrics.Counter
 	upstreamErrors *metrics.Counter
 	upstreamBytes  *metrics.Counter
+
+	// linkHook, if set, is called by every link batch after it read its
+	// view and before it checks that the blobs exist, so tests can
+	// interleave a garbage-collection sweep there.
+	linkHook func(ds []blob.Digest)
 }
 
 // New returns a Handler.
@@ -192,6 +204,7 @@ func New(opts Options) (*Handler, error) {
 		now:       opts.Now,
 		space:     opts.Space,
 		fetcher:   opts.Fetcher,
+		linkReads: map[string]time.Time{},
 		helmViews: map[string]*helmView{},
 	}
 	if h.log == nil {
@@ -206,6 +219,7 @@ func New(opts Options) (*Handler, error) {
 	if h.now == nil {
 		h.now = time.Now
 	}
+	h.started = h.now()
 	if h.actor == nil {
 		h.actor = clientActor
 	}
@@ -262,7 +276,7 @@ func New(opts Options) (*Handler, error) {
 			if strings.HasPrefix(key, nsManifest) {
 				evictManifestRefs(v, b, h.repos[repo], key, rec)
 			}
-		}, Now: h.now})
+		}, Evicted: func(keys []string) { h.forgetLinkReads(keys...) }, Now: h.now})
 	if err := h.loadTrackers(); err != nil {
 		return nil, err
 	}

@@ -16,12 +16,11 @@ import (
 // metadata precondition fails.
 const maxLinkAttempts = 4
 
-// gcGuard applies the garbage-collection precondition to a batch that
-// links digests: it reads the GC epoch and each digest's doomed entry from
-// v, fails with errRetry if a digest is doomed, and requires the epoch to
-// be unchanged when b commits. The caller must read v before checking that
-// the blobs exist, so a sweep that starts after this read fails the
-// precondition, and one already running is caught by its doomed entry.
+// gcGuard applies the garbage-collection precondition (gc.Guard) to a
+// batch that links digests, failing with errRetry if a digest is doomed.
+// The caller must read v before checking that the blobs exist, so a sweep
+// that starts after this read fails the precondition, and one already
+// running is caught by its doomed entry.
 func gcGuard(v meta.View, b *meta.Batch, ds ...blob.Digest) error {
 	if err := gc.Guard(v, b, ds...); err != nil {
 		return errRetry
@@ -46,6 +45,9 @@ func (h *Handler) commitLink(ctx context.Context, ds []blob.Digest,
 		v.Release()
 		if err != nil {
 			return err
+		}
+		if h.linkHook != nil {
+			h.linkHook(ds)
 		}
 		if err := exists(attempt); err != nil {
 			return err
@@ -78,15 +80,23 @@ func (h *Handler) statExists(ctx context.Context, ds ...blob.Digest) func(int) e
 	}
 }
 
-// lookupBlob returns the size of blob d as linked in rn.
+// lookupBlob returns the size of blob d as linked in rn, for a read of
+// the blob, and records the read: garbage collection keeps a link read
+// within the grace period. The lookup and the record happen together
+// with respect to the link's removal (linkPruner.Remove), so a read that
+// finds the link keeps it.
 func (h *Handler) lookupBlob(rn *repoName, d blob.Digest) (int64, bool, error) {
+	key := blobKey(rn, d)
+	h.linkMu.Lock()
+	defer h.linkMu.Unlock()
 	v := h.view()
 	defer v.Release()
-	rec, ok := v.Get(blobKey(rn, d))
+	rec, ok := v.Get(key)
 	if !ok {
 		return 0, false, nil
 	}
-	size, err := decodeBlobLink(rec.Value)
+	h.linkReads[string(key)] = h.now()
+	size, _, err := decodeBlobLink(rec.Value)
 	return size, true, err
 }
 
@@ -160,12 +170,11 @@ func (h *Handler) deleteBlob(w http.ResponseWriter, r *http.Request, rn *repoNam
 		h.writeError(w, r, err)
 		return
 	}
-	_, ok, err := h.lookupBlob(rn, d)
-	if err == nil && !ok {
-		err = blobUnknown(d)
-	}
-	if err != nil {
-		h.writeError(w, r, err)
+	v := h.view()
+	_, ok := v.Get(blobKey(rn, d))
+	v.Release()
+	if !ok {
+		h.writeError(w, r, blobUnknown(d))
 		return
 	}
 	var b meta.Batch
@@ -175,6 +184,17 @@ func (h *Handler) deleteBlob(w http.ResponseWriter, r *http.Request, rn *repoNam
 		h.writeError(w, r, storeError(err))
 		return
 	}
+	h.forgetLinkReads(string(blobKey(rn, d)))
 	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// forgetLinkReads forgets the reads of the deleted blob links among keys,
+// so the reads kept are only of links that exist.
+func (h *Handler) forgetLinkReads(keys ...string) {
+	h.linkMu.Lock()
+	defer h.linkMu.Unlock()
+	for _, k := range keys {
+		delete(h.linkReads, k)
+	}
 }

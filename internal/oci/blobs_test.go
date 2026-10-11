@@ -13,6 +13,7 @@ import (
 
 	"github.com/terrabyteian/flint/internal/blob"
 	"github.com/terrabyteian/flint/internal/fsys"
+	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
 )
 
@@ -375,8 +376,8 @@ func TestMount(t *testing.T) {
 func (e *env) doom(d blob.Digest) {
 	e.t.Helper()
 	var b meta.Batch
-	b.Put([]byte(gcEpochKey), []byte{1})
-	b.Put(doomedKey(d), []byte{1})
+	b.Put([]byte(gc.EpochKey), []byte{1})
+	b.Put(gc.DoomedKey(d), []byte{1})
 	if _, err := e.meta.Commit(context.Background(), &b); err != nil {
 		e.t.Fatal(err)
 	}
@@ -419,18 +420,18 @@ func TestLinkEpochPrecondition(t *testing.T) {
 	bump := func(doom bool) {
 		var b meta.Batch
 		v := e.meta.View()
-		epoch, _ := v.Get([]byte(gcEpochKey))
+		epoch, _ := v.Get([]byte(gc.EpochKey))
 		v.Release()
-		b.Put([]byte(gcEpochKey), []byte{byte(epoch.Version)})
+		b.Put([]byte(gc.EpochKey), []byte{byte(epoch.Version)})
 		if doom {
-			b.Put(doomedKey(d), []byte{1})
+			b.Put(gc.DoomedKey(d), []byte{1})
 		}
 		if _, err := e.meta.Commit(ctx, &b); err != nil {
 			t.Fatal(err)
 		}
 	}
 	build := func(v meta.View, b *meta.Batch) error {
-		b.Put(blobKey(rn, d), encodeBlobLink(5))
+		b.Put(blobKey(rn, d), encodeBlobLink(5, time.Now()))
 		return nil
 	}
 

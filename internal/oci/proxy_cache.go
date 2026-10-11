@@ -50,7 +50,7 @@ func (h *Handler) loadTracker(c *upstream.CacheTracker, v meta.View) error {
 		v.Scan(pfx, nil, func(key []byte, rec meta.Record) bool {
 			var size int64
 			if ns == nsBlob {
-				size, failure = decodeBlobLink(rec.Value)
+				size, _, failure = decodeBlobLink(rec.Value)
 			} else {
 				var m *manifestRecord
 				if m, failure = decodeManifest(rec.Value); failure == nil {

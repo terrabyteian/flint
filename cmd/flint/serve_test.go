@@ -330,6 +330,7 @@ func TestPoisonedStoreStaysReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.audit.Close()
+	defer a.gc.Close()
 	h := a.srv.Handler()
 	scrape := func() string {
 		rec := httptest.NewRecorder()
