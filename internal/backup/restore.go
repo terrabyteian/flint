@@ -26,7 +26,7 @@ const RestoreMarker = "RESTORE-INCOMPLETE"
 // checks the backup as Verify does, and each blob's digest as it copies
 // it; a backup with problems is not restored, and the report says why.
 // The restored data directory holds the backed-up metadata and blobs;
-// flint generates a new token-signing key when it first starts on it.
+// flint generates new signing keys when it first starts on it.
 func Restore(ctx context.Context, dir, dataDir string, opts VerifyOptions) (*Report, error) {
 	fsy := opts.FS
 	if fsy == nil {

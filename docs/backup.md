@@ -142,7 +142,7 @@ A backup holds:
 It does not hold:
 
 - **The configuration file and the files it names**: TLS certificates and keys, the bootstrap administrator's password file, and proxy repositories' upstream credentials. Keep them where you keep the rest of your deployment's configuration and secrets, such as the Helm values and Kubernetes Secrets.
-- **The token-signing key** (`auth/token-signing.key`). flint generates a new one when it first starts on a restored data directory, so a backup never contains private key material. The only effect is that bearer tokens issued before the restore, which live five minutes, stop working, and clients fetch new ones without noticing. Users, passwords, and API tokens are in the metadata and work as before.
+- **The signing keys** (`auth/token-signing.key` and `auth/url-signing.key`). flint generates new ones when it first starts on a restored data directory, so a backup never contains private key material. The only effect is that bearer tokens issued before the restore, which live five minutes, and [signed download URLs](auth.md#signed-download-urls), which live ten minutes by default, stop working; clients fetch new ones. Users, passwords, and API tokens are in the metadata and work as before.
 - **Uploads in progress.** Clients restart them.
 - **The history of the metadata log**: a backup holds the state, not the log of changes that led to it.
 
@@ -174,7 +174,7 @@ flint restore -backup 20261011T020000.123Z-48211 /var/backups/flint /var/lib/fli
 It refuses a data directory that holds anything but the `lost+found` directory of a new ext4 volume, so it never mixes a backup with other data, and it takes the data directory's lock, so it cannot run on a directory a server is using.
 It checks the backup as `verify` does, and each blob's digest as it copies it; a damaged backup is not restored.
 Then start flint with `dataDir` pointing at the restored directory, or move it into place.
-The restored server holds exactly the state of the backup, continues its metadata log from the backup's sequence number, and creates a new token-signing key.
+The restored server holds exactly the state of the backup, continues its metadata log from the backup's sequence number, and creates new signing keys.
 
 Until a restore has finished, the data directory holds a file named `RESTORE-INCOMPLETE`, and `flint serve` refuses to start on it, so an interrupted restore is never served as if it were the whole registry.
 Delete the directory and restore again.
