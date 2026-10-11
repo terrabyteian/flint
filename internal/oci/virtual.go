@@ -76,11 +76,12 @@ import (
 //     the virtual repository was told exist: they are linked into the
 //     publishTo member, as a cross-repository mount would link them, a
 //     child manifest with what it references, whose blobs a proxy member
-//     holding it fetches first, as a pull would, if no hosted member owns
-//     the name; no upstream is asked about a name one owns. Nothing is
-//     linked if the push is refused for the request or for what the
-//     manifest references; a push that then fails to store the manifest,
-//     such as with the disk full, may leave what was linked.
+//     holding it fetches first, as a pull would, if it still serves the
+//     name: with dependency-confusion protection, no upstream is asked
+//     about a name a hosted member owns. Nothing is linked if the push is
+//     refused for the request or for what the manifest references; a push
+//     that then fails to store the manifest, such as with the disk full,
+//     may leave what was linked.
 //
 // A virtual repository stores nothing of its own; it remembers in memory
 // only which member last served a manifest of each name.
@@ -210,14 +211,14 @@ func (h *Handler) virtualPublish(w http.ResponseWriter, r *http.Request, rn *rep
 // A client that checked for them through the virtual repository was told
 // they exist. The blobs of a child manifest a proxy member holds are
 // fetched into it first, as a pull would, if it still serves the name,
-// which no hosted member owns then; if one cannot be, the push is
-// refused. It first refuses
-// the request as the push would, and links nothing unless the manifest's
-// every reference can then be held, with the size its descriptor gives,
-// so a push refused for the request or its references leaves no child
-// manifest behind to own the name. One that fails to store the manifest
-// afterwards, such as with the disk full, may. It leaves r's body to be
-// read again.
+// which with dependency-confusion protection it does not once a hosted
+// member owns the name; if one cannot be, the push is refused. It first
+// refuses the request as the push would, and links nothing unless the
+// manifest's every reference can then be held, with the size its
+// descriptor gives, so a push refused for the request or its references
+// leaves no child manifest behind to own the name. One that fails to
+// store the manifest afterwards, such as with the disk full, may. It
+// leaves r's body to be read again.
 func (h *Handler) linkFromMembers(r *http.Request, rn, mrn *repoName, ref string) error {
 	_, body, _, err := readManifestPut(r, ref)
 	if err != nil {
