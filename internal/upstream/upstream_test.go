@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -755,5 +756,69 @@ func TestSpaceOnThisPlatform(t *testing.T) {
 	s := upstream.NewSpace(upstream.SpaceOptions{Path: t.TempDir(), Logger: quiet})
 	if _, ok := s.Reserve(1); !ok {
 		t.Error("caching refused with no threshold")
+	}
+}
+
+func TestGetURL(t *testing.T) {
+	pwFile := filepath.Join(t.TempDir(), "password")
+	os.WriteFile(pwFile, []byte("pw\n"), 0o600)
+	var mu sync.Mutex
+	var own, foreign []string
+	index := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		own = append(own, r.URL.RequestURI()+" "+r.Header.Get("Authorization"))
+		mu.Unlock()
+		if u, p, ok := r.BasicAuth(); !ok || u != "me" || p != "pw" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="index"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		io.WriteString(w, "page")
+	}))
+	defer index.Close()
+	files := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		foreign = append(foreign, r.URL.RequestURI()+" "+r.Header.Get("Authorization"))
+		mu.Unlock()
+		if r.URL.Path == "/private" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="cdn"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		io.WriteString(w, "file")
+	}))
+	defer files.Close()
+	c := newClient(t, index.URL+"/simple/", upstream.Options{Username: "me", PasswordFile: pwFile})
+	get := func(u string) (string, error) {
+		resp, err := c.GetURL(ctx, u, nil)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		return string(b), err
+	}
+	for range 2 {
+		if body, err := get(index.URL + "/simple/a/"); err != nil || body != "page" {
+			t.Fatalf("GetURL of the index = %q, %v", body, err)
+		}
+	}
+	if body, err := get(files.URL + "/f.whl#sha256=00"); err != nil || body != "file" {
+		t.Fatalf("GetURL of another host = %q, %v", body, err)
+	}
+	if _, err := get(files.URL + "/private"); !errors.Is(err, upstream.ErrDenied) {
+		t.Errorf("another host asking for credentials: %v, want ErrDenied", err)
+	}
+	if _, err := get("ftp://x/y"); err == nil {
+		t.Error("GetURL accepted an ftp URL")
+	}
+	// The first request learns that the index takes basic credentials;
+	// later ones send them at once. The other host never gets them.
+	want := []string{"/simple/a/ ", "/simple/a/ Basic bWU6cHc=", "/simple/a/ Basic bWU6cHc="}
+	if !slices.Equal(own, want) {
+		t.Errorf("index requests: %q, want %q", own, want)
+	}
+	if want := []string{"/f.whl ", "/private "}; !slices.Equal(foreign, want) {
+		t.Errorf("other host requests: %q, want %q", foreign, want)
 	}
 }

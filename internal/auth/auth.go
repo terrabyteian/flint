@@ -28,6 +28,12 @@
 // repository path, so a grant on "docker-local" covers
 // "docker-local/team/app".
 //
+// # PyPI clients
+//
+// PyPI clients send HTTP basic credentials with every request: a user
+// name and password, or "__token__" and an API token. Permit checks
+// them for the pypi package.
+//
 // # Docker token authentication
 //
 // Registry requests carry a short-lived JSON Web Token from the token
@@ -505,6 +511,33 @@ func (s *Service) Authorize(w http.ResponseWriter, r *http.Request, repo string,
 // Invalid credentials permit nothing.
 func (s *Service) Allowed(r *http.Request, repo string, actions ...string) bool {
 	return s.docker.Allowed(r, repo, actions...)
+}
+
+// Permit reports, as an HTTP status, whether the request's credentials,
+// or their absence, allow every action on repository repo, for clients
+// that authenticate with basic credentials on every request, such as
+// PyPI clients: http.StatusOK; StatusUnauthorized when the
+// request has no valid credentials and needs some; StatusForbidden when
+// its credentials lack the permission; or StatusInternalServerError.
+// Bearer tokens from the token service are not accepted. The caller
+// writes the response. With StatusOK, Permit records the principal in
+// r's context for Actor.
+func (s *Service) Permit(r *http.Request, repo string, actions ...string) int {
+	c, err := s.authenticate(r, false)
+	switch {
+	case err != nil && !errors.Is(err, ErrInvalidCredentials):
+		s.log.Error("authentication failed", "err", err)
+		return http.StatusInternalServerError
+	case err != nil:
+		return http.StatusUnauthorized
+	case !s.permits(c, checksFor(repo, actions)):
+		if c.kind == credNone {
+			return http.StatusUnauthorized
+		}
+		return http.StatusForbidden
+	}
+	admit(r, c.principal)
+	return http.StatusOK
 }
 
 type principalKey struct{}

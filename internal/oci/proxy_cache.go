@@ -2,12 +2,10 @@ package oci
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"errors"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
@@ -19,9 +17,9 @@ import (
 // content when the content it caches exceeds the limit. Without a limit,
 // nothing is tracked and nothing is evicted.
 //
-// The tracker holds every cached item of the repository in memory: each
-// blob link and manifest record, with its size and the time it was last
-// pulled. Pull times are persisted under
+// The tracker (upstream.CacheTracker) holds every cached item of the
+// repository in memory: each blob link and manifest record, with its size
+// and the time it was last pulled. Pull times are persisted under
 //
 //	oci\0pulled\0blob\0<repo>\0<name>\0<digest>       last pull of a blob link
 //	oci\0pulled\0manifest\0<repo>\0<name>\0<digest>   last pull of a manifest
@@ -53,35 +51,12 @@ func pulledKey(key []byte) []byte {
 	return append([]byte(nsPulled), key[len("oci\x00"):]...)
 }
 
-// cacheItem is a cached blob link or manifest record.
-type cacheItem struct {
-	size   int64
-	pulled int64 // Unix seconds of the last pull; 0 if never recorded
-}
-
-// cacheTracker tracks the content cached in a size-limited proxy
-// repository.
-type cacheTracker struct {
-	repo  string
-	limit int64
-
-	mu    sync.Mutex
-	items map[string]*cacheItem // by metadata key
-	total int64
-	dirty map[string]bool // items whose pull time is not persisted yet
-}
-
-func newCacheTracker(repo string, limit int64) *cacheTracker {
-	return &cacheTracker{repo: repo, limit: limit, items: map[string]*cacheItem{}, dirty: map[string]bool{}}
-}
-
-// load reads the repository's cached items and their pull times from v.
-func (c *cacheTracker) load(v meta.View) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// loadTracker loads the cached items of c's repository, and their pull
+// times, from v.
+func loadTracker(c *upstream.CacheTracker, v meta.View) error {
 	var failure error
 	for _, ns := range []string{nsBlob, nsManifest} {
-		v.Scan([]byte(ns+c.repo+"\x00"), nil, func(key []byte, rec meta.Record) bool {
+		v.Scan([]byte(ns+c.Repo()+"\x00"), nil, func(key []byte, rec meta.Record) bool {
 			var size int64
 			if ns == nsBlob {
 				size, failure = decodeBlobLink(rec.Value)
@@ -94,23 +69,20 @@ func (c *cacheTracker) load(v meta.View) error {
 			if failure != nil {
 				return false
 			}
-			c.items[string(key)] = &cacheItem{size: size}
-			c.total += size
+			c.Load(string(key), size)
 			return true
 		})
 		if failure != nil {
 			return failure
 		}
-		pfx := pulledKey([]byte(ns + c.repo + "\x00"))
+		pfx := pulledKey([]byte(ns + c.Repo() + "\x00"))
 		v.Scan(pfx, nil, func(key []byte, rec meta.Record) bool {
 			d := newDec(rec.Value)
 			t := d.varint()
 			if failure = d.done(); failure != nil {
 				return false
 			}
-			if it := c.items["oci\x00"+string(key[len(nsPulled):])]; it != nil {
-				it.pulled = t
-			}
+			c.LoadPulled("oci\x00"+string(key[len(nsPulled):]), t)
 			return true
 		})
 		if failure != nil {
@@ -120,108 +92,6 @@ func (c *cacheTracker) load(v meta.View) error {
 	return nil
 }
 
-// add records a newly cached item. It reports whether the repository is
-// now over its limit.
-func (c *cacheTracker) add(key []byte, size int64, now time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	k := string(key)
-	if it := c.items[k]; it != nil {
-		c.total += size - it.size
-		it.size = size
-	} else {
-		c.items[k] = &cacheItem{size: size}
-		c.total += size
-	}
-	c.items[k].pulled = now.Unix()
-	c.dirty[k] = true
-	return c.total > c.limit
-}
-
-// touch records a pull of a cached item.
-func (c *cacheTracker) touch(key []byte, now time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	k := string(key)
-	if it := c.items[k]; it != nil && it.pulled != now.Unix() {
-		it.pulled = now.Unix()
-		c.dirty[k] = true
-	}
-}
-
-// size returns the bytes cached.
-func (c *cacheTracker) size() int64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.total
-}
-
-// takeDirty returns the pull times not yet persisted, and forgets that
-// they are dirty.
-func (c *cacheTracker) takeDirty() map[string]int64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make(map[string]int64, len(c.dirty))
-	for k := range c.dirty {
-		if it := c.items[k]; it != nil {
-			out[k] = it.pulled
-		}
-	}
-	clear(c.dirty)
-	return out
-}
-
-// markDirty marks pull times dirty again after a failed flush.
-func (c *cacheTracker) markDirty(keys []string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, k := range keys {
-		if c.items[k] != nil {
-			c.dirty[k] = true
-		}
-	}
-}
-
-// victims returns the least recently pulled items whose removal brings
-// the repository within its limit, oldest first.
-func (c *cacheTracker) victims() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.total <= c.limit {
-		return nil
-	}
-	keys := make([]string, 0, len(c.items))
-	for k := range c.items {
-		keys = append(keys, k)
-	}
-	slices.SortFunc(keys, func(a, b string) int {
-		return cmp.Or(cmp.Compare(c.items[a].pulled, c.items[b].pulled), strings.Compare(a, b))
-	})
-	var out []string
-	over := c.total - c.limit
-	for _, k := range keys {
-		if over <= 0 {
-			break
-		}
-		out = append(out, k)
-		over -= c.items[k].size
-	}
-	return out
-}
-
-// remove forgets evicted items.
-func (c *cacheTracker) remove(keys []string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, k := range keys {
-		if it := c.items[k]; it != nil {
-			c.total -= it.size
-			delete(c.items, k)
-			delete(c.dirty, k)
-		}
-	}
-}
-
 // track records content cached in rn's repository, and asks for an
 // eviction if it is now over its size limit.
 func (h *Handler) track(rn *repoName, key []byte, size int64) {
@@ -229,8 +99,8 @@ func (h *Handler) track(rn *repoName, key []byte, size int64) {
 	if c == nil {
 		return
 	}
-	over := c.add(key, size, h.now())
-	h.cachedBytes.With(c.repo).Set(float64(c.size()))
+	over := c.Add(key, size, h.now())
+	h.cachedBytes.With(c.Repo()).Set(float64(c.Size()))
 	if over {
 		select {
 		case h.evictKick <- struct{}{}:
@@ -242,19 +112,19 @@ func (h *Handler) track(rn *repoName, key []byte, size int64) {
 // touch records a pull of cached content in rn's repository.
 func (h *Handler) touch(rn *repoName, key []byte) {
 	if c := rn.cfg.proxy.cache; c != nil {
-		c.touch(key, h.now())
+		c.Touch(key, h.now())
 	}
 }
 
 // trackers returns the size-limited proxy repositories' trackers.
-func (h *Handler) trackers() []*cacheTracker {
-	var out []*cacheTracker
+func (h *Handler) trackers() []*upstream.CacheTracker {
+	var out []*upstream.CacheTracker
 	for _, rc := range h.repos {
 		if rc.proxy != nil && rc.proxy.cache != nil {
 			out = append(out, rc.proxy.cache)
 		}
 	}
-	slices.SortFunc(out, func(a, b *cacheTracker) int { return strings.Compare(a.repo, b.repo) })
+	slices.SortFunc(out, func(a, b *upstream.CacheTracker) int { return strings.Compare(a.Repo(), b.Repo()) })
 	return out
 }
 
@@ -262,7 +132,7 @@ func (h *Handler) trackers() []*cacheTracker {
 // flush.
 func (h *Handler) FlushPullTimes(ctx context.Context) error {
 	for _, c := range h.trackers() {
-		dirty := c.takeDirty()
+		dirty := c.TakeDirty()
 		keys := make([]string, 0, len(dirty))
 		for k := range dirty {
 			keys = append(keys, k)
@@ -275,10 +145,10 @@ func (h *Handler) FlushPullTimes(ctx context.Context) error {
 			for _, k := range chunk {
 				b.Put(pulledKey([]byte(k)), newEnc().varint(dirty[k]))
 			}
-			b.SetOrigin(meta.Origin{Actor: "system", Action: "oci.proxy.pulled", Target: c.repo})
+			b.SetOrigin(meta.Origin{Actor: "system", Action: "oci.proxy.pulled", Target: c.Repo()})
 			if err := h.commit(ctx, &b); err != nil {
-				c.markDirty(chunk)
-				c.markDirty(keys)
+				c.MarkDirty(chunk)
+				c.MarkDirty(keys)
 				return err
 			}
 		}
@@ -290,7 +160,7 @@ func (h *Handler) FlushPullTimes(ctx context.Context) error {
 // proxy repository that exceeds its limit.
 func (h *Handler) Evict(ctx context.Context) error {
 	for _, c := range h.trackers() {
-		victims := c.victims()
+		victims := c.Victims()
 		for len(victims) > 0 {
 			chunk := victims[:min(len(victims), evictBatch)]
 			victims = victims[len(chunk):]
@@ -298,7 +168,7 @@ func (h *Handler) Evict(ctx context.Context) error {
 				return err
 			}
 		}
-		h.cachedBytes.With(c.repo).Set(float64(c.size()))
+		h.cachedBytes.With(c.Repo()).Set(float64(c.Size()))
 	}
 	return nil
 }
@@ -307,7 +177,7 @@ func (h *Handler) Evict(ctx context.Context) error {
 // must still be at the version read, so an item cached again meanwhile
 // is not removed behind the tracker's back; such a conflict fails the
 // batch, and the next eviction run decides again.
-func (h *Handler) evict(ctx context.Context, c *cacheTracker, keys []string) error {
+func (h *Handler) evict(ctx context.Context, c *upstream.CacheTracker, keys []string) error {
 	var b meta.Batch
 	var gone []string
 	v := h.view()
@@ -322,24 +192,24 @@ func (h *Handler) evict(ctx context.Context, c *cacheTracker, keys []string) err
 		b.Delete(key)
 		b.Delete(pulledKey(key))
 		if strings.HasPrefix(k, nsManifest) {
-			evictManifestRefs(v, &b, h.repos[c.repo], k, rec)
+			evictManifestRefs(v, &b, h.repos[c.Repo()], k, rec)
 		}
 	}
 	v.Release()
-	c.remove(gone)
+	c.Remove(gone)
 	if len(gone) == len(keys) {
 		return nil
 	}
 	b.SetOrigin(meta.Origin{Actor: "system", Action: "oci.proxy.evict",
-		Target: c.repo + ": least recently pulled content over the size limit"})
+		Target: c.Repo() + ": least recently pulled content over the size limit"})
 	if err := h.commit(ctx, &b); err != nil {
 		if errors.Is(err, meta.ErrConflict) {
 			return nil
 		}
 		return err
 	}
-	c.remove(keys)
-	h.evictions.With(c.repo).Add(float64(len(keys) - len(gone)))
+	c.Remove(keys)
+	h.evictions.With(c.Repo()).Add(float64(len(keys) - len(gone)))
 	return nil
 }
 
@@ -370,19 +240,14 @@ func evictManifestRefs(v meta.View, b *meta.Batch, cfg *repository, key string, 
 }
 
 // RunProxy runs the proxy repositories' background work until ctx is
-// done: it watches the free space of the data directory, persists
-// last-pull times, evicts content over size limits, and forgets stale
-// tag confirmations. Before returning, it persists the pull times once
-// more.
+// done: it persists last-pull times, evicts content over size limits,
+// and forgets stale tag confirmations. Before returning, it persists the
+// pull times once more. The free-space watcher, which proxy repositories
+// of every format share, runs separately (upstream.Space.Run).
 func (h *Handler) RunProxy(ctx context.Context) {
 	if !h.hasProxy {
 		return
 	}
-	var wg sync.WaitGroup
-	if h.space != nil {
-		wg.Go(func() { h.space.Run(ctx, upstream.SpaceCheckInterval) })
-	}
-	defer wg.Wait()
 	t := time.NewTicker(PullFlushInterval)
 	defer t.Stop()
 	for {

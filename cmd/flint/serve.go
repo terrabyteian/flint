@@ -20,6 +20,7 @@ import (
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
+	"github.com/terrabyteian/flint/internal/pypi"
 	"github.com/terrabyteian/flint/internal/server"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
@@ -92,7 +93,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		return err
 	}
 
-	srv, registry, backups, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
+	srv, formats, backups, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
 	if err != nil {
 		return err
 	}
@@ -104,8 +105,12 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	// in the background until the stores close.
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
 	var janitors sync.WaitGroup
-	janitors.Go(func() { registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
-	janitors.Go(func() { registry.RunProxy(janitorCtx) })
+	janitors.Go(func() { formats.oci.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
+	janitors.Go(func() { formats.oci.RunProxy(janitorCtx) })
+	janitors.Go(func() { formats.pypi.RunProxy(janitorCtx) })
+	if formats.space != nil {
+		janitors.Go(func() { formats.space.Run(janitorCtx, upstream.SpaceCheckInterval) })
+	}
 	defer func() {
 		stopJanitor()
 		janitors.Wait()
@@ -137,12 +142,20 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	return nil
 }
 
+// formats are the package format handlers newServer builds, and the
+// free-space watcher their proxy repositories share.
+type formats struct {
+	oci   *oci.Handler
+	pypi  *pypi.Handler
+	space *upstream.Space // nil without proxy repositories
+}
+
 // newServer builds the HTTP server and its metrics over open stores. The
 // format and auth packages register their routes, middleware, and
 // readiness checks on it here, using store and blobs. fsy is the data
 // directory's filesystem. The backup manager is nil unless backups are
 // configured; the caller closes it before the stores.
-func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, *backup.Manager, error) {
+func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *formats, *backup.Manager, error) {
 	reg := metrics.NewRegistry()
 	metrics.RegisterRuntime(reg, version)
 	registerStoreMetrics(reg, store)
@@ -197,6 +210,11 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 			break
 		}
 	}
+	// Proxy repositories of every format share one fetcher and one set of
+	// proxy metrics.
+	fetcher := upstream.NewFetcher(blobs, 0)
+	proxyMetrics := upstream.NewMetrics(reg, fetcher, space)
+	upOpts := upstream.Options{UserAgent: "flint/" + version}
 	registry, err := oci.New(oci.Options{
 		Meta:         store,
 		Blobs:        blobs,
@@ -207,13 +225,32 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Actor:          authz.Actor,
 		Logger:         logger,
 		Metrics:        reg,
-		Upstream:       upstream.Options{UserAgent: "flint/" + version},
+		Upstream:       upOpts,
 		Space:          space,
+		Fetcher:        fetcher,
+		ProxyMetrics:   proxyMetrics,
 	})
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	registry.Register(srv)
+	index, err := pypi.New(pypi.Options{
+		Meta:         store,
+		Blobs:        blobs,
+		Repositories: cfg.Repositories,
+		Authorizer:   authz,
+		Actor:        authz.Actor,
+		Logger:       logger,
+		Metrics:      reg,
+		Upstream:     upOpts,
+		Space:        space,
+		Fetcher:      fetcher,
+		ProxyMetrics: proxyMetrics,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	index.Register(srv)
 
 	var backups *backup.Manager
 	if cfg.Backup.Directory != "" {
@@ -231,7 +268,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		}
 	}
 	backup.Register(srv, backups, authz.AdminHandler, authz.Actor)
-	return srv, registry, backups, nil
+	return srv, &formats{oci: registry, pypi: index, space: space}, backups, nil
 }
 
 // blobReferences report the blobs every format package's records

@@ -105,22 +105,28 @@ type Log struct {
 
 // Repository formats and types.
 const (
-	FormatOCI  = "oci"
-	TypeHosted = "hosted"
-	TypeProxy  = "proxy"
+	FormatOCI   = "oci"
+	FormatPyPI  = "pypi"
+	TypeHosted  = "hosted"
+	TypeProxy   = "proxy"
+	TypeVirtual = "virtual"
 )
 
 // Repository declares one repository.
 type Repository struct {
 	// Name is the repository's path prefix, such as "docker-local" in
-	// host/docker-local/team/app. Lowercase letters, digits, and
+	// host/docker-local/team/app, or "pypi-local" in
+	// host/pypi/pypi-local/simple/. Lowercase letters, digits, and
 	// separators ".", "_", or "-" between them; at most 64 characters.
+	// Names are unique across formats.
 	Name string `json:"name"`
-	// Format is the package format. Only "oci" is supported so far.
+	// Format is the package format: "oci" or "pypi".
 	Format string `json:"format"`
-	// Type is the repository type: "hosted" or "proxy".
+	// Type is the repository type: "hosted", "proxy", or, for "pypi",
+	// "virtual".
 	Type string `json:"type"`
-	// ImmutableTags makes a pushed tag permanent. Hosted repositories only.
+	// ImmutableTags makes a pushed tag permanent. Hosted OCI repositories
+	// only.
 	ImmutableTags bool `json:"immutableTags,omitempty"`
 	// AnonymousPull lets unauthenticated clients pull.
 	AnonymousPull bool `json:"anonymousPull,omitempty"`
@@ -131,13 +137,34 @@ type Repository struct {
 	// Proxy configures a proxy repository's upstream. Required for type
 	// "proxy", and not allowed for other types.
 	Proxy *Proxy `json:"proxy,omitempty"`
+	// Virtual configures a virtual repository's members. Required for
+	// type "virtual", and not allowed for other types.
+	Virtual *Virtual `json:"virtual,omitempty"`
+}
+
+// Virtual configures a virtual repository: one index merged from an
+// ordered list of hosted and proxy repositories of the same format.
+type Virtual struct {
+	// Members are the repositories merged, in order: where several have
+	// the same file, the first one's is served.
+	Members []string `json:"members"`
+	// DependencyConfusionProtection, on by default, never serves a
+	// package from a proxy member once a hosted member owns its name.
+	DependencyConfusionProtection *bool `json:"dependencyConfusionProtection,omitempty"`
+}
+
+// Protected reports whether dependency-confusion protection is on.
+func (v *Virtual) Protected() bool {
+	return v.DependencyConfusionProtection == nil || *v.DependencyConfusionProtection
 }
 
 // Proxy configures the upstream registry a proxy repository caches.
 type Proxy struct {
-	// URL is the upstream registry's base URL, such as
-	// "https://registry-1.docker.io" or "https://ghcr.io". For Docker
-	// Hub, single-component image names get the "library/" prefix.
+	// URL is the upstream. For OCI, it is the registry's base URL, such
+	// as "https://registry-1.docker.io" or "https://ghcr.io"; for Docker
+	// Hub, single-component image names get the "library/" prefix. For
+	// PyPI, it is the simple index URL, such as
+	// "https://pypi.org/simple/"; a URL without a path gets "/simple/".
 	URL string `json:"url"`
 	// Username and PasswordFile, if set, authenticate to the upstream.
 	// PasswordFile holds the password or access token, such as a mounted
@@ -146,8 +173,8 @@ type Proxy struct {
 	// without a restart.
 	Username     string `json:"username,omitempty"`
 	PasswordFile string `json:"passwordFile,omitempty"`
-	// RevalidateAfter is how long a cached tag is served before it is
-	// checked upstream again. Default 5m.
+	// RevalidateAfter is how long a cached tag or package listing is
+	// served before it is checked upstream again. Default 5m.
 	RevalidateAfter Duration `json:"revalidateAfter,omitzero"`
 	// SizeLimit, if set, caps the content cached in the repository: when
 	// it is exceeded, the least recently pulled content is evicted.
@@ -408,33 +435,56 @@ func (c *Config) Validate() error {
 			names[r.Name] = i
 		}
 		switch r.Format {
-		case FormatOCI:
+		case FormatOCI, FormatPyPI:
 		case "":
 			v.addf(path+".format", "is required")
 		default:
-			v.addf(path+".format", "%q is not supported; supported formats: oci", r.Format)
+			v.addf(path+".format", "%q is not supported; supported formats: oci, pypi", r.Format)
+		}
+		switch {
+		case !r.ImmutableTags || r.Format == FormatOCI && r.Type == TypeHosted:
+		case r.Type == TypeProxy:
+			v.addf(path+".immutableTags", "is not allowed for a proxy repository, whose tags follow the upstream")
+		default:
+			v.addf(path+".immutableTags", "is only allowed for a hosted OCI repository")
+		}
+		switch {
+		case !r.HelmIndex || r.Format == FormatOCI && r.Type == TypeHosted:
+		case r.Type == TypeProxy:
+			v.addf(path+".helmIndex", "is not allowed for a proxy repository, which holds only the charts pulled through it")
+		default:
+			v.addf(path+".helmIndex", "is only allowed for a hosted OCI repository")
+		}
+		if r.Proxy != nil && r.Type != TypeProxy {
+			v.addf(path+".proxy", "is only allowed for type %q", TypeProxy)
+		}
+		if r.Virtual != nil && r.Type != TypeVirtual {
+			v.addf(path+".virtual", "is only allowed for type %q", TypeVirtual)
 		}
 		switch r.Type {
 		case TypeHosted:
-			if r.Proxy != nil {
-				v.addf(path+".proxy", "is only allowed for type %q", TypeProxy)
-			}
 		case TypeProxy:
-			if r.ImmutableTags {
-				v.addf(path+".immutableTags", "is not allowed for a proxy repository, whose tags follow the upstream")
-			}
-			if r.HelmIndex {
-				v.addf(path+".helmIndex", "is not allowed for a proxy repository, which holds only the charts pulled through it")
-			}
 			if r.Proxy == nil {
 				v.addf(path+".proxy", "is required for type %q", TypeProxy)
 			} else {
-				validateProxy(&v, path+".proxy", r.Proxy)
+				validateProxy(&v, path+".proxy", r.Format, r.Proxy)
+			}
+		case TypeVirtual:
+			switch {
+			case r.Format == FormatOCI:
+				v.addf(path+".type", "%q is not supported for format oci; use a hosted and a proxy repository", r.Type)
+			case r.Virtual == nil:
+				v.addf(path+".virtual", "is required for type %q", TypeVirtual)
 			}
 		case "":
 			v.addf(path+".type", "is required")
 		default:
-			v.addf(path+".type", "%q is not supported; supported types: hosted, proxy", r.Type)
+			v.addf(path+".type", "%q is not supported; supported types: hosted, proxy, virtual", r.Type)
+		}
+	}
+	for i, r := range c.Repositories {
+		if r.Type == TypeVirtual && r.Virtual != nil && r.Format != FormatOCI {
+			c.validateMembers(&v, fmt.Sprintf("repositories[%d].virtual.members", i), r, names)
 		}
 	}
 	if f := c.ProxyCache.MinFreeSpace; f.invalid != "" {
@@ -504,11 +554,37 @@ func within(path, dir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
+// validateMembers checks a virtual repository's members: each must be a
+// hosted or proxy repository of the same format, named once.
+func (c *Config) validateMembers(v *validator, path string, r Repository, names map[string]int) {
+	if len(r.Virtual.Members) == 0 {
+		v.addf(path, "must name at least one hosted or proxy repository")
+	}
+	seen := map[string]bool{}
+	for j, m := range r.Virtual.Members {
+		mp := fmt.Sprintf("%s[%d]", path, j)
+		i, ok := names[m]
+		switch {
+		case seen[m]:
+			v.addf(mp, "%q is named twice", m)
+		case m == r.Name:
+			v.addf(mp, "a virtual repository cannot be its own member")
+		case !ok:
+			v.addf(mp, "%q is not a declared repository", m)
+		case c.Repositories[i].Format != r.Format:
+			v.addf(mp, "%q is a %s repository, not %s", m, c.Repositories[i].Format, r.Format)
+		case c.Repositories[i].Type != TypeHosted && c.Repositories[i].Type != TypeProxy:
+			v.addf(mp, "%q is a %s repository; members must be hosted or proxy repositories", m, c.Repositories[i].Type)
+		}
+		seen[m] = true
+	}
+}
+
 // validateProxy checks a proxy repository's upstream settings.
-func validateProxy(v *validator, path string, p *Proxy) {
+func validateProxy(v *validator, path, format string, p *Proxy) {
 	if p.URL == "" {
 		v.addf(path+".url", "is required")
-	} else if err := checkUpstreamURL(p.URL); err != nil {
+	} else if err := checkUpstreamURL(p.URL, format); err != nil {
 		v.addf(path+".url", "%q %v", p.URL, err)
 	}
 	switch {
@@ -535,8 +611,9 @@ func validateProxy(v *validator, path string, p *Proxy) {
 	}
 }
 
-// checkUpstreamURL checks an upstream registry's base URL.
-func checkUpstreamURL(s string) error {
+// checkUpstreamURL checks an upstream's URL: a registry's base URL for
+// OCI, or a simple index URL, which may have a path, for PyPI.
+func checkUpstreamURL(s, format string) error {
 	u, err := url.Parse(s)
 	switch {
 	case err != nil:
@@ -549,10 +626,26 @@ func checkUpstreamURL(s string) error {
 		return errors.New("must not contain credentials; use username and passwordFile")
 	case u.RawQuery != "" || u.Fragment != "" || u.ForceQuery:
 		return errors.New("must not have a query or fragment")
-	case u.Path != "" && u.Path != "/":
+	case format != FormatPyPI && u.Path != "" && u.Path != "/":
 		return errors.New("must be the registry's base URL, without a path: the registry API is served at /v2/")
 	}
 	return nil
+}
+
+// PyPIIndexURL returns the simple index URL of a PyPI proxy repository's
+// upstream: its URL, ending in "/", with "/simple/" when it has no path.
+func PyPIIndexURL(s string) string {
+	u, err := url.Parse(s)
+	if err != nil {
+		return s
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/simple/"
+	} else if !strings.HasSuffix(u.Path, "/") {
+		u.Path += "/"
+	}
+	u.RawPath = ""
+	return u.String()
 }
 
 // Proxies returns the parsed trusted-proxy prefixes. The configuration

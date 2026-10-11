@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
 )
 
@@ -22,13 +23,9 @@ const maxLinkAttempts = 4
 // the blobs exist, so a sweep that starts after this read fails the
 // precondition, and one already running is caught by its doomed entry.
 func gcGuard(v meta.View, b *meta.Batch, ds ...blob.Digest) error {
-	for _, d := range ds {
-		if _, doomed := v.Get(doomedKey(d)); doomed {
-			return errRetry
-		}
+	if err := gc.Guard(v, b, ds...); err != nil {
+		return errRetry
 	}
-	epoch, _ := v.Get([]byte(gcEpochKey))
-	b.Require([]byte(gcEpochKey), epoch.Version) // version 0 requires it absent
 	return nil
 }
 
