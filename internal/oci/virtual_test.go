@@ -827,21 +827,6 @@ func TestVirtualPushUpstreamIndex(t *testing.T) {
 		ve.pullImage("local/library/nginx", img.Digest, img)
 		ve.pullImage("hub/library/nginx", img.Digest, img)
 	}
-
-	// As crane tag retags an image pulled for one platform, pushing only
-	// the index without checking for the platform images: those no member
-	// has cached are fetched from the proxy member's upstream, as a pull
-	// by digest would, with their blobs.
-	ve = newVirtualEnv(t)
-	index, platforms = ve.putUpstreamIndex("library/nginx", "1.27")
-	ve.pull("all/library/nginx", "1.27", index, nil)
-	ve.pullImage("all/library/nginx", platforms[0].Digest, platforms[0])
-	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/pinned", index, "Content-Type", mtOCIIndex), http.StatusCreated, "")
-	ve.pull("local/library/nginx", "pinned", index, nil)
-	for _, img := range platforms {
-		ve.pullImage("local/library/nginx", img.Digest, img)
-	}
-	ve.pull("all/library/nginx", "pinned", index, nil)
 }
 
 // TestVirtualPushUpstreamIndexRefused checks that a push of an index
@@ -887,25 +872,13 @@ func TestVirtualPushUpstreamIndexRefused(t *testing.T) {
 		})
 	}
 
-	// A platform image no member holds and the upstream does not have: the
-	// push reports it, and the other platform image, which the proxy
-	// member holds, is not linked either.
+	// A platform image no member holds: the push reports it, and the other
+	// platform image, which the proxy member holds, is not linked either.
 	ve := newVirtualEnv(t)
 	index, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
 	ve.pull("all/library/nginx", "1.27", index, nil)
 	ve.pullImage("all/library/nginx", platforms[0].Digest, platforms[0])
-	ve.hub.SetStatus(func(r *http.Request) int {
-		if strings.HasSuffix(r.URL.Path, "/manifests/"+platforms[1].Digest) {
-			return http.StatusNotFound
-		}
-		return 0
-	})
-	w := ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", index, "Content-Type", mtOCIIndex)
-	want(t, w, http.StatusBadRequest, codeManifestBlobUnknown)
-	if msg := errorMessage(t, w); !strings.Contains(msg, platforms[1].Digest) {
-		t.Errorf("the refusal does not name the platform image: %s", msg)
-	}
-	ve.hub.SetStatus(nil)
+	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", index, "Content-Type", mtOCIIndex), http.StatusBadRequest, codeManifestBlobUnknown)
 	want(t, ve.do("GET", "/v2/local/library/nginx/tags/list", nil), http.StatusNotFound, codeNameUnknown)
 	ve.pull("all/library/nginx", "1.27", index, nil)
 }
@@ -962,5 +935,33 @@ func TestVirtualPushRefusedRequest(t *testing.T) {
 		want(t, ve.do("GET", "/v2/local/library/nginx/tags/list", nil), http.StatusNotFound, codeNameUnknown)
 		ve.pull("all/library/nginx", "1.27", index, nil)
 		ve.pullImage("all/library/nginx", platforms[0].Digest, platforms[0])
+	}
+}
+
+// TestVirtualPushOwnedNameAsksNoUpstream checks that a push through a
+// virtual repository under a name a hosted member owns never asks an
+// upstream about it: neither for a platform image that was not pushed,
+// nor for the blobs of one a proxy member cached before the hosted member
+// came to own the name. Both pushes are refused.
+func TestVirtualPushOwnedNameAsksNoUpstream(t *testing.T) {
+	ve := newVirtualEnv(t)
+	want(t, ve.pushImage("all/team/app", "1.0", newImage("first-party", nil)), http.StatusCreated, "")
+	unpushed := newImage("unpushed platform", nil)
+	index := mustJSON(map[string]any{"schemaVersion": 2, "mediaType": mtOCIIndex,
+		"manifests": []any{desc(mtOCIManifest, unpushed.manifest)}})
+	want(t, ve.do("PUT", "/v2/all/team/app/manifests/2.0", index, "Content-Type", mtOCIIndex), http.StatusBadRequest, codeManifestBlobUnknown)
+	if hub, ghcr := ve.hub.Requests(), ve.ghcr.Requests(); len(hub)+len(ghcr) != 0 {
+		t.Errorf("a push under an owned name asked the upstreams: hub %v, ghcr %v", hub, ghcr)
+	}
+
+	upstreamIndex, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
+	for _, img := range platforms {
+		want(t, ve.do("HEAD", "/v2/all/library/nginx/manifests/"+img.Digest, nil), http.StatusOK, "")
+	}
+	want(t, ve.pushImage("all/library/nginx", "first-party", newImage("first-party nginx", nil)), http.StatusCreated, "")
+	before := len(ve.hub.Requests())
+	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", upstreamIndex, "Content-Type", mtOCIIndex), http.StatusBadRequest, codeManifestBlobUnknown)
+	if after := ve.hub.Requests(); len(after) != before {
+		t.Errorf("a push under an owned name asked the upstream: %v", after[before:])
 	}
 }

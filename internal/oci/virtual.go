@@ -76,11 +76,11 @@ import (
 //     the virtual repository was told exist: they are linked into the
 //     publishTo member, as a cross-repository mount would link them, a
 //     child manifest with what it references, whose blobs a proxy member
-//     holding it fetches first, as a pull would, as it does a child
-//     manifest no member has cached. Nothing is linked if the
-//     push is refused for the request or for what the manifest
-//     references; a push that then fails to store the manifest, such as
-//     with the disk full, may leave what was linked.
+//     holding it fetches first, as a pull would, if no hosted member owns
+//     the name; no upstream is asked about a name one owns. Nothing is
+//     linked if the push is refused for the request or for what the
+//     manifest references; a push that then fails to store the manifest,
+//     such as with the disk full, may leave what was linked.
 //
 // A virtual repository stores nothing of its own; it remembers in memory
 // only which member last served a manifest of each name.
@@ -94,9 +94,6 @@ const (
 	maxTagPages = 64
 	// maxHeldError bounds the body of a member's error response held back.
 	maxHeldError = 64 << 10
-	// maxLinkRounds bounds the rounds of fetches into proxy members that
-	// a push through a virtual repository makes before linking.
-	maxLinkRounds = 8
 )
 
 // errMiss means a member does not have what a request asks for.
@@ -209,12 +206,12 @@ func (h *Handler) virtualPublish(w http.ResponseWriter, r *http.Request, rn *rep
 // repository name rn, what the manifest that r pushes under ref
 // references that mrn does not hold but another member of the virtual
 // repository holds under the name, whether or not a hosted member owns
-// it: blobs, and child
-// manifests, each with what it references in turn. A client that checked
-// for them through the virtual repository was told they exist. A child
-// manifest no member has cached, and the blobs of one a proxy member
-// holds, are fetched into a proxy member first, as a pull would; if one
-// cannot be, the push is refused. It first refuses
+// it: blobs, and child manifests, each with what it references in turn.
+// A client that checked for them through the virtual repository was told
+// they exist. The blobs of a child manifest a proxy member holds are
+// fetched into it first, as a pull would, if it still serves the name,
+// which no hosted member owns then; if one cannot be, the push is
+// refused. It first refuses
 // the request as the push would, and links nothing unless the manifest's
 // every reference can then be held, with the size its descriptor gives,
 // so a push refused for the request or its references leaves no child
@@ -241,18 +238,22 @@ func (h *Handler) linkFromMembers(r *http.Request, rn, mrn *repoName, ref string
 		return nil
 	}
 	links, fetches, ok := h.planLinks(mrn, others, pm)
-	// Each round fetches what the manifests fetched before reference, so
-	// the rounds bound how deeply child manifests may nest.
-	for round := 0; len(fetches) > 0; round++ {
-		if round == maxLinkRounds {
-			return nil // the push reports what it lacks
-		}
+	if len(fetches) > 0 {
+		serving := h.sourcesOf(rn)
 		for _, f := range fetches {
-			if err := h.fetchForLink(r, others, f); err != nil {
-				return err
+			if !slices.ContainsFunc(serving, func(m repo.Member) bool { return m.Name == f.from.repo }) {
+				continue
+			}
+			if err := h.cacheBlob(r, f.from, f.d); err != nil {
+				if errors.Is(err, errPassThrough) {
+					err = errors.New("it is not to be cached")
+				}
+				return newError(http.StatusBadRequest, codeManifestBlobUnknown,
+					"blob %s of manifest %s, which the manifest references, could not be fetched from the upstream of %s: %v",
+					f.d, f.of, f.from.repo, err).withDetail(map[string]string{"digest": f.d.String()})
 			}
 		}
-		links, fetches, ok = h.planLinks(mrn, others, pm)
+		links, _, ok = h.planLinks(mrn, others, pm)
 	}
 	if !ok || len(links) == 0 {
 		return nil // the push reports what it lacks
@@ -290,53 +291,16 @@ type memberLink struct {
 }
 
 // memberFetch is blob d of child manifest of, which proxy member from
-// holds without having cached the blob, or, with from nil, child manifest
-// d, which no member has cached.
+// holds without having cached the blob.
 type memberFetch struct {
 	from *repoName
 	of   blob.Digest
 	d    blob.Digest
 }
 
-// fetchForLink fetches f into a proxy member, as a pull would: a blob
-// into the member that holds its manifest, and a manifest into the first
-// of the proxy members among others whose upstream has it under the name.
-func (h *Handler) fetchForLink(r *http.Request, others []*repoName, f memberFetch) error {
-	if f.from != nil {
-		err := h.cacheBlob(r, f.from, f.d)
-		if err == nil {
-			return nil
-		}
-		if errors.Is(err, errPassThrough) {
-			err = errors.New("it is not to be cached")
-		}
-		return newError(http.StatusBadRequest, codeManifestBlobUnknown,
-			"blob %s of manifest %s, which the manifest references, could not be fetched from the upstream of %s: %v",
-			f.d, f.of, f.from.repo, err).withDetail(map[string]string{"digest": f.d.String()})
-	}
-	var errs []string
-	for _, o := range others {
-		if o.cfg.proxy == nil {
-			continue
-		}
-		res, err := h.proxyManifestByDigest(r, o, f.d)
-		if err == nil && res.body != nil {
-			err = errors.New("it is not to be cached")
-		}
-		if err == nil {
-			return nil
-		}
-		errs = append(errs, fmt.Sprintf("from the upstream of %s: %v", o.repo, err))
-	}
-	return newError(http.StatusBadRequest, codeManifestBlobUnknown,
-		"manifest %s, which the manifest references, could not be fetched %s",
-		f.d, strings.Join(errs, "; ")).withDetail(map[string]string{"digest": f.d.String()})
-}
-
 // planLinks returns what linking into mrn the references of pm that
 // others hold takes, the blobs to fetch into proxy members for child
-// manifests they hold and the child manifests no member has cached, and
-// whether mrn would then hold every reference
+// manifests they hold, and whether mrn would then hold every reference
 // of pm with the size its descriptor gives.
 func (h *Handler) planLinks(mrn *repoName, others []*repoName, pm *parsedManifest) ([]memberLink, []memberFetch, bool) {
 	type holding struct {
@@ -346,7 +310,6 @@ func (h *Handler) planLinks(mrn *repoName, others []*repoName, pm *parsedManifes
 	var links []memberLink
 	var fetches []memberFetch
 	held := map[manifestRef]holding{}
-	proxied := slices.ContainsFunc(others, func(o *repoName) bool { return o.cfg.proxy != nil })
 	v := h.view()
 	defer v.Release()
 	// hold returns the size of ref, if mrn holds it or will once links
@@ -380,13 +343,11 @@ func (h *Handler) planLinks(mrn *repoName, others []*repoName, pm *parsedManifes
 			held[ref] = holding{m.Size, true}
 			return held[ref]
 		}
-		cached := false
 		for _, o := range others {
 			m, err := cachedManifest(v, o, ref.Digest)
 			if err != nil || m == nil {
 				continue
 			}
-			cached = true
 			all := true
 			for _, child := range m.Refs {
 				if hold(child).ok {
@@ -403,9 +364,6 @@ func (h *Handler) planLinks(mrn *repoName, others []*repoName, pm *parsedManifes
 				held[ref] = holding{m.Size, true}
 			}
 			break
-		}
-		if f := (memberFetch{d: ref.Digest}); !cached && proxied && !slices.Contains(fetches, f) {
-			fetches = append(fetches, f)
 		}
 		return held[ref]
 	}
