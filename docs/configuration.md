@@ -139,6 +139,26 @@ Repositories and permission grants declared here are read-only through the API.
       "type": "hosted"
     },
     {
+      "name": "npmjs",
+      "format": "npm",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://registry.npmjs.org/"
+      }
+    },
+    {
+      "name": "npm",
+      "format": "npm",
+      "type": "virtual",
+      "virtual": {
+        "members": [
+          "npm-local",
+          {"name": "npmjs", "exclude": ["@acme/*"]}
+        ],
+        "publishTo": "npm-local"
+      }
+    },
+    {
       "name": "goproxy",
       "format": "go",
       "type": "proxy",
@@ -198,7 +218,7 @@ Repositories and permission grants declared here are read-only through the API.
         "groups": ["ci"]
       },
       {
-        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all", "go-all"],
+        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all", "npmjs", "npm", "go-all"],
         "role": "read",
         "groups": ["ci"]
       },
@@ -273,27 +293,28 @@ Cached upstream content is stored as the upstream sent it and rewritten when ser
 | --- | --- | --- | --- |
 | `name` | string | required | The repository's name, which clients address it by: the path prefix of its images, as in `host/docker-local/team/app`, of its index, as in `host/pypi/pypi-local/simple/` or `host/cargo/cargo-local/`, of its npm registry URL, as in `host/npm/npm-local/`, of its Go module proxy, as in `host/go/go-all/`, of its files, as in `host/generic/files/tools/app.tar.gz`, or of its Maven repository, as in `host/maven/maven-releases/`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique across formats. |
 | `format` | string | required | Package format: `oci` for container images and OCI artifacts, `pypi` for Python packages, `generic` for arbitrary files addressed by path, `cargo` for Rust crates, `npm` for npm packages, `maven` for Java and other JVM artifacts, or `go` for Go modules. |
-| `type` | string | required | Repository type: `hosted`, which clients publish to, for every format but `go`; `proxy`, a read-only cache of an upstream registry, index, repository, or module proxy; or, for `pypi`, `generic`, `cargo`, `maven`, and `go`, `virtual`, one view merged from other repositories. `npm` repositories are hosted. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
+| `type` | string | required | Repository type: `hosted`, which clients publish to, for every format but `go`; `proxy`, a read-only cache of an upstream registry, index, repository, or module proxy; or, for `pypi`, `generic`, `cargo`, `npm`, `maven`, and `go`, `virtual`, one view merged from other repositories. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
 | `immutableTags` | bool | `false` | Hosted OCI repositories only. Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
 | `helmIndex` | bool | `false` | Hosted OCI repositories only. Also serve the Helm charts pushed to the repository as a classic Helm chart repository at `/helm/<name>/`; see [Helm chart repositories](#helm-chart-repositories). |
 | `proxy` | object | required for `proxy` | The upstream of a proxy repository; see below. Not allowed for other types. |
 | `virtual` | object | required for `virtual` | The members of a virtual repository; see below. Not allowed for other types. |
 | `generic` | object | none | Settings of a `generic` repository; see [generic files settings](#generic-files-settings). Not allowed for other formats. |
+| `npm` | object | none | Settings of an `npm` repository; see [npm settings](#npm-settings). Not allowed for other formats. |
 | `maven` | object | none | Maven repositories only: the format's settings, below. |
 | `maven.versionPolicy` | string | `"release"` | Hosted Maven repositories only. The versions the repository accepts: `release` for release versions only, `snapshot` for snapshot versions (ending in `SNAPSHOT`) only, or `mixed` for both; see [Maven](maven.md#hosted-repositories). |
 | `go` | object | none | Go proxy repositories only. The checksum database modules are verified against; see [Go repository settings](#go-repository-settings). |
 
 ### Proxy repository settings
 
-A proxy repository caches one upstream: a registry such as Docker Hub, ghcr.io, or quay.io, a Python package index such as pypi.org, a Cargo sparse index such as crates.io's, a Maven repository such as Maven Central, a Go module proxy such as proxy.golang.org, or, for generic files, any web server. [Proxy repositories](#proxy-repositories) describes how an OCI proxy serves pulls, and [PyPI](pypi.md#proxy-repositories), [generic files](generic.md#proxy-repositories), [Cargo](cargo.md#proxy-repositories), [Maven](maven.md#proxy-repositories), and [Go modules](go.md#proxy-repositories) how theirs do.
+A proxy repository caches one upstream: a registry such as Docker Hub, ghcr.io, or quay.io, a Python package index such as pypi.org, a Cargo sparse index such as crates.io's, an npm registry such as registry.npmjs.org, a Maven repository such as Maven Central, a Go module proxy such as proxy.golang.org, or, for generic files, any web server. [Proxy repositories](#proxy-repositories) describes how an OCI proxy serves pulls, and [PyPI](pypi.md#proxy-repositories), [generic files](generic.md#proxy-repositories), [Cargo](cargo.md#proxy-repositories), [npm](npm.md#proxy-repositories), [Maven](maven.md#proxy-repositories), and [Go modules](go.md#proxy-repositories) how theirs do.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `proxy.url` | string | required | For `oci`, the upstream registry's base URL, without a path, such as `"https://registry-1.docker.io"` or `"https://ghcr.io"`; for Docker Hub (`registry-1.docker.io`), a single-component image name gets the `library/` prefix, as Docker clients add it: `dockerhub/nginx` pulls `library/nginx`. For `pypi`, the upstream's simple index URL, the one you would give pip as `--index-url`, such as `"https://pypi.org/simple/"` or `"https://download.pytorch.org/whl/cpu"`; a URL without a path gets `/simple/`, so `"https://pypi.org"` works too. For `generic`, any base URL, such as `"https://github.com/acme/tool/releases/download/"`: a request for `<path>` fetches `<url>/<path>`. For `cargo`, the upstream's sparse index URL, as you would give Cargo, such as `"sparse+https://index.crates.io/"`; the `sparse+` prefix is optional. For `maven`, the upstream repository's base URL, such as `"https://repo.maven.apache.org/maven2"` for Maven Central. For `go`, the upstream module proxy's URL, as `GOPROXY` would name it, such as `"https://proxy.golang.org"`; it may have a path. |
-| `proxy.username` | string | none | User name for the upstream, such as a Docker Hub account for its higher pull limits. Requires `passwordFile`. A Cargo registry that challenges for a token gets the password file's token alone, as Cargo sends it; set any user name. See the warning below. |
-| `proxy.passwordFile` | string | none | Absolute path of a file holding the upstream password or access token, such as a mounted Kubernetes Secret. One trailing newline is ignored. flint reads it at startup, failing to start if it cannot, and again whenever it authenticates to the upstream, so a rotated secret takes effect without a restart. It is never logged. Requires `username`. |
-| `proxy.revalidateAfter` | duration | `"5m"` | How long a cached tag, tag listing, referrers listing, or document, such as a PyPI project page, a generic file without `generic.immutable`, a Cargo index file, a `maven-metadata.xml`, or a Go module's version list, is served before the upstream is asked again. Must be positive. |
+| `proxy.url` | string | required | For `oci`, the upstream registry's base URL, without a path, such as `"https://registry-1.docker.io"` or `"https://ghcr.io"`; for Docker Hub (`registry-1.docker.io`), a single-component image name gets the `library/` prefix, as Docker clients add it: `dockerhub/nginx` pulls `library/nginx`. For `pypi`, the upstream's simple index URL, the one you would give pip as `--index-url`, such as `"https://pypi.org/simple/"` or `"https://download.pytorch.org/whl/cpu"`; a URL without a path gets `/simple/`, so `"https://pypi.org"` works too. For `generic`, any base URL, such as `"https://github.com/acme/tool/releases/download/"`: a request for `<path>` fetches `<url>/<path>`. For `cargo`, the upstream's sparse index URL, as you would give Cargo, such as `"sparse+https://index.crates.io/"`; the `sparse+` prefix is optional. For `npm`, the upstream's registry URL, as you would give npm as `registry`, such as `"https://registry.npmjs.org/"`; it may have a path, as another registry's repository URL does. For `maven`, the upstream repository's base URL, such as `"https://repo.maven.apache.org/maven2"` for Maven Central. For `go`, the upstream module proxy's URL, as `GOPROXY` would name it, such as `"https://proxy.golang.org"`; it may have a path. |
+| `proxy.username` | string | none | User name for the upstream, such as a Docker Hub account for its higher pull limits. Requires `passwordFile`. A Cargo registry that challenges for a token gets the password file's token alone, as Cargo sends it; set any user name. For `npm`, the credentials are sent with every request to the upstream's host, as npm sends them, since a registry may answer a request without them `404` rather than ask for them. See the warning below. |
+| `proxy.passwordFile` | string | none | Absolute path of a file holding the upstream password or access token, such as a mounted Kubernetes Secret. One trailing newline is ignored. flint reads it at startup, failing to start if it cannot, and again whenever it authenticates to the upstream, so a rotated secret takes effect without a restart. It is never logged. Requires `username`, except for `npm`, where a password file without a user name holds a token, sent as `Authorization: Bearer`. |
+| `proxy.revalidateAfter` | duration | `"5m"` | How long a cached tag, tag listing, referrers listing, or document, such as a PyPI project page, a generic file without `generic.immutable`, a Cargo index file, an npm packument, a `maven-metadata.xml`, or a Go module's version list, is served before the upstream is asked again. Must be positive. |
 | `proxy.sizeLimit` | size | none | Cap the content cached in this repository. Over the cap, the least recently pulled content is evicted. Without it, everything is cached forever. For `generic`, only with `generic.immutable`, since only files cached forever count against it. |
 | `proxy.maxConcurrent` | integer | `64` | Requests the repository may have in flight to its upstream at once, each from when it is sent until its response has been read; further requests wait, and the wait does not count against their timeouts or mark the upstream unavailable. Keeps a burst of client requests, such as a large install, from turning into a rate-limit ban. |
 | `proxy.allowHosts` | array of strings | none | Hosts besides the upstream's own that the repository may fetch from when upstream content or a redirect points at them: a host name or IP address, optionally with a port (`"cdn.example.com"`, `"10.0.0.7:9000"`), or `"*.example.com"` for every subdomain of `example.com`. See [the fetch policy](#upstream-fetch-policy). |
@@ -320,6 +341,7 @@ A proxy repository fetches only from its upstream's host and the hosts its forma
 - **PyPI** indexes link their files: the index's own host, `files.pythonhosted.org` for `pypi.org`, and `test-files.pythonhosted.org` for `test.pypi.org`.
 - **Generic** proxies fetch only from the upstream's own host. A download site that redirects to another host, as GitHub release downloads redirect to `release-assets.githubusercontent.com` (and, for older releases, `objects.githubusercontent.com`), needs that host in `proxy.allowHosts`.
 - **Cargo** indexes name where their crates are downloaded and their web API in `config.json`: the index's own host, and `static.crates.io` and `crates.io` for `index.crates.io`.
+- **npm** registries name each version's tarball URL in its packument: only the registry's own host, which serves registry.npmjs.org's tarballs. A registry whose tarballs are on another host needs that host in `proxy.allowHosts`.
 - **Maven** repositories redirect some downloads: the repository's own host, `plugins-artifacts.gradle.org` for `plugins.gradle.org`, and `dl.google.com` for `maven.google.com`.
 - **Go** module proxies serve everything from their own host; a Go proxy repository also fetches its checksum database from the host of `go.sumdb.url` (default `sum.golang.org`), which may resolve to an internal address since the configuration names it, and which never gets the upstream credentials.
 - `proxy.allowHosts` adds further hosts.
@@ -328,7 +350,7 @@ Redirects are followed only to allowed hosts. flint refuses to connect to loopba
 
 ### Virtual repository settings
 
-A virtual repository serves one index or repository merged from an ordered list of hosted and proxy repositories of its format, so clients need a single URL. `pypi`, `generic`, `cargo`, `maven`, and `go` have virtual repositories; [PyPI](pypi.md#virtual-repositories), [Cargo](cargo.md#virtual-repositories), [Maven](maven.md#virtual-repositories), and [Go modules](go.md#virtual-repositories) describe how they merge, and [generic files](generic.md#virtual-repositories) how a generic one serves each path from the first member that has it.
+A virtual repository serves one index or repository merged from an ordered list of hosted and proxy repositories of its format, so clients need a single URL. `pypi`, `generic`, `cargo`, `npm`, `maven`, and `go` have virtual repositories; [PyPI](pypi.md#virtual-repositories), [Cargo](cargo.md#virtual-repositories), [npm](npm.md#virtual-repositories), [Maven](maven.md#virtual-repositories), and [Go modules](go.md#virtual-repositories) describe how they merge, and [generic files](generic.md#virtual-repositories) how a generic one serves each path from the first member that has it.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -337,9 +359,9 @@ A virtual repository serves one index or repository merged from an ordered list 
 | `virtual.members[].include` | array of strings | all names | Package names, or patterns in which `*` matches any run of characters, that the member is consulted for. Without it, the member is consulted for every name. |
 | `virtual.members[].exclude` | array of strings | none | Package names or patterns the member is never consulted for, even if `include` matches them. |
 | `virtual.publishTo` | string | none | A hosted member that receives what clients publish to the virtual repository, so one URL serves both installing and publishing. A publish of a package whose name the member's `include` and `exclude` filters do not admit is refused with `403`, naming the member and the filter, since the virtual repository would not serve it. Without it, the virtual repository refuses uploads. |
-| `virtual.dependencyConfusionProtection` | bool | `true` | Once a hosted member owns a package name, never serve that name from a proxy member, so a package published upstream under the same name can never replace or mix with the first-party one. A hosted repository owns a name from the first upload of a file of it, or the first publish of a crate, also after everything is deleted. Only a hosted member whose filters admit a name can own it. |
+| `virtual.dependencyConfusionProtection` | bool | `true` | Once a hosted member owns a package name, never serve that name from a proxy member, so a package published upstream under the same name can never replace or mix with the first-party one. A hosted repository owns a name from the first upload of a file of it, or the first publish of a crate or an npm package, also after everything is deleted. Only a hosted member whose filters admit a name can own it. |
 
-Filters are compared with package names after the format's normalization, as clients may spell a name several ways: for PyPI, case and runs of `-`, `_`, and `.` do not matter, so `Acme_*` and `acme-*` are the same filter; for Cargo, case does not matter and `-` and `_` are equal; Go module paths are compared exactly, so `corp.example.com/*` covers every module below `corp.example.com/`. For generic files, a filter matches a file's path, exactly, such as `"internal/*"`. For Maven, the name is `groupId:artifactId`, with `:` and `.` as one separator, so `com.acme.*` matches every artifact of group `com.acme` and its subgroups. A pattern is 1 to 256 printable characters other than space.
+Filters are compared with package names after the format's normalization, as clients may spell a name several ways: for PyPI, case and runs of `-`, `_`, and `.` do not matter, so `Acme_*` and `acme-*` are the same filter; for Cargo, case does not matter and `-` and `_` are equal; for npm, names are compared exactly, so `@acme/*` is a whole scope; Go module paths are compared exactly, so `corp.example.com/*` covers every module below `corp.example.com/`. For generic files, a filter matches a file's path, exactly, such as `"internal/*"`. For Maven, the name is `groupId:artifactId`, with `:` and `.` as one separator, so `com.acme.*` matches every artifact of group `com.acme` and its subgroups. A pattern is 1 to 256 printable characters other than space.
 
 > **Recommendation: exclude your internal names from proxy members.**
 > Dependency-confusion protection covers a name only once a hosted member owns it. Until your first upload of a new internal package, or while the hosted member that has it is left out by its filters, a public package of the same name would be served from a proxy member. An `exclude` pattern for every internal prefix or scope on each proxy member, such as `"exclude": ["acme-*"]`, keeps those names out of the upstream for good.
@@ -356,6 +378,14 @@ A `generic` repository may have a `generic` object; [generic files](generic.md) 
 | --- | --- | --- | --- |
 | `generic.allowOverwrite` | bool | `false` | Hosted repositories only. Let a client with `write` replace a file with different content, and one with `delete` delete a file without leaving a tombstone, so its path can be used again: for scratch areas and "latest build" directories. Without it, files are immutable: uploading different content to a file's path is refused with `409`, and a deleted file's path can never be used again. |
 | `generic.immutable` | bool | `false` | Proxy repositories only. Cache files fetched from the upstream forever and never revalidate them, as suits release download sites whose files never change. Without it, a cached file is revalidated with a conditional request after `proxy.revalidateAfter`, since flint cannot know whether a path of an arbitrary upstream changes. |
+
+### npm settings
+
+An `npm` repository may have an `npm` object; [npm](npm.md) describes the repositories.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `npm.forwardAudit` | bool | `true` | Proxy and virtual repositories only. Forward `npm audit`'s requests to the upstream: a proxy repository's own, and a virtual repository's proxy members', each with only the package names the member may serve and no hosted member owns. Set it to `false` to answer audits with no advisories, so no package name leaves the network through `npm audit`. |
 
 ### Permissions
 
@@ -423,7 +453,7 @@ Cargo repositories are served under `/cargo/<repository>/` over Cargo's sparse r
 ### npm repositories
 
 An npm repository's registry URL, the one to give npm, pnpm, Yarn, and Bun, is `/npm/<repository>/`; packuments, tarballs, dist-tags, and the rest of the npm registry API are below it.
-[npm](npm.md) describes configuring each client, publishing, dist-tags, deprecating, unpublishing, and `npm login`.
+[npm](npm.md) describes configuring each client, publishing, dist-tags, deprecating, unpublishing, `npm login`, and how hosted, proxy, and virtual repositories behave.
 Tarball URLs in packuments are absolute and use [`publicURL`](#public-url), since lockfiles record them.
 
 ### Maven repositories
@@ -438,7 +468,7 @@ Go repositories are served under `/go/<repository>/`, the URL to give the go com
 
 ### Proxy repositories
 
-This section describes OCI proxy repositories; [PyPI](pypi.md#proxy-repositories), [Cargo](cargo.md#proxy-repositories), [Maven](maven.md#proxy-repositories), and [Go modules](go.md#proxy-repositories) describe theirs, which follow the same rules for caching, outages, disk space, and size limits.
+This section describes OCI proxy repositories; [PyPI](pypi.md#proxy-repositories), [Cargo](cargo.md#proxy-repositories), [npm](npm.md#proxy-repositories), [Maven](maven.md#proxy-repositories), and [Go modules](go.md#proxy-repositories) describe theirs, which follow the same rules for caching, outages, disk space, and size limits.
 
 A proxy repository serves pulls of its upstream's images, such as `registry.example.com/dockerhub/library/nginx:1.27` for Docker Hub's `nginx:1.27`, and caches what it serves in the same content-addressed store as hosted repositories, so each blob is stored once however many repositories use it.
 
@@ -515,7 +545,7 @@ Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime
 | `flint_maven_deploys_total{repository}` | Files deployed to hosted Maven repositories; identical re-uploads are not counted. |
 | `flint_maven_deploy_bytes_total{repository}` | Bytes of files deployed to hosted Maven repositories. |
 | `flint_virtual_member_skips_total{repository,member}` | Members of virtual repositories left out of a response because they failed, such as a proxy whose upstream could not be reached with nothing cached. |
-| `flint_proxy_requests_total{repository,result}` | Pulls from proxy repositories, by result: `hit` (served from the cache), `revalidated` (served after the upstream confirmed a tag, listing, project page, generic file, index file, or `maven-metadata.xml`), `fetched` (fetched from the upstream and cached), `passthrough` (fetched without caching, under disk pressure, over the size limit, or for a PyPI file whose index entry has no sha256 digest or a Maven file without a checksum, and Cargo searches), and `stale` (served from the cache because the upstream failed). |
+| `flint_proxy_requests_total{repository,result}` | Pulls from proxy repositories, by result: `hit` (served from the cache), `revalidated` (served after the upstream confirmed a tag, listing, project page, generic file, index file, packument, or `maven-metadata.xml`), `fetched` (fetched from the upstream and cached), `passthrough` (fetched without caching, under disk pressure, over the size limit, or for a PyPI file whose index entry has no sha256 digest or a Maven file without a checksum, and Cargo and npm searches and npm audits), and `stale` (served from the cache because the upstream failed). |
 | `flint_proxy_upstream_errors_total{repository}` | Upstream requests that failed: unreachable, server errors, denied access, failed authentication, or content that did not match its digest. A blob fetch shared by several clients counts once. |
 | `flint_proxy_upstream_bytes_total{repository}` | Bytes fetched from upstream registries, indexes, and web servers. |
 | `flint_proxy_fetches_in_flight` | Blobs and files being fetched from upstreams. |

@@ -120,6 +120,26 @@
       "type": "hosted"
     },
     {
+      "name": "npmjs",
+      "format": "npm",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://registry.npmjs.org/"
+      }
+    },
+    {
+      "name": "npm",
+      "format": "npm",
+      "type": "virtual",
+      "virtual": {
+        "members": [
+          "npm-local",
+          {"name": "npmjs", "exclude": ["@acme/*"]}
+        ],
+        "publishTo": "npm-local"
+      }
+    },
+    {
       "name": "goproxy",
       "format": "go",
       "type": "proxy",
@@ -179,7 +199,7 @@
         "groups": ["ci"]
       },
       {
-        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all", "go-all"],
+        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all", "npmjs", "npm", "go-all"],
         "role": "read",
         "groups": ["ci"]
       },

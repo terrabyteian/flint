@@ -48,7 +48,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 16 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 18 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -75,9 +75,15 @@ func TestExampleConfig(t *testing.T) {
 	if r := c.Repositories[12]; r.Format != FormatNPM || r.Type != TypeHosted {
 		t.Errorf("unexpected npm repository: %+v", r)
 	}
-	if g := c.Repositories[14].Go; c.Repositories[13].Format != FormatGo || g == nil || len(g.NoSumCheck) != 1 ||
-		GoSumDBKey(g) != sumdb.DefaultKey || c.Repositories[15].Virtual == nil || len(c.Repositories[15].Virtual.Members[0].Include) != 1 {
-		t.Errorf("unexpected Go repositories: %+v", c.Repositories[13:])
+	if p := c.Repositories[13].Proxy; c.Repositories[13].Format != FormatNPM || p == nil || NPMRegistryURL(p.URL) != "https://registry.npmjs.org/" {
+		t.Errorf("unexpected npm proxy repository: %+v", c.Repositories[13])
+	}
+	if v := c.Repositories[14].Virtual; v == nil || v.PublishTo != "npm-local" || len(v.Members) != 2 || v.Members[1].Exclude[0] != "@acme/*" {
+		t.Errorf("unexpected npm virtual repository: %+v", c.Repositories[14])
+	}
+	if g := c.Repositories[16].Go; c.Repositories[15].Format != FormatGo || g == nil || len(g.NoSumCheck) != 1 ||
+		GoSumDBKey(g) != sumdb.DefaultKey || c.Repositories[17].Virtual == nil || len(c.Repositories[17].Virtual.Members[0].Include) != 1 {
+		t.Errorf("unexpected Go repositories: %+v", c.Repositories[15:])
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)

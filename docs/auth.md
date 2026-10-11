@@ -50,7 +50,7 @@ Pulling through a [virtual repository](configuration.md#virtual-repository-setti
 
 For PyPI repositories, installing is pulling and publishing is pushing; yanking and deleting files need `delete`.
 For Cargo repositories, building is pulling, and publishing and yanking are pushing, which need `write`; deleting a version needs `delete`.
-For npm repositories, installing is pulling; publishing, changing dist-tags, and deprecating are pushing; unpublishing needs `delete`.
+For npm repositories, installing is pulling; publishing, changing dist-tags, and deprecating are pushing; unpublishing needs `delete`. Through a virtual repository, each change needs its role on the virtual repository's `publishTo` member, where it is made.
 
 For generic files repositories, downloading and listing are pulling, uploading a file is pushing, and deleting one needs `delete`; in a repository with `generic.allowOverwrite`, replacing a file with different content needs only `write`.
 
