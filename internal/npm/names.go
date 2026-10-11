@@ -130,17 +130,44 @@ func validTag(s string) bool {
 			return false
 		}
 	}
-	if (c == 'v' || c == 'V') && len(s) > 1 && s[1] >= '0' && s[1] <= '9' {
-		return false // v1, v1.2.x
-	}
 	return !rangeLike(s)
 }
 
-// rangeLike reports whether s is made of "x", "X", digits, and dots
-// alone, such as "x" or "x.x", which npm reads as a version range.
+// rangeLike reports whether s is a version range as npm reads one in a
+// tag's place: any "v"s, then one to three dot-separated parts, each
+// digits or "x", the third optionally followed by a pre-release, such as
+// "x", "v1", "v1.2.x", or "v1.0.0-beta". "v1-maint" and "V1" are not.
 func rangeLike(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; c != 'x' && c != 'X' && c != '.' && (c < '0' || c > '9') {
+	s = strings.TrimLeft(s, "v")
+	for part := 0; part < 3; part++ {
+		n := 0
+		if s != "" && (s[0] == 'x' || s[0] == 'X') {
+			n = 1
+		} else {
+			for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+				n++
+			}
+		}
+		if n == 0 {
+			return false
+		}
+		s = s[n:]
+		if s == "" {
+			return true
+		}
+		if part < 2 {
+			if s[0] != '.' {
+				return false
+			}
+			s = s[1:]
+		}
+	}
+	pre, ok := strings.CutPrefix(s, "-")
+	if !ok {
+		return false
+	}
+	for _, id := range strings.Split(pre, ".") {
+		if id == "" || strings.ContainsRune(id, '_') {
 			return false
 		}
 	}

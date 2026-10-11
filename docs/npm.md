@@ -178,7 +178,7 @@ npm dist-tag rm @acme/widget stable
 - Publishing points the tag given with `--tag`, by default `latest`, at the version, and `latest` too when the package has none, so a package always has `latest` while it has a version.
 - Setting and removing a tag needs `write`. A tag cannot point at a version that is not published, and only removing it, never setting it to an empty version, takes it away.
 - `latest` cannot be removed, only pointed at another version.
-- A tag is a letter followed by letters, digits, `.`, `_`, and `-`, and must not look like a version or a version range, such as `v1` or `x`, which npm would read as one.
+- A tag is a letter followed by letters, digits, `.`, `_`, and `-`, and must not be a version or a version range, such as `v1`, `v1.2.x`, or `x`, which npm would read as one; `v1-maint` is a tag.
 
 ## Deprecating
 

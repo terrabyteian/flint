@@ -77,12 +77,13 @@ func TestVersions(t *testing.T) {
 }
 
 func TestTags(t *testing.T) {
-	for _, s := range []string{"latest", "next", "beta", "v-next", "lts.2024", "Canary_1"} {
+	for _, s := range []string{"latest", "next", "beta", "v-next", "lts.2024", "Canary_1",
+		"v1-maint", "v2-lts", "v1.x-maint", "v1beta", "V1", "V1-old", "V2.x", "xx", "x1", "v1.", "v1.2.3.4", "v1.2-3", "v1.2.3-be_ta", "v1.2.3-a..b"} {
 		if !validTag(s) {
 			t.Errorf("%q is not a tag", s)
 		}
 	}
-	for _, s := range []string{"", "1.0.0", "1", "v1", "V2.x", "x", "X.x", "-a", "a b", "a/b", "é", strings.Repeat("a", 129)} {
+	for _, s := range []string{"", "1.0.0", "1", "v1", "v10", "vv1", "vx", "v1.2", "v1.2.x", "v1.0.0", "v1.2.3-beta.1", "v1.x.x-beta", "x", "X.x", "-a", "a b", "a/b", "é", strings.Repeat("a", 129)} {
 		if validTag(s) {
 			t.Errorf("%q is a tag", s)
 		}

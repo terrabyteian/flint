@@ -370,7 +370,7 @@ func TestReadmeOfLatest(t *testing.T) {
 	}{
 		{"1.0.0", "# one", "", "# one"},
 		{"2.0.0", "# two", "", "# two"},
-		{"1.0.5", "# one, maintained", "maint", "# two"},
+		{"1.0.5", "# one, maintained", "v1-maint", "# two"},
 		{"3.0.0-rc.1", "# three", "next", "# two"},
 		{"2.1.0", "", "", ""},
 	} {
