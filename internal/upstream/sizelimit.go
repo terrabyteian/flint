@@ -32,6 +32,7 @@ type Limits struct {
 	meta      meta.Store
 	m         *Metrics
 	format    string
+	formatOf  func(string) string
 	pulledKey func([]byte) []byte
 	evictMore func(v meta.View, b *meta.Batch, repo, key string, rec meta.Record)
 	now       func() time.Time
@@ -48,8 +49,11 @@ type LimitsOptions struct {
 	// Metrics, if not nil, receives the cached bytes and evictions.
 	Metrics *Metrics
 	// Format names the format in the origins of the batches, as
-	// "<format>.proxy.pulled" and "<format>.proxy.evict".
-	Format string
+	// "<format>.proxy.pulled" and "<format>.proxy.evict". FormatOf, if
+	// not nil, names it by repository instead, for repositories of
+	// several formats.
+	Format   string
+	FormatOf func(repo string) string
 	// PulledKey returns the key that holds the last-pull time of the
 	// item whose record is at key. Required.
 	PulledKey func(key []byte) []byte
@@ -63,7 +67,7 @@ type LimitsOptions struct {
 
 // NewLimits returns a Limits without repositories.
 func NewLimits(opts LimitsOptions) *Limits {
-	l := &Limits{meta: opts.Meta, m: opts.Metrics, format: opts.Format, pulledKey: opts.PulledKey,
+	l := &Limits{meta: opts.Meta, m: opts.Metrics, format: opts.Format, formatOf: opts.FormatOf, pulledKey: opts.PulledKey,
 		evictMore: opts.EvictMore, now: opts.Now, kick: make(chan struct{}, 1)}
 	if l.now == nil {
 		l.now = time.Now
@@ -95,6 +99,13 @@ func (l *Limits) gauge(c *CacheTracker) {
 	if l.m != nil {
 		l.m.CachedBytes.With(c.Repo()).Set(float64(c.Size()))
 	}
+}
+
+func (l *Limits) formatName(repo string) string {
+	if l.formatOf != nil {
+		return l.formatOf(repo)
+	}
+	return l.format
 }
 
 // Kick asks for an eviction.
@@ -172,7 +183,7 @@ func (l *Limits) Flush(ctx context.Context) error {
 			for _, k := range chunk {
 				b.Put(l.pulledKey([]byte(k)), EncodePulled(dirty[k]))
 			}
-			b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: l.format + ".proxy.pulled", Target: c.Repo()})
+			b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: l.formatName(c.Repo()) + ".proxy.pulled", Target: c.Repo()})
 			if _, err := l.meta.Commit(ctx, &b); err != nil {
 				c.MarkDirty(chunk)
 				c.MarkDirty(keys)
@@ -227,7 +238,7 @@ func (l *Limits) evict(ctx context.Context, c *CacheTracker, keys []string) erro
 	if len(gone) == len(keys) {
 		return nil
 	}
-	b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: l.format + ".proxy.evict",
+	b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: l.formatName(c.Repo()) + ".proxy.evict",
 		Target: c.Repo() + ": least recently pulled content over the size limit"})
 	if _, err := l.meta.Commit(ctx, &b); err != nil {
 		if errors.Is(err, meta.ErrConflict) {

@@ -90,7 +90,15 @@ func NewPathCache(opts PathCacheOptions) *PathCache {
 		pc.now = time.Now
 	}
 	pc.neg = NewNegativeCache(pc.now)
-	pc.limits = NewLimits(LimitsOptions{Meta: pc.meta, Metrics: pc.m, Format: "cache", PulledKey: pulledKey, Now: pc.now})
+	pc.limits = NewLimits(LimitsOptions{Meta: pc.meta, Metrics: pc.m, PulledKey: pulledKey, Now: pc.now,
+		FormatOf: func(repo string) string {
+			pc.mu.Lock()
+			defer pc.mu.Unlock()
+			if rp := pc.repos[repo]; rp != nil {
+				return rp.Format
+			}
+			return "proxy"
+		}})
 	return pc
 }
 
@@ -99,7 +107,8 @@ type PathRepo struct {
 	// Name is the repository's name.
 	Name string
 	// Format names the format, for the origins of the batches that cache
-	// content, as "<format>.proxy.cache".
+	// content, save pull times, and evict, as "<format>.proxy.cache",
+	// "<format>.proxy.pulled", and "<format>.proxy.evict".
 	Format string
 	// Client is the repository's upstream client.
 	Client *Client
@@ -143,11 +152,13 @@ func (pc *PathCache) Add(rp *PathRepo) error {
 		if failure != nil {
 			return failure
 		}
-		pc.limits.Add(rp.tracker)
 	}
 	pc.mu.Lock()
 	pc.repos[rp.Name] = rp
 	pc.mu.Unlock()
+	if rp.tracker != nil {
+		pc.limits.Add(rp.tracker)
+	}
 	return nil
 }
 
