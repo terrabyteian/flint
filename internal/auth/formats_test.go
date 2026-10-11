@@ -209,13 +209,15 @@ func TestVirtualPermissions(t *testing.T) {
       {"repositories": ["npm-all"], "role": "read", "users": ["reader", "publisher", "deleter"]},
       {"repositories": ["npm-local"], "role": "write", "users": ["publisher"]},
       {"repositories": ["npm-local"], "role": "delete", "users": ["deleter"]},
-      {"repositories": ["npm-local"], "role": "delete", "users": ["member-only"]}
+      {"repositories": ["npm-local"], "role": "delete", "users": ["member-only"]},
+      {"repositories": ["*"], "role": "delete", "users": ["everywhere"]}
     ]
   }
 }`)
-	for _, u := range []string{"reader", "publisher", "deleter", "member-only"} {
+	for _, u := range []string{"reader", "publisher", "deleter", "member-only", "everywhere"} {
 		e.addUser(u, u+"-password", false)
 	}
+	e.addUser("root", "root-password", true)
 	tests := []struct {
 		user, action, publishTo string
 		want                    int
@@ -235,6 +237,13 @@ func TestVirtualPermissions(t *testing.T) {
 		{"member-only", "push", "npm-local", http.StatusOK},
 		{"member-only", "pull,push", "npm-local", http.StatusForbidden},
 		{"", "pull", "npm-local", http.StatusUnauthorized},
+		// Without publishTo, publishing is refused to everyone.
+		{"root", "push", "npm-local", http.StatusOK},
+		{"root", "push", "-", http.StatusForbidden},
+		{"root", "delete", "-", http.StatusForbidden},
+		{"everywhere", "pull,push", "npm-local", http.StatusOK},
+		{"everywhere", "push", "-", http.StatusForbidden},
+		{"everywhere", "delete", "-", http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		req := request{path: "/virtual/basic/" + tt.action + "/npm-all/" + tt.publishTo}
@@ -262,6 +271,13 @@ func TestVirtualPermissions(t *testing.T) {
 	}
 	if a.Allowed(r, "npm-local", ActionPull) {
 		t.Error("reader may read the member directly")
+	}
+	for _, u := range []string{"root", "everywhere"} {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.SetBasicAuth(u, u+"-password")
+		if !a.AllowedVirtual(r, "npm-all", "npm-local", ActionPush) || a.AllowedVirtual(r, "npm-all", "", ActionPush) || a.AllowedVirtual(r, "npm-all", "", ActionDelete) {
+			t.Errorf("AllowedVirtual for %s without publishTo", u)
+		}
 	}
 }
 

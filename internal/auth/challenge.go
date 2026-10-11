@@ -191,11 +191,12 @@ func (a *Authorizer) authorize(w http.ResponseWriter, r *http.Request, base bool
 	return true
 }
 
-// permits reports whether the credentials allow every check.
+// permits reports whether the credentials allow every check. A check on
+// no repository is allowed to no one.
 func (s *Service) permits(c credentials, cs []check) bool {
 	for _, ch := range cs {
 		need, ok := actionRole(ch.action)
-		if !ok || s.Role(c.principal, ch.repo) < need {
+		if !ok || ch.repo == "" || s.Role(c.principal, ch.repo) < need {
 			return false
 		}
 		if c.kind == credJWT && !c.jwt.allows(ch.repo, ch.action) {
