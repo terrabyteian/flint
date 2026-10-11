@@ -4,9 +4,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/meta"
 )
 
 // Metadata keys. Every key starts with the package's namespace, and parts
@@ -218,10 +220,11 @@ func decodeName(b []byte) (string, error) {
 const (
 	kindHosted    = 1 // a live hosted file
 	kindTombstone = 2 // a deleted hosted file, whose name can never be used again
-	kindCached    = 3 // a file a proxy repository cached
+	kindCached    = 3 // a file or core-metadata file a proxy repository cached
 )
 
-// fileRecord is a hosted file, a tombstone, or a cached proxy file.
+// fileRecord is a hosted file, a tombstone, or a file or core-metadata
+// file a proxy repository cached.
 // Tombstones keep only Kind, Project, Version, and Deleted; cached files
 // only Kind, Project, Digest, and Size.
 type fileRecord struct {
@@ -292,23 +295,6 @@ func decodeFile(b []byte) (*fileRecord, error) {
 	return f, nil
 }
 
-// blobRecord is a blob a proxy repository cached: a core-metadata file.
-type blobRecord struct {
-	Digest blob.Digest
-	Size   int64
-}
-
-func (r *blobRecord) encode() []byte { return newEnc().digest(r.Digest).uvarint(uint64(r.Size)) }
-
-func decodeBlobRecord(b []byte) (*blobRecord, error) {
-	d := newDec(b)
-	r := &blobRecord{Digest: d.digest(), Size: int64(d.uvarint())}
-	if err := d.done(); err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
 // pageRecord is a project page a proxy repository cached: a blob holding
 // the page in flint's own form (see pageDoc), and the upstream's ETag for
 // a conditional revalidation.
@@ -330,4 +316,48 @@ func decodePage(b []byte) (*pageRecord, error) {
 		return nil, err
 	}
 	return p, nil
+}
+
+// References calls fn, until it returns an error, with the digest of each
+// blob that v links into a PyPI repository: every hosted file and its
+// core metadata, and every file, core-metadata file, and project page a
+// proxy repository cached. A tombstone links none. A digest linked in
+// several places is reported once for each.
+func References(v meta.View, fn func(blob.Digest) error) error {
+	var err error
+	report := func(ds ...blob.Digest) bool {
+		for _, d := range ds {
+			if !d.IsZero() {
+				if err = fn(d); err != nil {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	for _, ns := range []string{nsFile, nsMetadata} {
+		v.Scan([]byte(ns), nil, func(k []byte, rec meta.Record) bool {
+			f, derr := decodeFile(rec.Value)
+			if derr != nil {
+				err = fmt.Errorf("pypi: metadata key %q: %w", k, derr)
+				return false
+			}
+			if f.Kind == kindTombstone {
+				return true
+			}
+			return report(f.Digest, f.Meta)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	v.Scan([]byte(nsPage), nil, func(k []byte, rec meta.Record) bool {
+		p, derr := decodePage(rec.Value)
+		if derr != nil {
+			err = fmt.Errorf("pypi: metadata key %q: %w", k, derr)
+			return false
+		}
+		return report(p.Digest)
+	})
+	return err
 }

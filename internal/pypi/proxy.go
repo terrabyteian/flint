@@ -354,18 +354,14 @@ func (h *Handler) upstreamError(rp *repository, what string, err error) error {
 	return errorf(http.StatusBadGateway, "the upstream index %s failed: %v", host, err)
 }
 
-// cachedBlob returns the blob a proxy repository cached under key k, a
-// file record of project or, if metadata, a core-metadata record.
-func (h *Handler) cachedBlob(k []byte, project string, metadata bool) (blob.Digest, int64, bool) {
+// cachedBlob returns the blob a proxy repository cached for project under
+// key k, a file or core-metadata key.
+func (h *Handler) cachedBlob(k []byte, project string) (blob.Digest, int64, bool) {
 	v := h.view()
 	defer v.Release()
 	rec, ok := v.Get(k)
 	if !ok {
 		return blob.Digest{}, 0, false
-	}
-	if metadata {
-		b, err := decodeBlobRecord(rec.Value)
-		return b.Digest, b.Size, err == nil
 	}
 	f, err := decodeFile(rec.Value)
 	if err != nil || f.Kind != kindCached || f.Project != project {
@@ -380,7 +376,7 @@ func (h *Handler) cachedBlob(k []byte, project string, metadata bool) (blob.Dige
 func (h *Handler) proxyFile(w http.ResponseWriter, r *http.Request, rp *repository, project, filename string, f *file) {
 	ctx := r.Context()
 	fk := fileKey(rp.name, filename)
-	if d, size, ok := h.cachedBlob(fk, project, false); ok {
+	if d, size, ok := h.cachedBlob(fk, project); ok {
 		h.touch(rp, fk)
 		if h.serveBlob(w, r, d, size, filename) {
 			h.pm.Requests.With(rp.name, upstream.ResultHit).Inc()
@@ -427,7 +423,6 @@ func (h *Handler) linkCached(ctx context.Context, actor string, rp *repository, 
 	target := rp.name + "/" + project + "/" + filename
 	if metadata {
 		k = metadataKey(rp.name, filename)
-		rec = (&blobRecord{Digest: d, Size: size}).encode()
 		target += ".metadata"
 	}
 	err := h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) {
@@ -566,7 +561,7 @@ func (h *Handler) passThrough(w http.ResponseWriter, r *http.Request, rp *reposi
 func (h *Handler) proxyMetadata(w http.ResponseWriter, r *http.Request, rp *repository, project, filename string, f *file) {
 	ctx := r.Context()
 	mk := metadataKey(rp.name, filename)
-	if d, size, ok := h.cachedBlob(mk, project, true); ok {
+	if d, size, ok := h.cachedBlob(mk, project); ok {
 		h.touch(rp, mk)
 		if h.serveBlob(w, r, d, size, filename+".metadata") {
 			h.pm.Requests.With(rp.name, upstream.ResultHit).Inc()

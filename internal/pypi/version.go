@@ -16,7 +16,7 @@ type version struct {
 	postN   string
 	dev     bool
 	devN    string
-	local   []string // lowercase segments
+	local   []string // lowercase segments, numeric ones without leading zeros
 }
 
 // parseVersion parses a version in any form PEP 440 accepts, such as
@@ -89,6 +89,9 @@ func parseVersion(s string) (*version, bool) {
 			seg := p.alnum()
 			if seg == "" {
 				return nil, false
+			}
+			if isDigits(seg) {
+				seg = trimZeros(seg)
 			}
 			v.local = append(v.local, seg)
 			if !p.eatAny("-_.") {
@@ -229,7 +232,7 @@ func compareLocal(a, b []string) int {
 		var c int
 		switch {
 		case na && nb:
-			c = cmpNum(trimZeros(a[i]), trimZeros(b[i]))
+			c = cmpNum(a[i], b[i])
 		case na:
 			c = 1
 		case nb:

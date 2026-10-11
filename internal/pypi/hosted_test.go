@@ -247,6 +247,11 @@ func TestUploadNormalizedNames(t *testing.T) {
 	refused(respell(changed, "pkg-1.0.0.tar.gz", "1.0.0"), http.StatusConflict, "another spelling of "+a.filename)
 	refused(respell(changed, "PKG-1.0.tar.gz", "1.0"), http.StatusConflict, "another spelling of "+a.filename)
 	refused(a, http.StatusConflict, "was deleted")
+	// Local version labels compare canonically too.
+	l := sdist("pkg", "4.0+1", nil)
+	e.mustUpload("local", l)
+	refused(respell(sdist("pkg", "4.0+01", metadataFor("pkg", "4.0+01", "Summary: changed")), "pkg-4.0+01.tar.gz", "4.0+01"),
+		http.StatusConflict, "another spelling of "+l.filename)
 	// Another source distribution, under a new name, may replace it.
 	e.mustUpload("local", zipped)
 	// Of concurrent source distributions of a release, one wins.

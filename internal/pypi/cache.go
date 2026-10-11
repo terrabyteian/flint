@@ -64,21 +64,12 @@ func loadTracker(c *upstream.CacheTracker, v meta.View) error {
 	for _, ns := range []string{nsFile, nsMetadata} {
 		pfx := key(ns, c.Repo(), "")
 		v.Scan(pfx, nil, func(k []byte, rec meta.Record) bool {
-			if ns == nsFile {
-				f, err := decodeFile(rec.Value)
-				if err != nil {
-					failure = err
-					return false
-				}
-				c.Load(string(k), f.Size)
-				return true
-			}
-			b, err := decodeBlobRecord(rec.Value)
+			f, err := decodeFile(rec.Value)
 			if err != nil {
 				failure = err
 				return false
 			}
-			c.Load(string(k), b.Size)
+			c.Load(string(k), f.Size)
 			return true
 		})
 		if failure != nil {

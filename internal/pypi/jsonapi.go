@@ -327,7 +327,7 @@ func (h *Handler) readMetadata(ctx context.Context, actor, project string, f *fi
 	case f.rec != nil:
 		d = f.rec.Meta
 	case f.src != nil && f.src.proxy != nil && f.Metadata && f.MetadataSHA256 != "":
-		if cd, _, ok := h.cachedBlob(metadataKey(f.src.name, f.Filename), project, true); ok {
+		if cd, _, ok := h.cachedBlob(metadataKey(f.src.name, f.Filename), project); ok {
 			d = cd
 			break
 		}

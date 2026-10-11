@@ -273,7 +273,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 
 // blobReferences report the blobs every format package's records
 // reference, for backups to check that they hold them all.
-var blobReferences = []backup.References{oci.References}
+var blobReferences = []backup.References{oci.References, pypi.References}
 
 // registerStoreMetrics exposes the metadata store's counters and health.
 func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {

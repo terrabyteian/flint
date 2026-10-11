@@ -102,6 +102,7 @@ func TestVersions(t *testing.T) {
 		"1.0a1.post2.dev3": "1.0a1.post2.dev3",
 		"1.0+Ubuntu-1":     "1.0+ubuntu.1",
 		"2.4.0+cpu":        "2.4.0+cpu",
+		"1.0+01.ABC.000":   "1.0+1.abc.0",
 	} {
 		v, ok := parseVersion(in)
 		if !ok {
@@ -119,6 +120,9 @@ func TestVersions(t *testing.T) {
 	}
 	if canonicalVersion("1.0.0") != "1" || canonicalVersion("1.0") != canonicalVersion("1") || canonicalVersion("1.0.post0") != "1.post0" {
 		t.Errorf("canonicalVersion: %q %q %q", canonicalVersion("1.0.0"), canonicalVersion("1.0"), canonicalVersion("1.0.post0"))
+	}
+	if canonicalVersion("1.0+01") != canonicalVersion("1.0+1") || compareVersions("1.0+010", "1.0+9") <= 0 {
+		t.Errorf("local versions: %q %q", canonicalVersion("1.0+01"), canonicalVersion("1.0+1"))
 	}
 	if canonicalVersion("Weird-Thing") != "weird-thing" {
 		t.Errorf("canonicalVersion of a legacy version: %q", canonicalVersion("Weird-Thing"))

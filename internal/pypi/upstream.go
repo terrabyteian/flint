@@ -94,7 +94,7 @@ func parseJSONPage(body []byte, base *url.URL, project string) (*projectDoc, err
 		switch {
 		case string(pf.Yanked) == "true":
 			f.Yanked = true
-		case json.Unmarshal(pf.Yanked, &reason) == nil:
+		case len(pf.Yanked) > 0 && pf.Yanked[0] == '"' && json.Unmarshal(pf.Yanked, &reason) == nil:
 			f.Yanked, f.YankedReason = true, reason
 		}
 		if pf.Size != nil && *pf.Size >= 0 {
@@ -110,7 +110,8 @@ func parseJSONPage(body []byte, base *url.URL, project string) (*projectDoc, err
 }
 
 // newUpstreamFile starts the entry of an upstream file from its link,
-// resolved against base, and its name; nil if either is unusable. A JSON
+// resolved against base, and its name; nil if either is unusable, or if
+// the name does not belong to project, as PyPI requires it to. A JSON
 // page names the file; in an HTML page, the name is the link's last path
 // component, which PEP 503 requires the anchor text to match.
 func newUpstreamFile(base *url.URL, href, name string, fromLink bool, project string) *file {
@@ -130,11 +131,11 @@ func newUpstreamFile(base *url.URL, href, name string, fromLink bool, project st
 	if !validFilename(filename) {
 		return nil
 	}
-	f := &file{Filename: filename, URL: u.String(), Size: -1}
-	if d, ok := parseFilename(filename, project); ok {
-		f.Version = d.Version
+	d, ok := parseFilename(filename, project)
+	if !ok {
+		return nil
 	}
-	return f
+	return &file{Filename: filename, URL: u.String(), Size: -1, Version: d.Version}
 }
 
 func validSHA256(s string) bool {

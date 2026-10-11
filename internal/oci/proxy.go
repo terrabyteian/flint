@@ -351,7 +351,7 @@ func (h *Handler) fetchBlob(w http.ResponseWriter, r *http.Request, rn *repoName
 			h.log.Warn("caching a proxied blob failed", "repository", rn.full, "digest", d.String(), "err", err)
 		}
 	}
-	fe, _ := h.fetcher.Fetch(rn.repo+"\x00"+up+"\x00"+d.String(), d, open, done)
+	fe, _ := h.fetcher.Fetch("oci\x00"+rn.repo+"\x00"+up+"\x00"+d.String(), d, open, done)
 	defer fe.Release()
 	size, err := fe.Wait(ctx)
 	if errors.Is(err, errPassThrough) {

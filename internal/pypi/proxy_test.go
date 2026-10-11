@@ -299,14 +299,46 @@ func TestParseJSONPage(t *testing.T) {
 	}
 	p, err := parseJSONPage([]byte(`{"meta": {"api-version": "1.0"}, "files": [
 		{"filename": "pkg-1.0.tar.gz", "url": "/f/pkg-1.0.tar.gz", "hashes": {"sha256": "nothex"}, "dist-info-metadata": {"sha256": "`+strings.Repeat("c", 64)+`"}, "yanked": true},
-		{"filename": "../evil", "url": "x"}
+		{"filename": "../evil", "url": "x"},
+		{"filename": "other-1.0.tar.gz", "url": "/f/other-1.0.tar.gz"},
+		{"filename": "pkg-1.1.tar.gz", "url": "/f/pkg-1.1.tar.gz", "yanked": null},
+		{"filename": "pkg-1.2.tar.gz", "url": "/f/pkg-1.2.tar.gz", "yanked": false},
+		{"filename": "pkg-1.3.tar.gz", "url": "/f/pkg-1.3.tar.gz", "yanked": "broken"}
 	]}`), base, "pkg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p.Files) != 1 || p.Files[0].URL != "https://index.example/f/pkg-1.0.tar.gz" || p.Files[0].SHA256 != "" ||
+	if got := p.filenames(); !slices.Equal(got, []string{"pkg-1.0.tar.gz", "pkg-1.1.tar.gz", "pkg-1.2.tar.gz", "pkg-1.3.tar.gz"}) {
+		t.Fatalf("files %q", got)
+	}
+	if p.Files[1].Yanked || p.Files[2].Yanked || !p.Files[3].Yanked || p.Files[3].YankedReason != "broken" {
+		t.Errorf("yanked: %v %v %v %q", p.Files[1].Yanked, p.Files[2].Yanked, p.Files[3].Yanked, p.Files[3].YankedReason)
+	}
+	if p.Files[0].URL != "https://index.example/f/pkg-1.0.tar.gz" || p.Files[0].SHA256 != "" ||
 		p.Files[0].MetadataSHA256 != strings.Repeat("c", 64) || !p.Files[0].Yanked || p.Files[0].Size != -1 {
 		t.Errorf("parsed %+v", p.Files)
+	}
+}
+
+func TestProxyCacheIsPerProject(t *testing.T) {
+	e := newEnv(t)
+	// A page lists only files whose names belong to its project.
+	victim := wheel("victim", "1.0", nil)
+	e.up.add("evil", upFile{dist: victim, metadata: true})
+	if got := e.page("remote", "evil").filenames(); len(got) != 0 {
+		t.Errorf("another project's files on a page: %q", got)
+	}
+	e.get("/pypi/remote/files/evil/"+victim.filename+".metadata", http.StatusNotFound)
+	// A source distribution name two projects can claim: the core-metadata
+	// file cached through one project's page does not serve the other.
+	shared := sdist("foo", "1-1", metadataFor("foo", "1.post1"))
+	e.up.add("foo", upFile{dist: shared, metadata: true})
+	e.up.add("foo-1", upFile{dist: shared, metadata: true})
+	e.get("/pypi/remote/files/foo/"+shared.filename+".metadata", http.StatusOK)
+	e.up.took()
+	e.get("/pypi/remote/files/foo-1/"+shared.filename+".metadata", http.StatusOK)
+	if got := e.up.took(); !slices.Contains(got, "file /packages/"+shared.filename+".metadata") {
+		t.Errorf("core metadata cached for another project was served: %q", got)
 	}
 }
 
