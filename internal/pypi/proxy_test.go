@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/terrabyteian/flint/internal/blob"
 )
 
 // pagesTook filters the page requests from requests the index took.
@@ -339,6 +342,51 @@ func TestProxyCacheIsPerProject(t *testing.T) {
 	e.get("/pypi/remote/files/foo-1/"+shared.filename+".metadata", http.StatusOK)
 	if got := e.up.took(); !slices.Contains(got, "file /packages/"+shared.filename+".metadata") {
 		t.Errorf("core metadata cached for another project was served: %q", got)
+	}
+}
+
+func TestProxyMetadataFetchIsPerProject(t *testing.T) {
+	e := newEnv(t)
+	fooMD, foo1MD := metadataFor("foo", "1.post1"), metadataFor("foo-1", "1")
+	asked, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/foo/foo-1-1.tar.gz.metadata":
+			close(asked)
+			<-release
+			w.Write(fooMD)
+		case "/foo-1/foo-1-1.tar.gz.metadata":
+			w.Write(foo1MD)
+		}
+	}))
+	defer srv.Close()
+	rp := e.h.repos["remote"]
+	ctx := context.Background()
+	fooDone := make(chan []byte)
+	go func() {
+		b, _ := e.h.fetchMetadata(ctx, "", rp, "foo", "foo-1-1.tar.gz", srv.URL+"/foo/foo-1-1.tar.gz.metadata", blob.FromBytes(fooMD))
+		fooDone <- b
+	}()
+	<-asked
+	// Another project's file of the same name, while the first fetch is
+	// in progress, is fetched from its own page's link.
+	foo1Done := make(chan []byte)
+	go func() {
+		b, _ := e.h.fetchMetadata(ctx, "", rp, "foo-1", "foo-1-1.tar.gz", srv.URL+"/foo-1/foo-1-1.tar.gz.metadata", blob.FromBytes(foo1MD))
+		foo1Done <- b
+	}()
+	select {
+	case b := <-foo1Done:
+		if !bytes.Equal(b, foo1MD) {
+			t.Errorf("foo-1's core metadata %q", b)
+		}
+		close(release)
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Errorf("foo-1's fetch waited for foo's, and got %q", <-foo1Done)
+	}
+	if b := <-fooDone; !bytes.Equal(b, fooMD) {
+		t.Errorf("foo's core metadata %q", b)
 	}
 }
 

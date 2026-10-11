@@ -480,7 +480,7 @@ func (h *Handler) fetchFile(w http.ResponseWriter, r *http.Request, rp *reposito
 			h.log.Warn("caching a proxied file failed", "repository", rp.name, "file", filename, "err", err)
 		}
 	}
-	fe, _ := h.fetcher.Fetch("pypi\x00"+rp.name+"\x00"+d.String(), d, open, done)
+	fe, _ := h.fetcher.Fetch("pypi\x00"+rp.name+"\x00"+project+"\x00"+filename+"\x00"+d.String(), d, open, done)
 	defer fe.Release()
 	size, err := fe.Wait(ctx)
 	if errors.Is(err, errPassThrough) {
@@ -609,7 +609,7 @@ func (h *Handler) proxyMetadata(w http.ResponseWriter, r *http.Request, rp *repo
 // rawURL, verified, and cached if it may be.
 func (h *Handler) fetchMetadata(ctx context.Context, actor string, rp *repository, project, filename, rawURL string, d blob.Digest) ([]byte, error) {
 	mk := metadataKey(rp.name, filename)
-	body, err := h.metaCalls.Do(ctx, string(mk), func(ctx context.Context) ([]byte, error) {
+	body, err := h.metaCalls.Do(ctx, string(mk)+"\x00"+project+"\x00"+d.String(), func(ctx context.Context) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
 		p := rp.proxy

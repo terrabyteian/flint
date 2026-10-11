@@ -343,10 +343,7 @@ func (h *Handler) readMetadata(ctx context.Context, actor, project string, f *fi
 			h.log.DebugContext(ctx, "fetching core metadata for the JSON API failed", "file", f.Filename, "err", err)
 			return nil
 		}
-		if body != nil {
-			return body
-		}
-		d = md
+		return body
 	}
 	if d.IsZero() {
 		return nil
