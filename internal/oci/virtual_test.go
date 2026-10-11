@@ -763,3 +763,90 @@ func TestVirtualSignUpstreamImageTagSchema(t *testing.T) {
 		}
 	}
 }
+
+// putUpstreamIndex stores a two-platform image index of name in the hub
+// upstream, tagged tag, and returns it with its platform images.
+func (ve *virtualEnv) putUpstreamIndex(name, tag string) ([]byte, []upstreamtest.Image) {
+	ve.t.Helper()
+	var platforms []upstreamtest.Image
+	var manifests []any
+	for _, arch := range []string{"amd64", "arm64"} {
+		img := ve.hub.PutImage(name, "", []byte(name+" layer for "+arch))
+		platforms = append(platforms, img)
+		d := desc(upstreamtest.MediaTypeManifest, img.Manifest)
+		d["platform"] = map[string]any{"os": "linux", "architecture": arch}
+		manifests = append(manifests, d)
+	}
+	index := mustJSON(map[string]any{"schemaVersion": 2, "mediaType": mtOCIIndex, "manifests": manifests})
+	ve.hub.PutManifest(name, tag, upstreamtest.MediaTypeIndex, index)
+	return index, platforms
+}
+
+// TestVirtualPushUpstreamIndex checks a push through a virtual repository
+// of a multi-platform index whose platform images a proxy member holds
+// under the name, as crane copy does to vendor an upstream image under
+// its own name and crane tag or docker buildx imagetools create do to
+// retag it: the client pushes only the index, having been told the
+// platform images exist, and they are linked into the publishTo member
+// with their blobs.
+func TestVirtualPushUpstreamIndex(t *testing.T) {
+	for _, tag := range []string{"1.27", "pinned"} {
+		t.Run(tag, func(t *testing.T) {
+			ve := newVirtualEnv(t)
+			index, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
+			ve.pull("all/library/nginx", "1.27", index, nil)
+			for _, img := range platforms {
+				ve.pullImage("all/library/nginx", img.Digest, img)
+				want(t, ve.do("HEAD", "/v2/all/library/nginx/manifests/"+img.Digest, nil), http.StatusOK, "")
+			}
+
+			want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/"+tag, index, "Content-Type", mtOCIIndex), http.StatusCreated, "")
+			ve.pull("local/library/nginx", tag, index, nil)
+			for _, img := range platforms {
+				ve.pullImage("local/library/nginx", img.Digest, img)
+			}
+			ve.pull("all/library/nginx", tag, index, nil)
+		})
+	}
+
+	// Platform images a proxy member has not cached with their blobs are
+	// not linked, and the push reports what it lacks.
+	ve := newVirtualEnv(t)
+	index, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
+	for _, img := range platforms {
+		want(t, ve.do("HEAD", "/v2/all/library/nginx/manifests/"+img.Digest, nil), http.StatusOK, "")
+	}
+	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", index, "Content-Type", mtOCIIndex), http.StatusBadRequest, codeManifestBlobUnknown)
+	want(t, ve.do("HEAD", "/v2/local/library/nginx/manifests/"+platforms[0].Digest, nil), http.StatusNotFound, "")
+}
+
+// TestVirtualPushAfterOwnership checks a multi-platform push through a
+// virtual repository, as docker buildx makes it, under a name a proxy
+// member serves: once platform A's manifest lands in the publishTo
+// member, which then owns the name, platform B's manifest may still use
+// the blobs the proxy member holds under it, which the client was told
+// exist before.
+func TestVirtualPushAfterOwnership(t *testing.T) {
+	ve := newVirtualEnv(t)
+	base := ve.hub.PutImage("library/nginx", "1.27", []byte("nginx base layer"))
+	ve.pullImage("all/library/nginx", "1.27", base)
+	layer := base.Layers[0]
+	want(t, ve.do("HEAD", "/v2/all/library/nginx/blobs/"+layer, nil), http.StatusOK, "")
+
+	a := newImage("platform a", nil)
+	want(t, ve.pushImage("all/library/nginx", a.digest.String(), a), http.StatusCreated, "")
+	want(t, ve.do("GET", "/v2/all/library/nginx/manifests/1.27", nil), http.StatusNotFound, codeManifestUnknown)
+
+	cfg := []byte(`{"architecture":"arm64","os":"linux"}`)
+	ve.pushBlob("all/library/nginx", cfg)
+	b := mustJSON(map[string]any{"schemaVersion": 2, "mediaType": mtOCIManifest,
+		"config": desc("application/vnd.oci.image.config.v1+json", cfg),
+		"layers": []any{map[string]any{"mediaType": upstreamtest.MediaTypeLayer, "digest": layer, "size": len(base.Blobs[layer])}}})
+	bDigest := blob.FromBytes(b).String()
+	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/"+bDigest, b, "Content-Type", mtOCIManifest), http.StatusCreated, "")
+	index := mustJSON(map[string]any{"schemaVersion": 2, "mediaType": mtOCIIndex,
+		"manifests": []any{desc(mtOCIManifest, a.manifest), desc(mtOCIManifest, b)}})
+	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/multi", index, "Content-Type", mtOCIIndex), http.StatusCreated, "")
+	ve.pull("all/library/nginx", bDigest, b, map[string][]byte{layer: base.Blobs[layer], blob.FromBytes(cfg).String(): cfg})
+	ve.pull("all/library/nginx", "multi", index, nil)
+}
