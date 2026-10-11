@@ -581,6 +581,52 @@ func TestStreamAheadOfStore(t *testing.T) {
 	}
 }
 
+// TestWriteFailureKeepsSegmentAge checks that a failed write does not
+// reset the active segment's age when it already holds durable records,
+// so the segment is still sealed a segment age after its oldest record.
+func TestWriteFailureKeepsSegmentAge(t *testing.T) {
+	m := fsys.NewMem()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := start
+	now := func() time.Time { return clock }
+	m.SetClock(now)
+	s := openStore(t, m, now)
+	defer s.Close()
+	l := openLog(t, Options{Store: s, FS: m, Now: now, MaxAge: 4 * time.Hour}) // segment age 1h
+	defer l.Close()
+	commit(t, s, meta.Origin{Actor: "a"}, nil, "k0")
+	if err := l.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	clock = start.Add(40 * time.Minute)
+	failing := true
+	m.SetFault(func(o fsys.Op, name string) error {
+		if failing && strings.HasPrefix(name, auditDir) && o == fsys.OpWrite {
+			return errors.New("injected failure")
+		}
+		return nil
+	})
+	commit(t, s, meta.Origin{Actor: "a"}, nil, "k1")
+	if err := l.Sync(context.Background()); err == nil {
+		t.Fatal("Sync succeeded with failing writes")
+	}
+	failing = false
+	clock = start.Add(50 * time.Minute)
+	if err := l.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	clock = start.Add(65 * time.Minute)
+	if err := l.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := l.Stats().Segments; n != 2 {
+		t.Fatalf("segments = %d, want 2: the segment's oldest record is over an hour old", n)
+	}
+	checkMatchesLog(t, l, s, 0)
+}
+
 // TestWriteFailureRecovers checks that after failed writes or fsyncs the
 // stream is rewritten from the metadata log without losing or repeating a
 // record.

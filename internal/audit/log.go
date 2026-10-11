@@ -536,8 +536,13 @@ func (l *Log) catchUp(ctx context.Context) error {
 			l.f.Close()
 			l.f = nil
 		}
-		// The active segment's start may be a record that is now gone.
-		l.start = time.Time{}
+		l.mu.Lock()
+		empty := l.segs[len(l.segs)-1].size == segHeaderSize
+		l.mu.Unlock()
+		if empty {
+			// The active segment's start was a record that is now gone.
+			l.start = time.Time{}
+		}
 	}
 	l.checkpoint()
 	if rotated {
