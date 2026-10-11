@@ -115,7 +115,8 @@ type Options struct {
 	Metrics *metrics.Registry
 	// Actor names the principal behind a request in the origin of the
 	// metadata batches it writes, for the audit log; nil names the
-	// client address. It must not return secrets.
+	// client address. It must not return secrets. The origin records the
+	// client address separately either way.
 	Actor func(*http.Request) string
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
@@ -481,8 +482,10 @@ func clientActor(r *http.Request) string {
 	return "anonymous"
 }
 
+// origin is the origin of a batch that request r writes: its principal
+// and its client address.
 func (h *Handler) origin(r *http.Request, action, target string) meta.Origin {
-	return meta.Origin{Actor: h.actor(r), Action: action, Target: target}
+	return meta.Origin{Actor: h.actor(r), Action: action, Target: target, Client: server.ClientAddr(r.Context())}
 }
 
 // abbrev shortens s for error messages.

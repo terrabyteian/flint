@@ -53,6 +53,15 @@ func Info(ctx context.Context) RequestInfo {
 	return RequestInfo{}
 }
 
+// ClientAddr returns the client IP address of the request ctx belongs
+// to, as trusted-proxy handling resolved it, or "" if it is unknown.
+func ClientAddr(ctx context.Context) string {
+	if ip := Info(ctx).ClientIP; ip.IsValid() {
+		return ip.String()
+	}
+	return ""
+}
+
 // SetRoute names the route that served the request, for the route label
 // of request metrics and the request log. It overrides the mux pattern,
 // which is the default; a handler that routes internally, such as one

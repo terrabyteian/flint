@@ -13,6 +13,7 @@ import (
 
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/server"
 )
 
 // Errors of user and token management.
@@ -134,7 +135,7 @@ func actorOf(p *Principal) string {
 }
 
 func (s *Service) commit(ctx context.Context, b *meta.Batch, actor *Principal, action, target string) error {
-	b.SetOrigin(meta.Origin{Actor: actorOf(actor), Action: action, Target: target})
+	b.SetOrigin(meta.Origin{Actor: actorOf(actor), Action: action, Target: target, Client: server.ClientAddr(ctx)})
 	_, err := s.store.Commit(ctx, b)
 	return err
 }

@@ -21,9 +21,10 @@ import (
 // length field and the body. The body is
 //
 //	version uint8 | seq uint64 | uvarint(seq - first seq of its group commit) |
-//	varint(commit time, Unix ns) | actor | action | target |
+//	varint(commit time, Unix ns) | actor | action | target | client |
 //	uvarint(op count) | ops
 //
+// Version 1 records, which have no client, are still read.
 // where strings are uvarint(length) bytes, and an op is a kind byte (0 put,
 // 1 delete), uvarint(length) key, and for a put uvarint(length) value.
 // Integers are little endian.
@@ -32,7 +33,8 @@ const (
 	segMagic       = "flintwal"
 	segFormat      = 1
 	segHeaderSize  = 32
-	recordVersion  = 1
+	recordVersion  = 2
+	recordV1       = 1 // without the origin's client
 	frameSize      = 8
 	minBodySize    = 1 + 8 + 1 + 1 + 3 + 1
 	maxBodySize    = 1 << 30
@@ -97,6 +99,7 @@ func appendRecord(dst []byte, salt uint32, seq, group Seq, t time.Time, b *Batch
 	dst = appendString(dst, b.origin.Actor)
 	dst = appendString(dst, b.origin.Action)
 	dst = appendString(dst, b.origin.Target)
+	dst = appendString(dst, b.origin.Client)
 	dst = binary.AppendUvarint(dst, uint64(len(b.ops)))
 	for _, op := range b.ops {
 		if op.Delete {
@@ -140,7 +143,7 @@ type recHead struct {
 
 // parseHead decodes the start of a body. It is cheap, for scanning.
 func parseHead(body []byte) (recHead, bool) {
-	if len(body) < 10 || body[0] != recordVersion {
+	if len(body) < 10 || body[0] != recordVersion && body[0] != recordV1 {
 		return recHead{}, false
 	}
 	seq := Seq(binary.LittleEndian.Uint64(body[1:]))
@@ -197,6 +200,9 @@ func decodeBody(body []byte) (Entry, error) {
 	e.Origin.Actor = string(d.bytes())
 	e.Origin.Action = string(d.bytes())
 	e.Origin.Target = string(d.bytes())
+	if body[0] != recordV1 {
+		e.Origin.Client = string(d.bytes())
+	}
 	nops := d.uvarint()
 	if d.err || nops > uint64(len(d.b)) {
 		return Entry{}, errors.New("bad record origin or op count")
