@@ -226,8 +226,8 @@ func (c *Client) URL() string { return c.base.String() }
 func (c *Client) Host() string { return c.base.Host }
 
 // Offline reports whether a recent request found the upstream
-// unavailable or failed to authenticate. Callers holding a cached copy serve it without asking the
-// upstream while it is offline.
+// unavailable or failed to authenticate. Callers holding a cached copy
+// serve it without asking the upstream while it is offline.
 func (c *Client) Offline() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
