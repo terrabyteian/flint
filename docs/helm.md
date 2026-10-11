@@ -81,6 +81,7 @@ The main ones:
 | `tls.existingSecret` | none | A `kubernetes.io/tls` secret to serve. |
 | `tls.certManager.enabled` | `false` | Create a cert-manager Certificate from `tls.certManager.issuerRef`. Its names are `tls.certManager.dnsNames` and `ipAddresses` plus the Service's cluster names. |
 | `bootstrapAdmin.enabled`, `bootstrapAdmin.existingSecret` | `false`, none | Create the first administrator from a password in a Secret; see below. |
+| `upstreamSecrets` | none | Secrets with proxy repositories' upstream passwords; see below. |
 | `persistence.enabled` | `true` | Keep data on a volume; disabled, it is an `emptyDir` lost with the pod. |
 | `persistence.size`, `persistence.storageClass` | `10Gi`, cluster default | The claim template. Kubernetes does not let a StatefulSet's claim template change after install: to grow the volume, resize the claim directly if its storage class allows it. |
 | `persistence.existingClaim` | none | Use this claim instead of the claim template. |
@@ -113,6 +114,35 @@ bootstrapAdmin:
 The chart sets `config.auth.bootstrapAdmin` itself and refuses to render if you set it.
 flint reads the Secret only while no administrator exists, so it may be deleted after the first start; the volume is optional, so a missing Secret does not stop the pod from starting.
 Without `bootstrapAdmin`, flint starts with no administrator and logs a warning, and nobody can use the admin API.
+
+### Upstream credentials
+
+A [proxy repository](configuration.md#proxy-repository-settings) may authenticate to its upstream, for example with a Docker Hub account for higher pull limits.
+Put the password or access token in a Secret under the key `password`, and list it in `upstreamSecrets` under a name; the chart mounts it at `/etc/flint/upstream/<name>/password`, the path to give as the repository's `passwordFile`:
+
+```sh
+kubectl create secret generic dockerhub-credentials --namespace flint \
+  --from-literal=password="$DOCKER_HUB_ACCESS_TOKEN"
+```
+
+```yaml
+config:
+  repositories:
+    - name: dockerhub
+      format: oci
+      type: proxy
+      anonymousPull: true
+      proxy:
+        url: https://registry-1.docker.io
+        username: my-docker-hub-user
+        passwordFile: /etc/flint/upstream/dockerhub/password
+upstreamSecrets:
+  - name: dockerhub
+    existingSecret: dockerhub-credentials
+```
+
+flint reads the file whenever it authenticates, so rotating the Secret takes effect without a restart once the kubelet updates the mount.
+The Secret must exist before the pod starts.
 
 ## Upgrades and uninstalling
 

@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,6 +29,12 @@ const (
 	DefaultLogLevel        = "info"
 	DefaultShutdownTimeout = 25 * time.Second
 	DefaultBootstrapAdmin  = "admin"
+	// DefaultRevalidateAfter is how long a proxy repository serves a
+	// cached tag before checking it upstream again.
+	DefaultRevalidateAfter = 5 * time.Minute
+	// DefaultMinFreeSpace is the free space below which proxy
+	// repositories stop caching new content.
+	DefaultMinFreeSpace = "5%"
 )
 
 // Config is the configuration file.
@@ -55,6 +62,19 @@ type Config struct {
 	Repositories []Repository `json:"repositories,omitempty"`
 	// Auth declares permission grants.
 	Auth Auth `json:"auth"`
+	// ProxyCache configures how proxy repositories cache content.
+	ProxyCache ProxyCache `json:"proxyCache"`
+}
+
+// ProxyCache configures the cache that proxy repositories share.
+type ProxyCache struct {
+	// MinFreeSpace is the free space, on the data directory's
+	// filesystem, below which proxy repositories stop caching new
+	// content and pass it through instead: a percentage of the
+	// filesystem's size, such as "5%", or a size, such as "20GiB".
+	// Cached content keeps being served, and nothing is deleted to make
+	// room. Default "5%".
+	MinFreeSpace FreeSpace `json:"minFreeSpace,omitzero"`
 }
 
 // TLS names the certificate and key files, in PEM.
@@ -74,6 +94,7 @@ type Log struct {
 const (
 	FormatOCI  = "oci"
 	TypeHosted = "hosted"
+	TypeProxy  = "proxy"
 )
 
 // Repository declares one repository.
@@ -84,12 +105,37 @@ type Repository struct {
 	Name string `json:"name"`
 	// Format is the package format. Only "oci" is supported so far.
 	Format string `json:"format"`
-	// Type is the repository type. Only "hosted" is supported so far.
+	// Type is the repository type: "hosted" or "proxy".
 	Type string `json:"type"`
-	// ImmutableTags makes a pushed tag permanent.
+	// ImmutableTags makes a pushed tag permanent. Hosted repositories only.
 	ImmutableTags bool `json:"immutableTags,omitempty"`
 	// AnonymousPull lets unauthenticated clients pull.
 	AnonymousPull bool `json:"anonymousPull,omitempty"`
+	// Proxy configures a proxy repository's upstream. Required for type
+	// "proxy", and not allowed for other types.
+	Proxy *Proxy `json:"proxy,omitempty"`
+}
+
+// Proxy configures the upstream registry a proxy repository caches.
+type Proxy struct {
+	// URL is the upstream registry's base URL, such as
+	// "https://registry-1.docker.io" or "https://ghcr.io". For Docker
+	// Hub, single-component image names get the "library/" prefix.
+	URL string `json:"url"`
+	// Username and PasswordFile, if set, authenticate to the upstream.
+	// PasswordFile holds the password or access token, such as a mounted
+	// Kubernetes Secret; one trailing newline is ignored. It is read
+	// whenever flint authenticates, so a rotated secret takes effect
+	// without a restart.
+	Username     string `json:"username,omitempty"`
+	PasswordFile string `json:"passwordFile,omitempty"`
+	// RevalidateAfter is how long a cached tag is served before it is
+	// checked upstream again. Default 5m.
+	RevalidateAfter Duration `json:"revalidateAfter,omitzero"`
+	// SizeLimit, if set, caps the content cached in the repository: when
+	// it is exceeded, the least recently pulled content is evicted.
+	// Without it, everything is cached forever.
+	SizeLimit ByteSize `json:"sizeLimit,omitzero"`
 }
 
 // Roles a permission grant can give.
@@ -203,6 +249,14 @@ func (c *Config) setDefaults() {
 	}
 	if b := c.Auth.BootstrapAdmin; b != nil && b.Username == "" {
 		b.Username = DefaultBootstrapAdmin
+	}
+	for _, r := range c.Repositories {
+		if p := r.Proxy; p != nil && p.RevalidateAfter.Duration == 0 && p.RevalidateAfter.invalid == "" {
+			p.RevalidateAfter.Duration = DefaultRevalidateAfter
+		}
+	}
+	if c.ProxyCache.MinFreeSpace.IsZero() {
+		c.ProxyCache.MinFreeSpace, _ = ParseFreeSpace(DefaultMinFreeSpace)
 	}
 }
 
@@ -339,11 +393,26 @@ func (c *Config) Validate() error {
 		}
 		switch r.Type {
 		case TypeHosted:
+			if r.Proxy != nil {
+				v.addf(path+".proxy", "is only allowed for type %q", TypeProxy)
+			}
+		case TypeProxy:
+			if r.ImmutableTags {
+				v.addf(path+".immutableTags", "is not allowed for a proxy repository, whose tags follow the upstream")
+			}
+			if r.Proxy == nil {
+				v.addf(path+".proxy", "is required for type %q", TypeProxy)
+			} else {
+				validateProxy(&v, path+".proxy", r.Proxy)
+			}
 		case "":
 			v.addf(path+".type", "is required")
 		default:
-			v.addf(path+".type", "%q is not supported; supported types: hosted", r.Type)
+			v.addf(path+".type", "%q is not supported; supported types: hosted, proxy", r.Type)
 		}
+	}
+	if f := c.ProxyCache.MinFreeSpace; f.invalid != "" {
+		v.addf("proxyCache.minFreeSpace", "%s", f.invalid)
 	}
 
 	for i, p := range c.Auth.Permissions {
@@ -386,6 +455,57 @@ func (c *Config) Validate() error {
 		}
 	}
 	return v.err()
+}
+
+// validateProxy checks a proxy repository's upstream settings.
+func validateProxy(v *validator, path string, p *Proxy) {
+	if p.URL == "" {
+		v.addf(path+".url", "is required")
+	} else if err := checkUpstreamURL(p.URL); err != nil {
+		v.addf(path+".url", "%q %v", p.URL, err)
+	}
+	switch {
+	case p.Username != "" && p.PasswordFile == "":
+		v.addf(path+".passwordFile", "is required with username")
+	case p.Username == "" && p.PasswordFile != "":
+		v.addf(path+".username", "is required with passwordFile")
+	case strings.ContainsAny(p.Username, ":\r\n"):
+		v.addf(path+".username", "must not contain \":\" or line breaks")
+	}
+	if p.PasswordFile != "" && !filepath.IsAbs(p.PasswordFile) {
+		v.addf(path+".passwordFile", "%q must be an absolute path", p.PasswordFile)
+	}
+	switch d := p.RevalidateAfter; {
+	case d.invalid != "":
+		v.addf(path+".revalidateAfter", "%s", d.invalid)
+	case d.Duration <= 0:
+		v.addf(path+".revalidateAfter", "must be positive")
+	}
+	if s := p.SizeLimit; s.invalid != "" {
+		v.addf(path+".sizeLimit", "%s", s.invalid)
+	} else if s.set && s.Bytes <= 0 {
+		v.addf(path+".sizeLimit", "must be positive")
+	}
+}
+
+// checkUpstreamURL checks an upstream registry's base URL.
+func checkUpstreamURL(s string) error {
+	u, err := url.Parse(s)
+	switch {
+	case err != nil:
+		return errors.New("is not a URL")
+	case u.Scheme != "https" && u.Scheme != "http":
+		return errors.New("must be an http or https URL")
+	case u.Host == "":
+		return errors.New("has no host")
+	case u.User != nil:
+		return errors.New("must not contain credentials; use username and passwordFile")
+	case u.RawQuery != "" || u.Fragment != "" || u.ForceQuery:
+		return errors.New("must not have a query or fragment")
+	case u.Path != "" && u.Path != "/":
+		return errors.New("must be the registry's base URL, without a path: the registry API is served at /v2/")
+	}
+	return nil
 }
 
 // Proxies returns the parsed trusted-proxy prefixes. The configuration

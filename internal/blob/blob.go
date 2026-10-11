@@ -80,6 +80,25 @@ type Upload interface {
 	Cancel() error
 }
 
+// StagedOpener is implemented by uploads whose staged bytes other
+// goroutines can read while the upload is still being written, as a
+// caching proxy does to stream a blob to its clients while the blob
+// arrives from upstream. The filesystem store's uploads implement it.
+type StagedOpener interface {
+	// OpenStaged opens the upload's staged bytes for reading, including
+	// bytes written after it returns. The reader stays valid after the
+	// upload commits or is cancelled, and must be closed. It must not be
+	// called once the upload has ended.
+	OpenStaged() (StagedReader, error)
+}
+
+// StagedReader reads an upload's staged bytes. It is safe for concurrent
+// use.
+type StagedReader interface {
+	io.ReaderAt
+	io.Closer
+}
+
 // Reader reads a committed blob.
 type Reader interface {
 	io.ReadSeekCloser

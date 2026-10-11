@@ -203,3 +203,60 @@ jobs:
           name: oci-conformance-report
           path: ${{ runner.temp }}/conformance
           if-no-files-found: ignore
+
+  proxy:
+    name: Proxy end to end
+    runs-on: ubuntu-latest
+    env:
+      CRANE_VERSION: v0.22.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install crane
+        run: |
+          go install "github.com/google/go-containerregistry/cmd/crane@$CRANE_VERSION"
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "dockerhub", "format": "oci", "type": "proxy", "anonymousPull": true,
+               "proxy": {"url": "https://registry-1.docker.io", "revalidateAfter": "1s"}},
+              {"name": "ghcr", "format": "oci", "type": "proxy", "anonymousPull": true,
+               "proxy": {"url": "https://ghcr.io", "revalidateAfter": "1s"}}
+            ]
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/flint.pid"
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Pull through the proxies with crane, docker, and containerd
+        run: E2E_STATE_DIR="$RUNNER_TEMP/e2e-proxy" scripts/e2e-proxy.sh online 127.0.0.1:5000 dockerhub ghcr
+      - name: Restart flint with its upstreams unreachable
+        run: |
+          pid=$(cat "$RUNNER_TEMP/flint.pid")
+          kill "$pid"
+          while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+          # Every upstream request now goes to a proxy that refuses connections.
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 NO_PROXY= \
+            "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >>"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Pull again from the cache
+        run: E2E_STATE_DIR="$RUNNER_TEMP/e2e-proxy" scripts/e2e-proxy.sh offline 127.0.0.1:5000 dockerhub ghcr
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"

@@ -166,6 +166,8 @@ Illustrative v1 key space:
 | `oci\0tag\0<repo>\0<name>\0<tag>` | manifest digest | `internal/oci` |
 | `oci\0referrer\0<repo>\0<name>\0<subject>\0<digest>` | referrers index entry: manifest `<digest>` has subject `<subject>` | `internal/oci` |
 | `oci\0upload\0<id>` | upload session (repository name, start time) | `internal/oci` |
+| `oci\0pulled\0blob\0<repo>\0<name>\0<digest>` | last pull of a blob cached by a size-limited proxy repository | `internal/oci` |
+| `oci\0pulled\0manifest\0<repo>\0<name>\0<digest>` | last pull of a manifest cached by a size-limited proxy repository | `internal/oci` |
 | `pypi\0file\0<repo>\0<filename>` | file record, kept as a tombstone after delete | `internal/pypi` |
 | `gc\0epoch` | GC epoch counter, incremented when a sweep starts | `internal/gc` |
 | `gc\0doomed\0<digest>` | doomed set of the running sweep; cleared when the sweep ends | `internal/gc` |
@@ -334,6 +336,22 @@ type Upload interface {
 	Cancel() error
 }
 
+// StagedOpener is implemented by uploads whose staged bytes other goroutines
+// can read while the upload is still being written, so a caching proxy can
+// stream a blob to its clients as it arrives from upstream. The filesystem
+// store's uploads implement it.
+type StagedOpener interface {
+	// OpenStaged opens the staged bytes, including those written later.
+	// The reader stays valid after the upload commits or is cancelled.
+	OpenStaged() (StagedReader, error)
+}
+
+// StagedReader reads an upload's staged bytes; it is safe for concurrent use.
+type StagedReader interface {
+	io.ReaderAt
+	io.Closer
+}
+
 // Reader reads a committed blob.
 type Reader interface {
 	io.ReadSeekCloser
@@ -463,6 +481,16 @@ flint never deletes cached content silently to make room.
 For containers, a Docker Hub proxy is addressable by path prefix (`host/dockerhub/library/nginx`) and works as a containerd registry mirror.
 Other upstreams (ghcr.io, quay.io) are further proxy repositories.
 OCI virtual repositories are deferred; the hosted-plus-proxy pattern covers v1 needs.
+
+How the OCI proxy meets these rules (M2):
+
+- **Shared upstream client.** `internal/upstream` holds what PyPI proxies will reuse: the registry token handshake (anonymous or with credentials read from a file at each authentication, never logged), retries with backoff for transient failures, and an offline mark: after a request fails for good, the upstream counts as offline for 30 seconds, during which lookups that have a cached copy serve it without asking. It also holds the fetcher, the free-space monitor, and a group that collapses concurrent identical lookups, so a stale tag pulled by many clients at once costs one revalidation.
+- **Same storage as hosted.** Cached content is stored in the one blob store and linked to the proxy repository with the same `oci\0blob`, `oci\0manifest`, `oci\0tag`, and `oci\0referrer` records hosted repositories use, under the same garbage-collection precondition, so garbage collection marks cached content like any other. A blob already stored for another repository is linked only after the upstream confirms with `HEAD` that it has the blob under the requested name, since a digest is not a secret.
+- **Tags.** The revalidation window is per repository (`revalidateAfter`, default 5 minutes). When the upstream last confirmed a tag is kept in memory only, so after a restart each tag is revalidated on its first pull. A tag deleted upstream, or one the upstream fails to confirm, keeps being served from the cache. Tag listings and referrers come from the upstream, kept in memory for the window, with the cached tags and referrers as the fallback; an upstream without the referrers API is answered from the cached referrers.
+- **Fetching.** A blob that is not cached is fetched once however many clients ask for it at the same time: the fetch writes it to a blob store upload, and every client streams the upload's staged bytes as they arrive (`blob.StagedOpener`), at its own pace. The fetch runs independently of the requests, so a client that disconnects does not cancel it, and stalls are bounded by an idle timeout. The upload verifies the digest at commit, and clients receive the final byte only after that, so no client gets the whole of a blob that fails verification and it never enters the cache. Manifests are verified before they are served. Content passed through without caching is verified the same way while it streams.
+- **Disk pressure.** Free space on the data directory's filesystem is measured with `statfs` (`proxyCache.minFreeSpace`, default 5% of the filesystem). Fetches reserve the size of what they are about to store, so concurrent fetches cannot overrun the threshold together. Content that would cross it is passed through; entering and leaving that state is logged, and the `flint_proxy_disk_pressure` gauge is the alert.
+- **Size limit.** With `sizeLimit`, the repository's cached items (each blob link and manifest record, with its size) and their last-pull times are held in memory. Pull times are saved in periodic batches (`oci\0pulled\0...`, every minute), never one metadata write per pull. Over the limit, the least recently pulled items are evicted by deleting their records (a manifest's tags and referrers entry with it), each batch requiring the records unchanged so a concurrent re-cache is not lost. As for any delete, garbage collection reclaims the bytes later. Content larger than the limit is passed through.
+- **Read-only.** Proxy repositories refuse pushes and deletes. Pulls use the same permission model as hosted repositories; with anonymous pull, a client pulls without a token, which is how containerd mirrors reach flint. containerd's `ns` query parameter is ignored: the repository in the path decides the upstream.
 
 ### Virtual (PyPI only in v1)
 

@@ -111,6 +111,12 @@ spec:
               mountPath: /etc/flint/admin
               readOnly: true
             {{- end }}
+            {{- range .Values.upstreamSecrets }}
+            # Mounted without subPath, so flint sees a rotated secret.
+            - name: upstream-{{ .name }}
+              mountPath: /etc/flint/upstream/{{ .name }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -140,6 +146,15 @@ spec:
           secret:
             secretName: {{ .Values.bootstrapAdmin.existingSecret }}
             optional: true
+            defaultMode: 288 # 0440
+            items:
+              - key: password
+                path: password
+        {{- end }}
+        {{- range .Values.upstreamSecrets }}
+        - name: upstream-{{ .name }}
+          secret:
+            secretName: {{ .existingSecret }}
             defaultMode: 288 # 0440
             items:
               - key: password

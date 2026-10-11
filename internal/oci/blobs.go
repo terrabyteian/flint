@@ -113,6 +113,30 @@ func (h *Handler) getBlob(w http.ResponseWriter, r *http.Request, rn *repoName, 
 		h.writeError(w, r, err)
 		return
 	}
+	if !h.serveBlob(w, r, rn, d, size) {
+		h.writeError(w, r, blobUnknown(d))
+	}
+}
+
+// serveBlob serves blob d, size bytes, from the blob store. It returns
+// false, having written nothing, if the blob is linked but missing from
+// the store.
+func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, rn *repoName, d blob.Digest, size int64) bool {
+	var f blob.Reader
+	if r.Method != http.MethodHead {
+		var err error
+		f, err = h.blobs.Open(r.Context(), d)
+		if errors.Is(err, blob.ErrNotFound) {
+			h.log.WarnContext(r.Context(), "linked blob is missing from the blob store",
+				"repository", rn.full, "digest", d.String())
+			return false
+		}
+		if err != nil {
+			h.writeError(w, r, err)
+			return true
+		}
+		defer f.Close()
+	}
 	hd := w.Header()
 	hd.Set("Docker-Content-Digest", d.String())
 	hd.Set("ETag", `"`+d.String()+`"`)
@@ -122,25 +146,13 @@ func (h *Handler) getBlob(w http.ResponseWriter, r *http.Request, rn *repoName, 
 		hd.Set("Accept-Ranges", "bytes")
 		hd.Set("Content-Length", strconv.FormatInt(size, 10))
 		w.WriteHeader(http.StatusOK)
-		return
+		return true
 	}
-	f, err := h.blobs.Open(r.Context(), d)
-	if errors.Is(err, blob.ErrNotFound) {
-		h.log.WarnContext(r.Context(), "linked blob is missing from the blob store",
-			"repository", rn.full, "digest", d.String())
-		err = blobUnknown(d)
-	}
-	if err != nil {
-		hd.Del("ETag")
-		hd.Del("Cache-Control")
-		h.writeError(w, r, err)
-		return
-	}
-	defer f.Close()
 	// The filesystem store returns the *os.File itself, so on plain
 	// HTTP/1.1 ServeContent's copy reaches sendfile. It also answers
 	// Range and conditional requests.
 	http.ServeContent(w, r, "", time.Time{}, f)
+	return true
 }
 
 // deleteBlob serves DELETE /v2/<name>/blobs/<digest>. It removes the link;
