@@ -40,9 +40,6 @@ func TestAuditHoldsNoSecrets(t *testing.T) {
 	var actions []string
 	err = l.Scan(context.Background(), audit.Filter{}, func(r *audit.Record) bool {
 		actions = append(actions, r.Actor+" "+r.Action+" "+r.Target)
-		if r.Actor != "system" && r.Client != "127.0.0.1" {
-			t.Errorf("%s %s has client %q", r.Actor, r.Action, r.Client)
-		}
 		return true
 	})
 	if err != nil {

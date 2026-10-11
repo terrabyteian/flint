@@ -22,7 +22,6 @@ type auditRecord struct {
 	Actor  string
 	Action string
 	Target string
-	Client string
 	Keys   []struct {
 		Op  string
 		Key []string
@@ -149,8 +148,6 @@ func TestAuditEndToEnd(t *testing.T) {
 			t.Errorf("no %s record for %s in %+v", want.action, want.target, all)
 		case r.Actor != want.actor:
 			t.Errorf("%s %s: actor %q, want %q", want.action, want.target, r.Actor, want.actor)
-		case want.actor != "system" && r.Client != "127.0.0.1":
-			t.Errorf("%s %s: client %q, want 127.0.0.1", want.action, want.target, r.Client)
 		}
 	}
 	if r := find(all, "oci.manifest.push", "docker-local/app:v1@"+digest(manifest)); r != nil {

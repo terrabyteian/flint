@@ -24,7 +24,7 @@ import (
 // The crc is CRC-32C over the length field and the body. The body is
 //
 //	version uint8 | seq uint64 | varint(commit time, Unix ns) |
-//	actor | action | target | client | uvarint(key count) | keys
+//	actor | action | target | uvarint(key count) | keys
 //
 // where strings are uvarint(length) bytes, and a key is a kind byte (0 put,
 // 1 delete) and uvarint(length) bytes. Integers are little endian. There
@@ -37,7 +37,7 @@ const (
 	segExt        = ".audit"
 	recordVersion = 1
 	frameSize     = 8
-	minBodySize   = 1 + 8 + 1 + 4 + 1
+	minBodySize   = 1 + 8 + 1 + 3 + 1
 	maxBodySize   = 1 << 30
 	keyPut        = 0
 	keyDelete     = 1
@@ -53,7 +53,6 @@ type Record struct {
 	Actor  string
 	Action string
 	Target string
-	Client string
 	Keys   []Key
 }
 
@@ -107,7 +106,6 @@ func appendRecord(dst []byte, e *meta.Entry) []byte {
 	dst = appendString(dst, e.Origin.Actor)
 	dst = appendString(dst, e.Origin.Action)
 	dst = appendString(dst, e.Origin.Target)
-	dst = appendString(dst, e.Origin.Client)
 	dst = binary.AppendUvarint(dst, uint64(len(e.Ops)))
 	for _, op := range e.Ops {
 		kind := byte(keyPut)
@@ -169,7 +167,6 @@ func decodeBody(body []byte) (Record, error) {
 	rec.Actor = string(d.bytes())
 	rec.Action = string(d.bytes())
 	rec.Target = string(d.bytes())
-	rec.Client = string(d.bytes())
 	nkeys := d.uvarint()
 	if d.err || nkeys > uint64(len(d.b)) {
 		return Record{}, errors.New("bad record origin or key count")

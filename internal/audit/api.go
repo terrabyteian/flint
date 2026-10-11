@@ -47,7 +47,6 @@ type RecordJSON struct {
 	Actor  string    `json:"actor"`
 	Action string    `json:"action"`
 	Target string    `json:"target"`
-	Client string    `json:"client,omitempty"`
 	Keys   []KeyJSON `json:"keys"`
 }
 
@@ -64,7 +63,7 @@ type KeyJSON struct {
 func ToJSON(r *Record) RecordJSON {
 	out := RecordJSON{
 		Seq: uint64(r.Seq), Time: r.Time.UTC(), Actor: r.Actor, Action: r.Action,
-		Target: r.Target, Client: r.Client, Keys: make([]KeyJSON, len(r.Keys)),
+		Target: r.Target, Keys: make([]KeyJSON, len(r.Keys)),
 	}
 	for i, k := range r.Keys {
 		kj := KeyJSON{Op: "put"}

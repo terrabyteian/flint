@@ -6,7 +6,7 @@ This page covers running flint once it is installed.
 ## Audit log
 
 flint records every change to its metadata in an audit log: pushes, tags, and deletes, content cached by proxy repositories, uploads started, cancelled, and expired, and users, groups, and API tokens created, changed, or removed.
-Each record says who made the change, what it was, to what, from which client address, and which metadata keys it wrote or deleted.
+Each record says who made the change, what it was, to what, and which metadata keys it wrote or deleted.
 It never holds the values written, so password hashes, token hashes, and other stored data never reach it.
 
 The audit log is derived from the metadata store's write-ahead log: every committed change is one log batch, and the audit log writes one record per batch.
@@ -22,7 +22,6 @@ By default it is kept forever.
 | `actor` | Who made the change: a user name, such as `alice`, for a change made with a password; `alice (token <id>)` for one made with one of the user's API tokens, directly or through a bearer token from the Docker token endpoint; `anonymous` for an unauthenticated client, such as a containerd mirror pulling through a proxy repository; or `system` for flint's own background work, such as expiring abandoned uploads, and for the first administrator created at startup. |
 | `action` | What the change was, such as `oci.manifest.push`; see below. |
 | `target` | What it changed, in a readable form, such as `docker-local/app:v1@sha256:...`, `user alice`, or `token <id> of user alice`. |
-| `client` | The client's IP address, as [trusted proxies](configuration.md#trusted-proxies) resolve it; absent for `system` changes. |
 | `keys` | The metadata keys the batch wrote (`"op": "put"`) or deleted (`"op": "delete"`), each as its components, such as `["oci", "tag", "docker-local", "app", "v1"]`. A key that is not UTF-8 is shown in hex as `keyHex`. |
 
 Actions:
@@ -74,7 +73,6 @@ curl -u admin 'https://flint.example.com/api/v1/audit?action=oci.manifest.delete
       "actor": "alice",
       "action": "oci.manifest.delete",
       "target": "docker-local/app@sha256:6c3c...",
-      "client": "192.168.1.20",
       "keys": [
         {"op": "delete", "key": ["oci", "manifest", "docker-local", "app", "sha256:6c3c..."]},
         {"op": "delete", "key": ["oci", "tag", "docker-local", "app", "v1"]}
@@ -109,10 +107,14 @@ The audit log is kept forever unless `audit.retention` in the [configuration](co
 }
 ```
 
-With `maxAge`, records older than it are deleted; with `maxSize`, the oldest records are deleted while the audit log is larger.
-Records are deleted a whole file at a time, oldest first, so a few records past the limit may remain until their file goes.
-The audit log writes to a file until it reaches 64 MiB or holds a day of changes, and the file being written is never deleted.
-Retention runs every hour and whenever a new file starts.
+Records are deleted a whole file at a time, oldest first.
+The audit log writes to a file until it reaches 64 MiB or holds a day of changes, or, if `maxSize` or `maxAge` is smaller, a quarter of it (at least 64 KiB and a minute), and then starts a new one.
+Retention runs whenever a new file starts, and every hour or every quarter of `maxAge`, whichever is shorter.
+
+With `maxAge`, a file is deleted once its newest record is older than `maxAge`, so a record is deleted at most about half of `maxAge` after it passes `maxAge`.
+The file being written is never deleted, but once its records span a quarter of `maxAge`, retention closes it and starts a new one even if no change comes, so a quiet registry's records are deleted too.
+
+With `maxSize`, the oldest files are deleted while the audit log is larger, so it stays within about a quarter of `maxSize` of the limit.
 
 ### Durability and recovery
 

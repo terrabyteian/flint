@@ -151,7 +151,7 @@ The store must meet these guarantees:
 2. At startup, a corrupted record followed by any intact record of a later group commit, or a gap in the log, is a startup error naming the segment and offset, never a silent truncation. Only a bad region confined to the final group-commit write may be truncated; as in any write-ahead log without a second fsync, rot confined to that last group cannot be told apart from an unsynced write.
 3. A log segment is deleted only once it is covered by the latest snapshot and by the checkpoint of every registered durable consumer (the audit log in M4, Raft replication later). The active segment is never deleted.
 4. On a log write or fsync failure the store rejects writes with a clear error, keeps serving reads from fsynced state, stays ready, and reports the fault through a metric and logs. A restart after fixing the cause recovers.
-5. The audit stream holds each batch's sequence number, commit time, origin (actor, action, target, client address), and touched keys, never values.
+5. The audit stream holds each batch's sequence number, commit time, origin (actor, action, target), and touched keys, never values.
 
 The garbage-collection guarantees are in [Cleanup and data safety](#cleanup-and-data-safety).
 The algorithms that meet these guarantees, including how recovery identifies the final group-commit write, are described in the `internal/meta` package documentation and proven by its crash tests.
@@ -283,7 +283,6 @@ type Origin struct {
 	Actor  string // user or token identity, or "system"
 	Action string // e.g. "oci.manifest.push"
 	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
-	Client string // the client's IP address for a change a request made, or ""
 }
 
 // Open opens or creates the store in dir (the data directory's meta/),
@@ -435,7 +434,7 @@ type CatalogAuthorizer interface {
 
 Deletes ask for `delete`, which only admins hold.
 A cross-repository mount asks, with a response writer it discards, whether the caller may pull from the source; if not, it falls back to a normal upload.
-`oci.Options.Actor` names the principal recorded in batch origins for the audit log: `internal/auth` records the principal it admitted in the request's context, and names it as the user, the user and API token, or `anonymous`. Origins also record the client address, resolved through the trusted proxies, separately from the actor.
+`oci.Options.Actor` names the principal recorded in batch origins for the audit log: `internal/auth` records the principal it admitted in the request's context, and names it as the user, the user and API token, or `anonymous`.
 
 ## Package layout
 

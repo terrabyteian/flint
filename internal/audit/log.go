@@ -37,8 +37,12 @@ const (
 	// it writes, fsyncs, and checkpoints them.
 	flushBytes = 4 << 20
 	// retainInterval is how often retention runs, besides after each
-	// rotation.
+	// rotation, unless the segment age is shorter.
 	retainInterval = time.Hour
+	// minSegmentSize and minSegmentAge bound the segment limits derived
+	// from the retention limits.
+	minSegmentSize = 64 << 10
+	minSegmentAge  = time.Minute
 )
 
 // ErrClosed means the audit log is closed.
@@ -53,17 +57,23 @@ type Options struct {
 	// FS is the filesystem of Dir; nil means fsys.OS.
 	FS fsys.FS
 	// MaxAge, if positive, deletes segments whose newest record is older,
-	// a whole segment at a time. Zero keeps records forever.
+	// a whole segment at a time, and seals the active segment once its
+	// records span SegmentAge even if no new record comes. Zero keeps
+	// records forever.
 	MaxAge time.Duration
 	// MaxSize, if positive, deletes the oldest segments while the stream
 	// is larger. The active segment is never deleted. Zero means no limit.
 	MaxSize int64
 	// SegmentSize is the size at which the stream rotates to a new
-	// segment. Default DefaultSegmentSize.
+	// segment. Default DefaultSegmentSize, or a quarter of MaxSize if that
+	// is smaller, but at least 64 KiB, so retention keeps the stream near
+	// MaxSize.
 	SegmentSize int64
 	// SegmentAge is how long a segment takes records, by their commit
 	// times, before the stream rotates, so MaxAge can delete old records
-	// of a quiet registry. Default DefaultSegmentAge.
+	// of a quiet registry. Default DefaultSegmentAge, or a quarter of
+	// MaxAge if that is shorter, but at least a minute, so retention
+	// deletes records soon after they pass MaxAge.
 	SegmentAge time.Duration
 	// PollInterval is how often Run checks the metadata store for new
 	// batches. Default DefaultPollInterval.
@@ -153,9 +163,15 @@ func Open(opts Options) (*Log, error) {
 	}
 	if l.segSize <= 0 {
 		l.segSize = DefaultSegmentSize
+		if l.maxSize > 0 {
+			l.segSize = min(l.segSize, max(l.maxSize/4, minSegmentSize))
+		}
 	}
 	if l.segAge <= 0 {
 		l.segAge = DefaultSegmentAge
+		if l.maxAge > 0 {
+			l.segAge = min(l.segAge, max(l.maxAge/4, minSegmentAge))
+		}
 	}
 	if l.poll <= 0 {
 		l.poll = DefaultPollInterval
@@ -412,7 +428,7 @@ func (l *Log) Sync(ctx context.Context) error {
 	}
 	err := l.catchUp(ctx)
 	l.setFault(err)
-	if err == nil && l.lastRetain.Add(retainInterval).Before(l.now()) {
+	if err == nil && l.lastRetain.Add(min(retainInterval, l.segAge)).Before(l.now()) {
 		l.retain()
 	}
 	return err
@@ -585,6 +601,13 @@ func (l *Log) retain() {
 	l.lastRetain = now
 	if l.maxAge <= 0 && l.maxSize <= 0 {
 		return
+	}
+	if l.maxAge > 0 && l.f != nil && !l.start.IsZero() && now.Sub(l.start) >= l.segAge {
+		// No new record has rotated the active segment, so seal it for
+		// maxAge to delete in time.
+		if err := l.createSegment(l.last + 1); err != nil {
+			l.log.Warn("audit: sealing a quiet segment", "err", err)
+		}
 	}
 	l.mu.Lock()
 	segs := slices.Clone(l.segs)

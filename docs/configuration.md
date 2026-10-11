@@ -121,8 +121,8 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `auth.loginTokenTTL` | duration string | `"2160h"` | How long an API token minted by a package client's login command stays valid (90 days by default); see [authentication](auth.md#tokens-from-client-login-commands). Must be positive. |
 | `backup.directory` | string | none | Absolute path of the [backup](backup.md) directory, outside the data directory and not containing it. Without it, backups are disabled. |
 | `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
-| `audit.retention.maxAge` | duration string | none | Delete [audit log](operations.md#audit-log) records once they are older than this, such as `"8760h"`. Without it, records are kept forever. |
-| `audit.retention.maxSize` | string or number | none | Delete the oldest audit log records while the audit log is larger than this size, such as `"10GiB"`. Without it, there is no limit. |
+| `audit.retention.maxAge` | duration string | none | Delete [audit log](operations.md#retention) records once they are older than this, such as `"8760h"`, a file at a time, within about half of this after they pass it. Without it, records are kept forever. |
+| `audit.retention.maxSize` | string or number | none | Delete the oldest audit log records, a file at a time, while the audit log is larger than this size, such as `"10GiB"`, keeping it within about a quarter of this of the limit. Without it, there is no limit. |
 
 Durations are Go duration strings: a number and a unit, such as `"30s"`, `"2m"`, or `"1m30s"`.
 Sizes are a number of bytes, or a number and a unit: `kB`, `MB`, `GB`, `TB`, and `PB` count in powers of 1000, and `KiB`, `MiB`, `GiB`, `TiB`, and `PiB` in powers of 1024, with or without the final `B` (`Gi`), such as `"500MiB"` or `"1.5TB"`.

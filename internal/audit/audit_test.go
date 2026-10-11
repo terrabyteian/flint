@@ -101,7 +101,7 @@ func checkMatchesLog(t *testing.T, l *Log, s meta.Store, after meta.Seq) {
 		i++
 		o := e.Origin
 		if r.Seq != e.Seq || !r.Time.Equal(e.Time) || r.Actor != o.Actor || r.Action != o.Action ||
-			r.Target != o.Target || r.Client != o.Client || len(r.Keys) != len(e.Ops) {
+			r.Target != o.Target || len(r.Keys) != len(e.Ops) {
 			return fmt.Errorf("record %+v does not match batch %d %+v", r, e.Seq, e)
 		}
 		for j, op := range e.Ops {
@@ -150,7 +150,7 @@ func TestRecordsMatchLog(t *testing.T) {
 	commit(t, s, meta.Origin{Actor: "early"}, []byte("v"), "before")
 	l := openLog(t, Options{Store: s, FS: m, SegmentSize: 600})
 	for i := range 50 {
-		o := meta.Origin{Actor: "alice", Action: "test.put", Target: fmt.Sprint(i), Client: "192.0.2.1"}
+		o := meta.Origin{Actor: "alice", Action: "test.put", Target: fmt.Sprint(i)}
 		if i%7 == 0 {
 			o.Actor = "alice (token abc)"
 		}
@@ -338,28 +338,89 @@ func TestRetention(t *testing.T) {
 	}
 	l.Close()
 
-	// By age: segments whose newest record is older than maxAge go; the
-	// active segment stays however old.
+	// By age: segments whose newest record is older than maxAge go.
 	l = openLog(t, Options{Store: s, FS: m, SegmentSize: 200, Now: now, MaxAge: 3 * time.Hour})
-	fill(6) // rotations and the hourly run apply retention as the clock advances
+	fill(6) // rotations and retention apply as the clock advances
 	got = records(t, l, Filter{})
-	// A sealed segment of up to three hourly records goes once its newest
-	// is over 3h old.
-	if age := clock.Sub(got[0].Time); age > 6*time.Hour {
+	if age := clock.Sub(got[0].Time); age > 4*time.Hour {
 		t.Fatalf("with maxAge 3h: the oldest record is %v old", age)
 	}
+	// Without new records, the active segment is sealed and goes too.
 	clock = clock.Add(100 * time.Hour)
-	l.lastRetain = time.Time{}
 	if err := l.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if st := l.Stats(); st.Segments != 1 {
-		t.Fatalf("after 100h: %d segments, want only the active one", st.Segments)
+	if st := l.Stats(); st.Segments != 1 || st.Bytes != segHeaderSize {
+		t.Fatalf("after 100h: %+v, want only an empty active segment", st)
 	}
-	if got := records(t, l, Filter{}); len(got) == 0 || got[len(got)-1].Seq != 47 {
-		t.Fatalf("the active segment's records are gone: %v", got)
+	if got := records(t, l, Filter{}); len(got) != 0 {
+		t.Fatalf("after 100h: %d records remain", len(got))
+	}
+	fill(1)
+	if got := records(t, l, Filter{}); len(got) != 1 || got[0].Seq != 48 {
+		t.Fatalf("after sealing: records %+v", got)
 	}
 	l.Close()
+}
+
+// TestRetentionDerivesSegments checks that retention limits smaller than
+// the default segment limits are honored closely: segments are sized and
+// aged from them, and a quiet active segment is sealed so that its
+// records are deleted soon after they pass maxAge.
+func TestRetentionDerivesSegments(t *testing.T) {
+	m := fsys.NewMem()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clock }
+	m.SetClock(now)
+	s := openStore(t, m, now)
+	defer s.Close()
+
+	const maxSize = 256 << 10
+	l := openLog(t, Options{Store: s, FS: m, Now: now, MaxSize: maxSize})
+	key := strings.Repeat("k", 1000)
+	var seen int64
+	for i := range 300 {
+		clock = clock.Add(time.Second)
+		commit(t, s, meta.Origin{Actor: "a", Action: "test.put"}, nil, key+fmt.Sprint(i), "-"+key)
+		if err := l.Sync(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		st := l.Stats()
+		if st.Bytes > maxSize+maxSize/4+4096 {
+			t.Fatalf("with maxSize %d: the stream holds %d bytes after %d batches", maxSize, st.Bytes, i+1)
+		}
+		seen = max(seen, st.Bytes)
+	}
+	if seen < maxSize*3/4 {
+		t.Fatalf("retention deleted too much: the stream held at most %d bytes", seen)
+	}
+	l.Close()
+
+	const maxAge = time.Hour
+	l = openLog(t, Options{Store: s, FS: m, Now: now, MaxAge: maxAge})
+	defer l.Close()
+	for range 30 {
+		clock = clock.Add(10 * time.Minute)
+		commit(t, s, meta.Origin{Actor: "a", Action: "test.put"}, nil, "k")
+		if err := l.Sync(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		got := records(t, l, Filter{})
+		if age := clock.Sub(got[0].Time); age > maxAge+maxAge/2 {
+			t.Fatalf("with maxAge %v: the oldest record is %v old", maxAge, age)
+		}
+	}
+	last := commit(t, s, meta.Origin{Actor: "a", Action: "test.put"}, nil, "k")
+	for range 12 {
+		clock = clock.Add(10 * time.Minute)
+		if err := l.Sync(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := records(t, l, Filter{})
+	if len(got) != 0 {
+		t.Fatalf("two quiet hours after batch %d, records %d to %d remain", last, got[0].Seq, got[len(got)-1].Seq)
+	}
 }
 
 // TestCheckpointHoldsLog checks that the metadata store keeps the log

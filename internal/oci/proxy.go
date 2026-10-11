@@ -215,11 +215,9 @@ func (h *Handler) admit(rn *repoName, size int64) (release func(), ok bool) {
 	return h.space.Reserve(size)
 }
 
-// proxyOrigin is the origin of a batch that caches upstream content for
-// the request whose origin is who.
-func proxyOrigin(who meta.Origin, target string) meta.Origin {
-	who.Action, who.Target = "oci.proxy.cache", target
-	return who
+// proxyOrigin is the origin of a batch that caches upstream content.
+func proxyOrigin(actor, target string) meta.Origin {
+	return meta.Origin{Actor: actor, Action: "oci.proxy.cache", Target: target}
 }
 
 // proxyGetBlob serves GET and HEAD /v2/<name>/blobs/<digest> of a proxy
@@ -259,7 +257,7 @@ func (h *Handler) proxyGetBlob(w http.ResponseWriter, r *http.Request, rn *repoN
 			// Linking costs no space, but content over the size limit is
 			// served without being linked, as if passed through.
 			if c := p.cache; c == nil || info.Size <= c.limit {
-				if err := h.linkProxyBlob(ctx, h.origin(r, "", ""), rn, d, info.Size); err != nil {
+				if err := h.linkProxyBlob(ctx, h.actor(r), rn, d, info.Size); err != nil {
 					h.writeError(w, r, err)
 					return
 				}
@@ -295,10 +293,10 @@ func setBlobHeaders(w http.ResponseWriter, d blob.Digest, size int64) {
 }
 
 // linkProxyBlob links stored blob d, size bytes, in rn.
-func (h *Handler) linkProxyBlob(ctx context.Context, who meta.Origin, rn *repoName, d blob.Digest, size int64) error {
+func (h *Handler) linkProxyBlob(ctx context.Context, actor string, rn *repoName, d blob.Digest, size int64) error {
 	err := h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) error {
 		b.Put(blobKey(rn, d), encodeBlobLink(size))
-		b.SetOrigin(proxyOrigin(who, rn.full+"@"+d.String()))
+		b.SetOrigin(proxyOrigin(actor, rn.full+"@"+d.String()))
 		return nil
 	}, h.statExists(ctx, d))
 	if err == nil {
@@ -318,7 +316,7 @@ func (h *Handler) fetchBlob(w http.ResponseWriter, r *http.Request, rn *repoName
 		h.passThroughBlob(w, r, rn, d)
 		return
 	}
-	who := h.origin(r, "", "")
+	actor := h.actor(r)
 	var release func()
 	open := func(ctx context.Context) (io.ReadCloser, int64, error) {
 		body, size, err := p.client.GetBlob(ctx, up, d)
@@ -349,7 +347,7 @@ func (h *Handler) fetchBlob(w http.ResponseWriter, r *http.Request, rn *repoName
 			return
 		}
 		h.upstreamBytes.With(rn.repo).Add(float64(info.Size))
-		if err := h.linkProxyBlob(ctx, who, rn, d, info.Size); err != nil {
+		if err := h.linkProxyBlob(ctx, actor, rn, d, info.Size); err != nil {
 			h.log.Warn("caching a proxied blob failed", "repository", rn.full, "digest", d.String(), "err", err)
 		}
 	}
@@ -450,7 +448,7 @@ func (h *Handler) proxyManifestByDigest(r *http.Request, rn *repoName, d blob.Di
 	if err != nil || m != nil {
 		return &proxied{d: d, rec: m, result: resultHit}, err
 	}
-	who := h.origin(r, "", "")
+	actor := h.actor(r)
 	return h.manifestCalls.Do(r.Context(), rn.full+"@"+d.String(), func(ctx context.Context) (*proxied, error) {
 		ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
@@ -459,7 +457,7 @@ func (h *Handler) proxyManifestByDigest(r *http.Request, rn *repoName, d blob.Di
 		if err != nil {
 			return nil, h.upstreamFailure(ctx, rn, err, manifestUnknown(rn, d.String()).(*apiError))
 		}
-		return h.cacheManifest(ctx, who, rn, um, "")
+		return h.cacheManifest(ctx, actor, rn, um, "")
 	})
 }
 
@@ -489,7 +487,7 @@ func (h *Handler) proxyManifestByTag(r *http.Request, rn *repoName, tag string) 
 	if crec != nil && h.validatedWithin(key, p.revalidate) {
 		return &proxied{d: cached, rec: crec, result: resultHit}, nil
 	}
-	who := h.origin(r, "", "")
+	actor := h.actor(r)
 	return h.tagCalls.Do(r.Context(), string(key), func(ctx context.Context) (*proxied, error) {
 		up := p.upstreamName(rn.name)
 		timeout := fetchTimeout
@@ -526,7 +524,7 @@ func (h *Handler) proxyManifestByTag(r *http.Request, rn *repoName, tag string) 
 		if err != nil {
 			return fail(err)
 		}
-		res, err := h.cacheManifest(ctx, who, rn, um, tag)
+		res, err := h.cacheManifest(ctx, actor, rn, um, tag)
 		if err == nil && res.body == nil {
 			h.markValidated(key)
 			if crec != nil && res.d == cached {
@@ -540,7 +538,7 @@ func (h *Handler) proxyManifestByTag(r *http.Request, rn *repoName, tag string) 
 // cacheManifest stores an upstream manifest in rn, and tags it if tag is
 // not empty. If it cannot be cached, it is returned to be served from
 // memory.
-func (h *Handler) cacheManifest(ctx context.Context, who meta.Origin, rn *repoName, um *upstream.Manifest, tag string) (*proxied, error) {
+func (h *Handler) cacheManifest(ctx context.Context, actor string, rn *repoName, um *upstream.Manifest, tag string) (*proxied, error) {
 	pm, err := parseManifest(um.Body, um.MediaType)
 	if err != nil {
 		msg := err.Error()
@@ -584,7 +582,7 @@ func (h *Handler) cacheManifest(ctx context.Context, who meta.Origin, rn *repoNa
 		if tag != "" {
 			b.Put(tagKey(rn, tag), encodeTag(d))
 		}
-		b.SetOrigin(proxyOrigin(who, target))
+		b.SetOrigin(proxyOrigin(actor, target))
 		return nil
 	}, func(int) error {
 		up, err := h.blobs.NewUpload(ctx)

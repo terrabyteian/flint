@@ -7,11 +7,11 @@
 // The audit log is a durable consumer of the metadata log
 // (meta.Store.RegisterConsumer, ReadLog, and Checkpoint). For each
 // committed batch it writes one record: the batch's sequence number, its
-// commit time, its origin (actor, action, target, and client address), and
-// the keys it wrote or deleted. A record has no field for a value, and the
-// encoder reads only keys and the origin, so password hashes, token
-// hashes, and every other stored value never reach the stream. Origins
-// must not contain secrets, as meta.Origin requires.
+// commit time, its origin (actor, action, and target), and the keys it
+// wrote or deleted. A record has no field for a value, and the encoder
+// reads only keys and the origin, so password hashes, token hashes, and
+// every other stored value never reach the stream. Origins must not
+// contain secrets, as meta.Origin requires.
 //
 // # Files
 //
@@ -37,9 +37,9 @@
 // does the same on demand; the query API calls it so reads see the
 // latest changes. A rotation fsyncs the old segment, then creates the new
 // one, fsyncs its header, and fsyncs the directory before any record goes
-// into it. Segments rotate by size (64 MiB) and, so that age-based
-// retention can delete old records of a quiet registry, after a day of
-// commit times.
+// into it. Segments rotate by size (64 MiB, or a quarter of MaxSize if
+// smaller) and after a day of commit times (or a quarter of MaxAge if
+// shorter), so that retention deletes records close to its limits.
 //
 // # Recovery
 //
@@ -70,7 +70,9 @@
 // delete whole segments, oldest first, never the active one: by age when a
 // sealed segment's modification time, the time of its newest record, is
 // older than MaxAge, and by size while the stream is larger than MaxSize.
-// Retention runs after each rotation and hourly.
+// With MaxAge, retention also seals an active segment whose records span
+// the segment age, so a quiet registry's records age out too. Retention
+// runs after each rotation, and hourly or every segment age if shorter.
 //
 // # Reading
 //

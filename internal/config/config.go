@@ -90,8 +90,8 @@ type Audit struct {
 }
 
 // AuditRetention bounds the audit log. Old records are deleted a whole
-// segment at a time, oldest first, and the segment being written is never
-// deleted.
+// segment at a time, oldest first, and segments are sized and aged from
+// these limits so that the audit log stays close to them.
 type AuditRetention struct {
 	// MaxAge, if set, deletes records once they are older, such as
 	// "8760h". Default: no limit.

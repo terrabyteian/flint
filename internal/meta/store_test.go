@@ -512,7 +512,7 @@ func TestReadLog(t *testing.T) {
 		if i%3 == 0 {
 			b.Delete([]byte(fmt.Sprintf("k%d", i-1)))
 		}
-		b.SetOrigin(Origin{Actor: "alice", Action: "test.put", Target: fmt.Sprint(i), Client: "192.0.2.7"})
+		b.SetOrigin(Origin{Actor: "alice", Action: "test.put", Target: fmt.Sprint(i)})
 		if _, err := s.Commit(context.Background(), b); err != nil {
 			t.Fatal(err)
 		}
@@ -531,7 +531,7 @@ func TestReadLog(t *testing.T) {
 	}
 	for i, e := range all {
 		n := i + 1
-		if e.Seq != Seq(n) || e.Origin != (Origin{"alice", "test.put", fmt.Sprint(n), "192.0.2.7"}) || !e.Time.Equal(time.Unix(1700000000, 42)) {
+		if e.Seq != Seq(n) || e.Origin != (Origin{"alice", "test.put", fmt.Sprint(n)}) || !e.Time.Equal(time.Unix(1700000000, 42)) {
 			t.Fatalf("entry %d = %+v", n, e)
 		}
 		if string(e.Ops[0].Key) != fmt.Sprintf("k%d", n) || string(e.Ops[0].Value) != fmt.Sprintf("v%d", n) || e.Ops[0].Delete {

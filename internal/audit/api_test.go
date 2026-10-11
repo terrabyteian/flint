@@ -61,7 +61,7 @@ func TestAPI(t *testing.T) {
 		if i%2 == 1 {
 			actor = "bob (token t1)"
 		}
-		commit(t, s, meta.Origin{Actor: actor, Action: "oci.manifest.push", Target: fmt.Sprintf("docker-local/app:%d", i), Client: "192.0.2.9"},
+		commit(t, s, meta.Origin{Actor: actor, Action: "oci.manifest.push", Target: fmt.Sprintf("docker-local/app:%d", i)},
 			[]byte("secret-value"), "oci\x00tag\x00docker-local\x00app\x00"+fmt.Sprint(i), "-oci\x00upload\x00x")
 	}
 	commit(t, s, meta.Origin{Actor: "x"}, nil, "\xff\x00bin")
@@ -102,7 +102,7 @@ func TestAPI(t *testing.T) {
 	}
 	r := all[0]
 	want := RecordJSON{Seq: 1, Time: time.Date(2026, 3, 1, 0, 1, 0, 0, time.UTC), Actor: "alice", Action: "oci.manifest.push",
-		Target: "docker-local/app:0", Client: "192.0.2.9", Keys: []KeyJSON{
+		Target: "docker-local/app:0", Keys: []KeyJSON{
 			{Op: "put", Key: []string{"oci", "tag", "docker-local", "app", "0"}},
 			{Op: "delete", Key: []string{"oci", "upload", "x"}},
 		}}
