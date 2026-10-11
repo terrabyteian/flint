@@ -154,11 +154,6 @@ func (e *env) serve() *httptest.Server {
 			io.WriteString(w, "ok")
 		}
 	})
-	srv.HandleFunc("GET /test-basic/{action}/{repo...}", func(w http.ResponseWriter, r *http.Request) {
-		if e.svc.AuthorizeBasic(w, r, r.PathValue("repo"), strings.Split(r.PathValue("action"), ",")...) {
-			io.WriteString(w, "ok "+e.svc.Actor(r))
-		}
-	})
 	styles := map[string]*Authorizer{
 		"docker":    e.svc.Authorizer(Challenge{Style: ChallengeDocker}),
 		"basic":     e.svc.Authorizer(Challenge{Style: ChallengeBasic}),

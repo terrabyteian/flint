@@ -43,20 +43,6 @@ const (
 	helmMaxConfigBytes = 4 << 20
 )
 
-// BasicAuthorizer is an optional extension of Authorizer for the Helm
-// view, whose clients send HTTP basic credentials and know no token
-// service. It is Authorize, except that it answers a request without
-// valid credentials with a Basic challenge. With an Authorizer that does
-// not implement it, the view uses Authorize.
-type BasicAuthorizer interface {
-	AuthorizeBasic(w http.ResponseWriter, r *http.Request, repo string, actions ...string) bool
-}
-
-// AuthorizeBasic allows the request.
-func (AllowAll) AuthorizeBasic(http.ResponseWriter, *http.Request, string, ...string) bool {
-	return true
-}
-
 // helmFile is a chart or provenance file in a view.
 type helmFile struct {
 	digest blob.Digest
@@ -140,11 +126,7 @@ func (h *Handler) serveHelm(w http.ResponseWriter, r *http.Request) {
 		helmError(w, r, http.StatusMethodNotAllowed, fmt.Sprintf("method %s is not allowed here", r.Method))
 		return
 	}
-	if ba, ok := h.auth.(BasicAuthorizer); ok {
-		if !ba.AuthorizeBasic(w, r, full, ActionPull) {
-			return
-		}
-	} else if !h.auth.Authorize(w, r, full, ActionPull) {
+	if !h.helmAuth.Authorize(w, r, full, ActionPull) {
 		return
 	}
 	view, err := h.helmView(ctx, repo, dir)

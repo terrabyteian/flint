@@ -120,9 +120,6 @@ docker login registry.example -u ci-bot              # password or API token
 echo "$TOKEN" | crane auth login registry.example -u ci-bot --password-stdin
 ```
 
-## Helm chart repositories
-
-The [classic Helm chart repository view](helm-repository.md#access) at `/helm/<repository>/` takes HTTP basic credentials, a password or an API token, and needs the same permission as a pull.
 ## Package clients
 
 Every route family accepts the same credentials, and answers a request without valid credentials with `401` in the style its clients expect:
@@ -130,7 +127,7 @@ Every route family accepts the same credentials, and answers a request without v
 | Style | Challenge | Used by |
 | --- | --- | --- |
 | Docker | `WWW-Authenticate: Bearer realm=...,service="flint",scope=...` | The registry API at `/v2/`, as described above |
-| Basic | `WWW-Authenticate: Basic realm="flint"` | Clients that wait for a challenge before they send credentials, such as Maven and Gradle |
+| Basic | `WWW-Authenticate: Basic realm="flint"` | Clients that wait for a challenge before they send credentials, such as Maven and Gradle, and Helm chart repositories |
 | Cargo | `WWW-Authenticate: Cargo login_url="..."` | Cargo, which shows the user where to get a token |
 | Plain | none | npm, which then tells the user to log in |
 
@@ -155,6 +152,10 @@ Deleting the file invalidates every signed URL at the next start.
 A virtual repository serves a merged view of its member repositories.
 Reading through it needs `read` on the virtual repository only, since the view is what its administrator composed: a client needs no role on the members.
 Publishing through it needs `write`, and deleting needs `delete`, on the member it publishes to (`publishTo`); a virtual repository without one refuses publishes.
+
+### Helm chart repositories
+
+The [classic Helm chart repository view](helm-repository.md#access) at `/helm/<repository>/` uses the Basic style: it takes a password or an API token, as `helm repo add --username --password` sends them, and needs the same permission as a pull.
 
 ## Admin API
 

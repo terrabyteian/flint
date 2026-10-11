@@ -202,11 +202,13 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Blobs:        blobs,
 		Repositories: cfg.Repositories,
 		Authorizer:   authz,
-		Actor:        authz.Actor,
-		Logger:       logger,
-		Metrics:      reg,
-		Upstream:     upstream.Options{UserAgent: "flint/" + version},
-		Space:        space,
+		// Helm clients send basic credentials and know no token service.
+		HelmAuthorizer: authz.Authorizer(auth.Challenge{Style: auth.ChallengeBasic}),
+		Actor:          authz.Actor,
+		Logger:         logger,
+		Metrics:        reg,
+		Upstream:       upstream.Options{UserAgent: "flint/" + version},
+		Space:          space,
 	})
 	if err != nil {
 		return nil, nil, nil, err

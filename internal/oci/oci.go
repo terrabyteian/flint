@@ -105,6 +105,10 @@ type Options struct {
 	FetchIdleTimeout time.Duration
 	// Authorizer authorizes every request. Required.
 	Authorizer Authorizer
+	// HelmAuthorizer, if set, authorizes the Helm view's requests instead,
+	// so they can be answered in the challenge style Helm clients expect:
+	// they send HTTP basic credentials and know no token service.
+	HelmAuthorizer Authorizer
 	// Logger receives failures; nil means slog.Default().
 	Logger *slog.Logger
 	// Metrics, if set, receives the OCI metrics.
@@ -131,9 +135,11 @@ type Handler struct {
 	blobs blob.Store
 	repos map[string]*repository
 	auth  Authorizer
-	log   *slog.Logger
-	actor func(*http.Request) string
-	now   func() time.Time
+	// helmAuth authorizes the Helm view: Options.HelmAuthorizer, or auth.
+	helmAuth Authorizer
+	log      *slog.Logger
+	actor    func(*http.Request) string
+	now      func() time.Time
 
 	uploadBytes   *metrics.Counter
 	manifestPuts  *metrics.Counter
@@ -175,6 +181,7 @@ func New(opts Options) (*Handler, error) {
 		blobs:     opts.Blobs,
 		repos:     map[string]*repository{},
 		auth:      opts.Authorizer,
+		helmAuth:  opts.HelmAuthorizer,
 		log:       opts.Logger,
 		actor:     opts.Actor,
 		now:       opts.Now,
@@ -186,6 +193,9 @@ func New(opts Options) (*Handler, error) {
 	}
 	if h.log == nil {
 		h.log = slog.Default()
+	}
+	if h.helmAuth == nil {
+		h.helmAuth = h.auth
 	}
 	if h.now == nil {
 		h.now = time.Now

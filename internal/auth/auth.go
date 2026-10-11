@@ -507,15 +507,6 @@ func (s *Service) Allowed(r *http.Request, repo string, actions ...string) bool 
 	return s.docker.Allowed(r, repo, actions...)
 }
 
-// AuthorizeBasic is Authorize for clients of classic package protocols,
-// such as Helm chart repositories, that send HTTP basic credentials, a
-// password or an API token, and know no token service. It accepts no
-// bearer token, and when it returns false it has written a 401 with a
-// Basic challenge, or a 403 if the credentials lack the permission.
-func (s *Service) AuthorizeBasic(w http.ResponseWriter, r *http.Request, repo string, actions ...string) bool {
-	return s.Authorizer(Challenge{Style: ChallengeBasic}).Authorize(w, r, repo, actions...)
-}
-
 type principalKey struct{}
 
 // Actor names the principal Authorize admitted r as, for the origin of the

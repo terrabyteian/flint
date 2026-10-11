@@ -345,28 +345,12 @@ func TestHelmFileNameClash(t *testing.T) {
 	}
 }
 
-// basicAuth adds the BasicAuthorizer extension to testAuth.
-type basicAuth struct {
-	testAuth
-	basic []authCall
-}
-
-func (a *basicAuth) AuthorizeBasic(w http.ResponseWriter, r *http.Request, repo string, actions ...string) bool {
-	a.basic = append(a.basic, authCall{repo, strings.Join(actions, ",")})
-	if repo == "charts/secret" {
-		w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
-		w.WriteHeader(http.StatusUnauthorized)
-		return false
-	}
-	return true
-}
-
 func TestHelmAuthorization(t *testing.T) {
 	e := newEnv(t)
 	e.pushChart("charts/app", newChart("app", "1.0.0", false, nil))
 	e.auth.reset()
 
-	// With an Authorizer that has no Basic variant, the view uses Authorize.
+	// Without a HelmAuthorizer, the view uses the Authorizer.
 	e.auth.deny = func(repo string, _ []string) bool { return repo == "charts" }
 	if w := e.helm("GET", "/helm/charts/index.yaml"); w.Code != http.StatusUnauthorized {
 		t.Errorf("denied index = %d", w.Code)
@@ -378,21 +362,24 @@ func TestHelmAuthorization(t *testing.T) {
 		t.Errorf("Authorize calls = %v", calls)
 	}
 
-	ba := &basicAuth{}
-	e.h.auth = ba
+	// With one, the view uses it alone.
+	e.auth.deny = nil
+	ba := &testAuth{deny: func(repo string, _ []string) bool { return repo == "charts/secret" }}
+	e.h, _ = New(Options{Meta: e.meta, Blobs: e.blobs, Repositories: testRepos, Authorizer: e.auth,
+		HelmAuthorizer: ba, Logger: quiet, Now: func() time.Time { return e.now }})
 	e.helm("GET", "/helm/charts/team/index.yaml")
 	e.helm("GET", "/helm/charts/team/charts/api-1.0.0.tgz")
-	if w := e.helm("GET", "/helm/charts/secret/index.yaml"); w.Code != http.StatusUnauthorized ||
-		w.Header().Get("WWW-Authenticate") != `Basic realm="test"` {
-		t.Errorf("denied index = %d %v", w.Code, w.Header())
+	if w := e.helm("GET", "/helm/charts/secret/index.yaml"); w.Code != http.StatusUnauthorized {
+		t.Errorf("denied index = %d", w.Code)
 	}
-	if !slices.Equal(ba.basic, []authCall{{"charts/team", "pull"}, {"charts/team", "pull"}, {"charts/secret", "pull"}}) ||
-		len(ba.calls) != 0 {
-		t.Errorf("AuthorizeBasic calls = %v, Authorize calls = %v", ba.basic, ba.calls)
+	if calls := ba.reset(); !slices.Equal(calls, []authCall{{"charts/team", "pull"}, {"charts/team", "pull"}, {"charts/secret", "pull"}}) {
+		t.Errorf("HelmAuthorizer calls = %v", calls)
+	}
+	if calls := e.auth.reset(); len(calls) != 0 {
+		t.Errorf("Authorizer calls = %v", calls)
 	}
 
 	// Requests that address no view are refused before authorization.
-	ba.basic = nil
 	for _, p := range []string{"/helm/hosted/index.yaml", "/helm/nope/index.yaml", "/helm/", "/helm/charts/",
 		"/helm/charts/app-1.0.0.tgz", "/helm/charts/charts/x.zip", "/helm/charts/Bad/index.yaml"} {
 		if w := e.helm("GET", p); w.Code != http.StatusNotFound {
@@ -402,7 +389,7 @@ func TestHelmAuthorization(t *testing.T) {
 	if w := e.helm("POST", "/helm/charts/index.yaml"); w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET, HEAD" {
 		t.Errorf("POST = %d %v", w.Code, w.Header())
 	}
-	if len(ba.basic) != 0 {
-		t.Errorf("AuthorizeBasic calls = %v", ba.basic)
+	if calls := ba.reset(); len(calls) != 0 {
+		t.Errorf("HelmAuthorizer calls = %v", calls)
 	}
 }

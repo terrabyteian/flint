@@ -443,9 +443,6 @@ func TestAllowAll(t *testing.T) {
 	if f, ok := a.AuthorizeCatalog(nil, nil); !ok || !f("x") {
 		t.Error("AllowAll hid the catalog")
 	}
-	if !a.AuthorizeBasic(nil, nil, "x", ActionPull) {
-		t.Error("AllowAll denied a Helm view request")
-	}
 }
 
 func TestRegister(t *testing.T) {
