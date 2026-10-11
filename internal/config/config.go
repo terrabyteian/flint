@@ -87,7 +87,8 @@ type Backup struct {
 // the metadata references any more.
 type GC struct {
 	// GracePeriod is how long an unreferenced blob is kept after its
-	// commit. Default 24h; at least 1h.
+	// commit, and a blob link no manifest references after it was
+	// linked. Default 24h; at least 1h.
 	GracePeriod Duration `json:"gracePeriod,omitzero"`
 	// Interval, if set, runs garbage collection on a schedule: this long
 	// after the previous run started. Without it, garbage collection runs

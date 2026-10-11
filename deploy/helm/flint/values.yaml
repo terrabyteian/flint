@@ -52,7 +52,9 @@ config:
   # (docs/garbage-collection.md). Administrators run it with flint gc;
   # interval also runs it on a schedule.
   # gc:
-  #   # How long an unreferenced blob is kept after it was stored; at least 1h.
+  #   # How long an unreferenced blob is kept after it was stored, and a blob
+  #   # link no manifest references after it was linked, which bounds how long
+  #   # a push may take between its blobs and its manifest; at least 1h.
   #   gracePeriod: 24h
   #   # Run garbage collection this long after the previous run started.
   #   interval: 24h

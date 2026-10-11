@@ -116,7 +116,7 @@ Scheduled runs are recorded with the actor `system`.
 - **Pushes during a run.** A push of content that the run is deleting at that moment, which only happens to content stored more than the grace period ago and no longer referenced, is refused with `503 UNAVAILABLE` and `Retry-After`, as are a manifest push and a cross-repository mount of it; a mount falls back to a normal upload. Clients retry, and the retry succeeds once the run is past that content. A pull through a proxy repository serves the stored copy and fetches it again next time.
 - **Unknown records stop the run.** Every part of flint that writes metadata registers what its records reference with the garbage collector. A record of a kind nobody registered, such as one written by a newer version of flint, or a record that cannot be read, makes the run refuse to delete anything and report it, rather than guess. Upgrade or roll back to a flint that knows the records.
 - **Crashes.** A crash during a run leaves no damage: what was deleted was unreferenced, and at the next start flint forgets the run's unfinished work, so pushes of that content work again. The next run reclaims what is left.
-- **Nothing silently.** Each run logs its start and its outcome, and each deleted blob is logged with its digest, size, and commit time. The metadata log also records the blobs each run set out to delete, and the report of the last run.
+- **Nothing silently.** Each run logs its start and its outcome, each removed blob link is logged with its repository name and digest, and each deleted blob is logged with its digest, size, and commit time. The metadata log also records the blobs each run set out to delete, and the report of the last run.
 
 ## Monitoring
 
@@ -137,4 +137,4 @@ With a schedule, alert when collection stops succeeding, for example:
     summary: flint has not collected garbage successfully for three days; see flint gc status.
 ```
 
-The log lines are `garbage collection started`, `garbage collection deleted a blob`, `garbage collection finished`, `garbage collection refused to delete anything`, and `garbage collection did not finish`.
+The log lines are `garbage collection started`, `garbage collection removed an expired record` (such as a blob link), `garbage collection deleted a blob`, `garbage collection finished`, `garbage collection refused to delete anything`, and `garbage collection did not finish`.

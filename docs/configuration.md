@@ -118,7 +118,7 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `auth.bootstrapAdmin` | object | none | Create the first administrator at startup if none exists; see below. |
 | `backup.directory` | string | none | Absolute path of the [backup](backup.md) directory, outside the data directory and not containing it. Without it, backups are disabled. |
 | `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
-| `gc.gracePeriod` | duration string | `"24h"` | How long [garbage collection](#garbage-collection) keeps a blob that nothing references after the blob was stored. At least `"1h"`. |
+| `gc.gracePeriod` | duration string | `"24h"` | How long [garbage collection](#garbage-collection) keeps a blob that nothing references after the blob was stored, and a blob link that no manifest references after it was linked; so also how long a push may take between uploading its blobs and pushing its manifest. At least `"1h"`. |
 | `gc.interval` | duration string | none | Run garbage collection on a schedule, this long after the previous run started. Without it, garbage collection runs only when an administrator starts it. |
 
 Durations are Go duration strings: a number and a unit, such as `"30s"`, `"2m"`, or `"1m30s"`.
@@ -194,7 +194,7 @@ The file is read only while no administrator exists, so it can be removed after 
 Deleting an image or a blob hides it at once; garbage collection later deletes the blobs nothing references any more.
 Administrators run it with `flint gc` or the admin API, and `gc.interval` runs it on a schedule.
 The scheduled time counts from the start of the previous run, which survives restarts, so a server restarted more often than the interval still collects; a scheduled run never starts within a minute of startup.
-The grace period protects content a push stored a moment ago; it cannot be set below an hour.
+The grace period protects content a push stored a moment ago, and the blob links of a push whose manifest has not arrived yet: a push that takes longer than the grace period between uploading a blob and pushing its manifest may find the blob's link removed, and its manifest push fails with `MANIFEST_BLOB_UNKNOWN` until it pushes the blob again. It cannot be set below an hour.
 [Garbage collection](garbage-collection.md) describes what is reclaimed, how to run it, and how to monitor it.
 
 ## Endpoints

@@ -110,6 +110,8 @@ const (
 	DefaultGracePeriod = 24 * time.Hour
 	// MinGracePeriod is the shortest grace period allowed. It covers the
 	// time between a blob's commit and its link batch many times over,
+	// the time a push takes between linking its blobs and pushing the
+	// manifest that references them, which pruners count from the link,
 	// and clock adjustments on the server.
 	MinGracePeriod = time.Hour
 	// DefaultRoundSize is how many blobs a sweep round dooms at most by
@@ -165,8 +167,9 @@ type Options struct {
 	// Pruners are the pruners of the packages whose records expire.
 	Pruners []Pruner
 	// GracePeriod is how long an unreferenced blob is kept after its
-	// commit. Zero means DefaultGracePeriod; less than MinGracePeriod is
-	// an error.
+	// commit, and the cutoff pruners get, such as for blob links no
+	// manifest references. Zero means DefaultGracePeriod; less than
+	// MinGracePeriod is an error.
 	GracePeriod time.Duration
 	// Interval, if positive, makes RunSchedule start a run this long
 	// after the previous one that was not a dry run started.
