@@ -329,6 +329,22 @@ func TestHelmChartMissing(t *testing.T) {
 	}
 }
 
+// TestHelmFileNameClash checks that two charts with one file name are
+// both left out of the view.
+func TestHelmFileNameClash(t *testing.T) {
+	e := newEnv(t)
+	e.pushChart("charts/a", newChart("a", "1.0.0-1.0.0", false, nil))
+	e.pushChart("charts/a", newChart("a", "2.0.0", false, nil))
+	e.pushChart("charts/a-1.0.0", newChart("a-1.0.0", "1.0.0", false, nil))
+	idx, _ := e.helmIndex("/helm/charts/index.yaml")
+	if !slices.Equal(versions(idx, "a"), []string{"2.0.0"}) || len(idx.Entries) != 1 {
+		t.Errorf("entries = %v", idx.Entries)
+	}
+	if w := e.helm("GET", "/helm/charts/charts/a-1.0.0-1.0.0.tgz"); w.Code != http.StatusNotFound {
+		t.Errorf("clashing chart = %d", w.Code)
+	}
+}
+
 // basicAuth adds the BasicAuthorizer extension to testAuth.
 type basicAuth struct {
 	testAuth

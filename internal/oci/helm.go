@@ -337,6 +337,13 @@ func (h *Handler) buildHelmView(ctx context.Context, repo, dir string, tags []he
 		}
 	}
 	v.Release()
+	type listed struct {
+		chart   *helmChart
+		file    string
+		created time.Time
+	}
+	var charts []listed
+	claims := map[string]int{}
 	for i, t := range tags {
 		c, seen := view.charts[t.digest]
 		if !seen && prev != nil {
@@ -360,6 +367,16 @@ func (h *Handler) buildHelmView(ctx context.Context, repo, dir string, tags []he
 			continue
 		}
 		file := c.name + "-" + c.version + ".tgz"
+		charts = append(charts, listed{c, file, pushed[i]})
+		claims[file]++
+	}
+	for _, l := range charts {
+		// Names and versions may both contain "-", so two charts can
+		// claim one file name; neither is listed.
+		c, file := l.chart, l.file
+		if claims[file] > 1 {
+			continue
+		}
 		view.files[file] = c.chart
 		if c.prov != nil {
 			view.files[file+helmProvSuffix] = *c.prov
@@ -370,8 +387,8 @@ func (h *Handler) buildHelmView(ctx context.Context, repo, dir string, tags []he
 		}
 		e["urls"], _ = json.Marshal([]string{helmChartsDir + "/" + file})
 		e["digest"], _ = json.Marshal(c.chart.digest.Hex())
-		if !pushed[i].IsZero() {
-			e["created"], _ = json.Marshal(pushed[i].UTC())
+		if !l.created.IsZero() {
+			e["created"], _ = json.Marshal(l.created.UTC())
 		}
 		body, err := json.Marshal(e)
 		if err != nil {
