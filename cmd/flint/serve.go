@@ -320,7 +320,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	collector, err := gc.New(gc.Options{
 		Meta:        store,
 		Blobs:       blobs,
-		Markers:     []gc.Marker{oci.GCMarker(), auth.GCMarker()},
+		Markers:     []gc.Marker{oci.GCMarker(), pypi.GCMarker(), auth.GCMarker()},
 		Pruners:     []gc.Pruner{registry.GCPruner()},
 		GracePeriod: cfg.GC.GracePeriod.Duration,
 		Interval:    cfg.GC.Interval.Duration,

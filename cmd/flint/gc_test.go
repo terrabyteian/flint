@@ -1,12 +1,14 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -65,11 +67,31 @@ func registryCall(t *testing.T, method, url, user, pass string, body []byte, con
 	return resp.StatusCode, b
 }
 
-// TestGCEndToEnd runs flint serve, pushes images, deletes one and some
-// blob links, ages the stored blobs past the grace period, and runs
-// flint gc against the server: a dry run reports what a run deletes and
-// deletes nothing, the run deletes exactly the unreferenced blobs past
-// the grace period, and every image still referenced pulls.
+// pypiWheel builds a wheel of project pkg whose core metadata is
+// metadata, and the multipart body and content type that upload it.
+func pypiWheel(version, metadata string) (whl, body []byte, contentType string) {
+	var w bytes.Buffer
+	zw := zip.NewWriter(&w)
+	f, _ := zw.Create("pkg-" + version + ".dist-info/METADATA")
+	io.WriteString(f, metadata)
+	zw.Close()
+	var b bytes.Buffer
+	mw := multipart.NewWriter(&b)
+	for k, v := range map[string]string{":action": "file_upload", "name": "pkg", "version": version, "filetype": "bdist_wheel"} {
+		mw.WriteField(k, v)
+	}
+	fw, _ := mw.CreateFormFile("content", "pkg-"+version+"-py3-none-any.whl")
+	fw.Write(w.Bytes())
+	mw.Close()
+	return w.Bytes(), b.Bytes(), mw.FormDataContentType()
+}
+
+// TestGCEndToEnd runs flint serve, pushes images and uploads PyPI files,
+// deletes an image, some blob links, and a PyPI file, ages the stored
+// blobs past the grace period, and runs flint gc against the server: a
+// dry run reports what a run deletes and deletes nothing, the run deletes
+// exactly the unreferenced blobs past the grace period, and every image
+// and file still referenced downloads.
 func TestGCEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
@@ -78,11 +100,14 @@ func TestGCEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgPath := writeConfig(t, map[string]any{
-		"listen":       "127.0.0.1:0",
-		"dataDir":      dataDir,
-		"repositories": []any{map[string]any{"name": "docker-local", "format": "oci", "type": "hosted"}},
-		"auth":         map[string]any{"bootstrapAdmin": map[string]any{"username": "admin", "passwordFile": pwFile}},
-		"gc":           map[string]any{"gracePeriod": "2h"},
+		"listen":  "127.0.0.1:0",
+		"dataDir": dataDir,
+		"repositories": []any{
+			map[string]any{"name": "docker-local", "format": "oci", "type": "hosted"},
+			map[string]any{"name": "pypi-local", "format": "pypi", "type": "hosted"},
+		},
+		"auth": map[string]any{"bootstrapAdmin": map[string]any{"username": "admin", "passwordFile": pwFile}},
+		"gc":   map[string]any{"gracePeriod": "2h"},
 	})
 	p := startFlint(t, "serve", "-config", cfgPath)
 	if p.addr == "" {
@@ -135,6 +160,21 @@ func TestGCEndToEnd(t *testing.T) {
 			t.Fatalf("blob delete = %d %s", code, out)
 		}
 	}
+	// Upload two PyPI files and delete one.
+	keepMeta, dropMeta := "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\n\n", "Metadata-Version: 2.1\nName: pkg\nVersion: 0.9\n\n"
+	keepWheel, keepBody, keepType := pypiWheel("1.0", keepMeta)
+	dropWheel, dropBody, dropType := pypiWheel("0.9", dropMeta)
+	for _, u := range []struct {
+		body []byte
+		ct   string
+	}{{keepBody, keepType}, {dropBody, dropType}} {
+		if code, out := call("POST", "/pypi/pypi-local/legacy/", u.body, u.ct); code != http.StatusOK {
+			t.Fatalf("pypi upload = %d %s", code, out)
+		}
+	}
+	if code, out := call("DELETE", "/api/v1/pypi/pypi-local/projects/pkg/files/pkg-0.9-py3-none-any.whl", nil, ""); code != http.StatusOK {
+		t.Fatalf("pypi file delete = %d %s", code, out)
+	}
 	// Age every stored blob past the grace period, then add a young
 	// unreferenced one.
 	old := time.Now().Add(-3 * time.Hour)
@@ -147,7 +187,7 @@ func TestGCEndToEnd(t *testing.T) {
 	young := []byte("young and unreferenced")
 	call("POST", "/v2/docker-local/app/blobs/uploads/?digest="+sha(young), young, "")
 	call("DELETE", "/v2/docker-local/app/blobs/"+sha(young), nil, "")
-	garbage := []string{sha(drop.manifest), sha(drop.blobs[0]), sha(drop.blobs[2])}
+	garbage := []string{sha(drop.manifest), sha(drop.blobs[0]), sha(drop.blobs[2]), sha(dropWheel), sha([]byte(dropMeta))}
 
 	gcRun := func(args ...string) (int, string, string) {
 		t.Helper()
@@ -158,7 +198,7 @@ func TestGCEndToEnd(t *testing.T) {
 	auth := []string{"-url", base, "-user", user, "-password-file", pwFile}
 
 	code, out, errOut := gcRun(append([]string{"run", "-dry-run"}, auth...)...)
-	if code != 0 || !strings.Contains(out, "would delete:    3 blobs") || !strings.Contains(out, "succeeded (dry run)") {
+	if code != 0 || !strings.Contains(out, "would delete:    5 blobs") || !strings.Contains(out, "succeeded (dry run)") {
 		t.Fatalf("flint gc run -dry-run = %d\n%s%s", code, out, errOut)
 	}
 	for _, d := range garbage {
@@ -175,7 +215,7 @@ func TestGCEndToEnd(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rep); code != 0 || err != nil {
 		t.Fatalf("flint gc run -json = %d %v\n%s%s", code, err, out, errOut)
 	}
-	if rep.State != gc.StateSucceeded || rep.DryRun || rep.Actor != "admin" || rep.Deleted.Blobs != 3 || rep.InGracePeriod.Blobs != 1 ||
+	if rep.State != gc.StateSucceeded || rep.DryRun || rep.Actor != "admin" || rep.Deleted.Blobs != 5 || rep.InGracePeriod.Blobs != 1 ||
 		rep.GracePeriod != "2h0m0s" {
 		t.Errorf("report = %+v", rep)
 	}
@@ -188,6 +228,14 @@ func TestGCEndToEnd(t *testing.T) {
 		t.Errorf("the young blob was deleted: %v", err)
 	}
 	pull("docker-local/app", "keep", keep)
+	for _, f := range []struct {
+		path string
+		want []byte
+	}{{"pkg-1.0-py3-none-any.whl", keepWheel}, {"pkg-1.0-py3-none-any.whl.metadata", []byte(keepMeta)}} {
+		if code, b := call("GET", "/pypi/pypi-local/files/pkg/"+f.path, nil, ""); code != http.StatusOK || !bytes.Equal(b, f.want) {
+			t.Errorf("pypi download of %s = %d %.100s", f.path, code, b)
+		}
+	}
 	if code, _ := call("GET", "/v2/docker-local/app/manifests/drop", nil, ""); code != http.StatusNotFound {
 		t.Errorf("deleted image pull = %d", code)
 	}
@@ -197,7 +245,7 @@ func TestGCEndToEnd(t *testing.T) {
 		}
 	}
 	_, metricsOut := get(t, http.DefaultClient, base+"/metrics")
-	for _, want := range []string{"flint_gc_reclaimed_blobs_total 3", `flint_gc_runs_total{mode="sweep",result="succeeded"} 1`,
+	for _, want := range []string{"flint_gc_reclaimed_blobs_total 5", `flint_gc_runs_total{mode="sweep",result="succeeded"} 1`,
 		`flint_gc_runs_total{mode="dry_run",result="succeeded"} 1`} {
 		if !strings.Contains(metricsOut, want+"\n") {
 			t.Errorf("metrics lack %q", want)

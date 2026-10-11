@@ -180,7 +180,7 @@ curl -u alice -X PUT https://registry.example/api/v1/pypi/pypi-local/projects/my
 ```
 
 pip and uv skip a yanked release unless a requirement pins it exactly, as in `my-app==1.2.0`.
-A deleted file disappears from the index at once, and its name stays used forever. [Garbage collection](garbage-collection.md) does not yet reclaim PyPI files' disk space: until PyPI registers with it, a run on a server with PyPI records refuses to delete anything.
+A deleted file disappears from the index at once, and its name stays used forever. [Garbage collection](garbage-collection.md) later reclaims its disk space, unless another repository stores the same bytes.
 A project whose files are all deleted has no page, but the repository still owns its name, for [dependency-confusion protection](#virtual-repositories).
 
 ## Proxy repositories
