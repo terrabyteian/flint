@@ -63,11 +63,16 @@ func scanUsers(v meta.View) ([]*user, error) {
 	var err error
 	v.Scan([]byte(userPrefix), nil, func(key []byte, r meta.Record) bool {
 		var u *user
-		u, err = decodeUser(string(key[len(userPrefix):]), r.Value)
+		if u, err = decodeUser(string(key[len(userPrefix):]), r.Value); err != nil {
+			return false
+		}
 		users = append(users, u)
-		return err == nil
+		return true
 	})
-	return users, err
+	if err != nil {
+		return nil, err
+	}
+	return users, nil
 }
 
 // requireAdmins adds a precondition on every administrator's record to b,
@@ -75,6 +80,9 @@ func scanUsers(v meta.View) ([]*user, error) {
 // how many there are.
 func requireAdmins(v meta.View, b *meta.Batch) (int, error) {
 	users, err := scanUsers(v)
+	if err != nil {
+		return 0, err
+	}
 	n := 0
 	for _, u := range users {
 		if u.Admin {
@@ -83,7 +91,7 @@ func requireAdmins(v meta.View, b *meta.Batch) (int, error) {
 			n++
 		}
 	}
-	return n, err
+	return n, nil
 }
 
 // HasAdmin reports whether any administrator exists.

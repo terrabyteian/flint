@@ -407,3 +407,28 @@ func TestConcurrentDemotion(t *testing.T) {
 		t.Errorf("after concurrent demotions: admin exists %v, failures %d (want true, 1)", ok, failed)
 	}
 }
+
+// TestUnreadableUserRecord checks that a user record this build cannot
+// decode, such as one written by a newer flint, makes user listings and
+// administrator changes fail with an error instead of a crash.
+func TestUnreadableUserRecord(t *testing.T) {
+	e := newEnv(t, testConfig)
+	e.addUser("root", "root-password", true)
+	e.addUser("other", "other-password", true)
+	var b meta.Batch
+	b.Put(userKey("future"), []byte{99})
+	if _, err := e.store.Commit(context.Background(), &b); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := e.svc.deleteUser(ctx, nil, "other"); err == nil {
+		t.Error("deleting an administrator succeeded")
+	}
+	if _, err := e.svc.updateUser(ctx, nil, "other", "test", func(u *user) error { u.Admin = false; return nil }); err == nil {
+		t.Error("demoting an administrator succeeded")
+	}
+	if ok, err := e.svc.HasAdmin(); err == nil || ok {
+		t.Errorf("HasAdmin = %v, %v; want an error", ok, err)
+	}
+	e.wantStatus(e.api("GET", "/api/v1/users", "root", "root-password", "", nil), http.StatusInternalServerError, "list")
+}
