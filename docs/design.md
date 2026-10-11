@@ -460,6 +460,7 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/oci` | OCI distribution API: hosted and proxy repositories, referrers. |
 | `internal/pypi` | PyPI simple API, JSON API, uploads: hosted, proxy, and virtual repositories. |
 | `internal/upstream` | Shared upstream client and caching-proxy pieces: credentials, retries, offline fallback, the fetch policy and concurrency cap, revalidation windows, the shared fetcher with its verifier hook, the document cache, the path-cache engine, the negative cache, free-space watcher, size limits, and proxy metrics. |
+| `internal/hostpattern` | The `proxy.allowHosts` host patterns, parsed alike by configuration validation and the upstream fetch policy. |
 | `internal/metrics` | Prometheus text exposition. |
 | `internal/gc` | Online mark-and-sweep garbage collection (M4). Since M3 it holds the GC keys and the precondition every link batch carries, which every format shares. |
 | `internal/blake2b` | BLAKE2b, hand-written, for the BLAKE2b-256 digests PyPI clients send and PyPI's JSON API reports. |
