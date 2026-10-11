@@ -24,11 +24,15 @@ import (
 // wiring: every format is served only under its own path, absolute URLs
 // in served metadata use publicURL, a virtual repository's member filters
 // keep an excluded upstream name out and its publishTo member receives
-// uploads, and after OCI, PyPI, auth, and garbage-collection records are
-// written, every key flint wrote is under a prefix registered with the
-// garbage collector.
+// uploads, and after OCI, PyPI, generic files, auth, and
+// garbage-collection records are written, every key flint wrote is under
+// a prefix registered with the garbage collector.
 func TestRepositoryCore(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/dl/tool.sh" {
+			io.WriteString(w, "#!/bin/sh\n")
+			return
+		}
 		project, ok := strings.CutPrefix(r.URL.Path, "/simple/")
 		if !ok || (project != "acme-lib/" && project != "requests/") {
 			http.NotFound(w, r)
@@ -60,7 +64,11 @@ func TestRepositoryCore(t *testing.T) {
 			{"name": "pypi-local", "format": "pypi", "type": "hosted"},
 			{"name": "pypi-remote", "format": "pypi", "type": "proxy", "proxy": {"url": "` + up.URL + `/simple/"}},
 			{"name": "pypi-all", "format": "pypi", "type": "virtual", "virtual": {"publishTo": "pypi-local",
-				"members": ["pypi-local", {"name": "pypi-remote", "exclude": ["acme-*"]}]}}]}`))
+				"members": ["pypi-local", {"name": "pypi-remote", "exclude": ["acme-*"]}]}},
+			{"name": "files", "format": "generic", "type": "hosted"},
+			{"name": "files-remote", "format": "generic", "type": "proxy", "proxy": {"url": "` + up.URL + `/dl/"}},
+			{"name": "files-all", "format": "generic", "type": "virtual", "virtual": {"publishTo": "files",
+				"members": ["files", "files-remote"]}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,8 +143,39 @@ func TestRepositoryCore(t *testing.T) {
 		t.Errorf("re-upload after delete = %d %s", w.Code, w.Body)
 	}
 
+	// Generic files: an upload through the virtual repository goes to its
+	// publishTo member, a proxied file comes through it, and a deleted
+	// file leaves a tombstone.
+	expect("PUT", "/generic/files-all/dir/a.txt", strings.NewReader("a"), "", http.StatusCreated)
+	expect("GET", "/generic/files/dir/a.txt", nil, "", http.StatusOK)
+	expect("GET", "/generic/files-all/tool.sh", nil, "", http.StatusOK)
+	expect("PUT", "/generic/files/dir/b.txt", strings.NewReader("b"), "", http.StatusCreated)
+	expect("DELETE", "/generic/files/dir/b.txt", nil, "", http.StatusNoContent)
+	expect("GET", "/generic/docker-local/dir/a.txt", nil, "", http.StatusNotFound)
+	expect("GET", "/v2/files/dir/tags/list", nil, "", http.StatusNotFound)
+	// curl and wget get a Basic challenge.
+	anon := httptest.NewRecorder()
+	h.ServeHTTP(anon, httptest.NewRequest("GET", "/generic/files/dir/a.txt", nil))
+	if anon.Code != http.StatusUnauthorized || anon.Header().Get("WWW-Authenticate") != `Basic realm="flint"` {
+		t.Errorf("anonymous generic download = %d, WWW-Authenticate %q", anon.Code, anon.Header().Get("WWW-Authenticate"))
+	}
+
 	// Auth records.
-	expect("POST", "/api/v1/tokens", strings.NewReader(`{"name": "ci"}`), "application/json", http.StatusCreated)
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(expect("POST", "/api/v1/tokens", strings.NewReader(`{"name": "ci"}`), "application/json",
+		http.StatusCreated).Body.Bytes(), &tok); err != nil {
+		t.Fatal(err)
+	}
+	// An API token works as a bearer token, as curl -H and scripts send it.
+	r := httptest.NewRequest("GET", "/generic/files/dir/a.txt", nil)
+	r.Header.Set("Authorization", "Bearer "+tok.Token)
+	bearer := httptest.NewRecorder()
+	h.ServeHTTP(bearer, r)
+	if bearer.Code != http.StatusOK || bearer.Body.String() != "a" {
+		t.Errorf("generic download with a bearer token = %d %s", bearer.Code, bearer.Body)
+	}
 
 	// Garbage-collection records: a run's report.
 	if rep, err := a.gc.Run(context.Background(), gc.RunOptions{}); err != nil || rep.State != gc.StateSucceeded {

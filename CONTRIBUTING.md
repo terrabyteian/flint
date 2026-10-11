@@ -60,6 +60,7 @@ CI also runs the official OCI distribution conformance suite, [`scripts/e2e-oci.
 The `proxy` job runs [`scripts/e2e-proxy.sh`](scripts/e2e-proxy.sh), which pulls real images from Docker Hub and ghcr.io through proxy repositories, then again after restarting flint with its upstreams unreachable.
 The `helm` job runs [`scripts/e2e-helm.sh`](scripts/e2e-helm.sh) with Helm 3 and Helm 4, which pushes charts with `helm push` and uses them through the [classic Helm repository view](docs/helm-repository.md).
 The `pypi` job runs [`scripts/e2e-pypi.sh`](scripts/e2e-pypi.sh), which publishes packages with twine and uv publish and installs them, and real projects from pypi.org, with pip and uv through hosted, proxy, and virtual PyPI repositories, then installs again after restarting flint with its upstream unreachable.
+The `generic` job runs [`scripts/e2e-generic.sh`](scripts/e2e-generic.sh), which uploads, downloads, and lists files with curl and wget in hosted and virtual generic files repositories, and downloads flint's own release binaries through proxy repositories of its GitHub releases, checking them against their published checksums, then downloads again after restarting flint with its upstreams unreachable.
 
 ## Pull requests
 

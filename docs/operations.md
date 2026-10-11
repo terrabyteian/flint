@@ -41,6 +41,9 @@ Actions:
 | `pypi.proxy.cache` | A PyPI proxy repository cached a project listing or file for the client that fetched it. |
 | `pypi.proxy.pulled`, `pypi.proxy.evict` | `(system)`: a size-limited PyPI proxy repository saved its pull times or evicted content. |
 | `pypi.proxy.migrate` | `(system)`: project page records of an earlier version removed at startup, once pages moved to the proxy cache every format shares. |
+| `generic.upload`, `generic.delete` | A file uploaded to, or deleted from, a hosted [generic files repository](generic.md); in an immutable repository, a delete leaves a tombstone. |
+| `generic.proxy.cache` | A generic files proxy repository cached a file, or a newer copy of one it revalidates, for the client that fetched it. |
+| `generic.proxy.pulled`, `generic.proxy.evict` | `(system)`: a size-limited generic files proxy repository saved its pull times or evicted files. |
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |

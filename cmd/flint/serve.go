@@ -20,6 +20,7 @@ import (
 	"github.com/terrabyteian/flint/internal/flock"
 	"github.com/terrabyteian/flint/internal/fsys"
 	"github.com/terrabyteian/flint/internal/gc"
+	"github.com/terrabyteian/flint/internal/generic"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
@@ -127,6 +128,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	janitors.Go(func() { a.oci.RunProxy(janitorCtx) })
 	janitors.Go(func() { a.pypi.RunProxy(janitorCtx) })
 	janitors.Go(func() { a.docs.Run(janitorCtx, a.revalidate) })
+	janitors.Go(func() { a.paths.Run(janitorCtx) })
 	if a.space != nil {
 		janitors.Go(func() { a.space.Run(janitorCtx, upstream.SpaceCheckInterval) })
 	}
@@ -179,6 +181,8 @@ type app struct {
 	// fetch, and revalidate is the longest revalidation window of any.
 	docs       *upstream.DocCache
 	revalidate time.Duration
+	// paths serves the path-addressed proxy repositories of every format.
+	paths *upstream.PathCache
 }
 
 // newServer builds the HTTP server and its metrics over open stores. The
@@ -317,6 +321,27 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		return nil, err
 	}
 	index.Register(srv)
+	paths := upstream.NewPathCache(upstream.PathCacheOptions{Meta: store, Blobs: blobs, Fetcher: fetcher, Docs: docs,
+		Space: space, Metrics: proxyMetrics, Logger: logger, Now: now})
+	files, err := generic.New(generic.Options{
+		Meta:         store,
+		Blobs:        blobs,
+		Repositories: cfg.Repositories,
+		// curl and wget send basic credentials, and wget waits for a
+		// Basic challenge before it does.
+		Authorizer:     authz.Authorizer(auth.Challenge{Style: auth.ChallengeBasic}),
+		Actor:          authz.Actor,
+		Logger:         logger,
+		Metrics:        reg,
+		Upstream:       upOpts,
+		Paths:          paths,
+		VirtualMetrics: virtualMetrics,
+		Now:            now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	files.Register(srv)
 
 	var backups *backup.Manager
 	if cfg.Backup.Directory != "" {
@@ -352,20 +377,20 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	authz.HandleAdmin(srv, gc.StatusPattern, collector.HandleStatus)
 	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
 	return &app{srv: srv, oci: registry, pypi: index, space: space, audit: auditLog, backups: backups, gc: collector,
-		docs: docs, revalidate: revalidate}, nil
+		docs: docs, revalidate: revalidate, paths: paths}, nil
 }
 
 // gcMarkers are the garbage-collection markers of every package that
 // writes metadata: every key family flint writes is under a prefix one of
 // them registers. A format adds its marker here when it is wired in.
 func gcMarkers() []gc.Marker {
-	return []gc.Marker{oci.GCMarker(), pypi.GCMarker(), upstream.Marks, auth.GCMarker()}
+	return []gc.Marker{oci.GCMarker(), pypi.GCMarker(), generic.GCMarker(), upstream.Marks, auth.GCMarker()}
 }
 
 // blobReferences report the blobs every format package's records, and
 // the proxy cache the formats share, reference, for backups to check that
 // they hold them all.
-var blobReferences = []backup.References{oci.References, pypi.References, upstream.References}
+var blobReferences = []backup.References{oci.References, pypi.References, generic.References, upstream.References}
 
 // registerStoreMetrics exposes the metadata store's counters and health.
 func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {

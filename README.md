@@ -1,9 +1,9 @@
 # flint
 
 flint is a self-hosted artifact registry, built from scratch.
-It serves container images and OCI artifacts, and Python packages, from hosted repositories and caching proxies of upstream registries such as Docker Hub, ghcr.io, and PyPI.
+It serves container images and OCI artifacts, Python packages, and arbitrary files, from hosted repositories and caching proxies of upstream registries such as Docker Hub, ghcr.io, and PyPI.
 
-> **Status: pre-alpha.** `flint serve` serves hosted OCI repositories (the OCI Distribution Spec v1.1, checked against the official conformance suite), caching proxies of upstream registries such as Docker Hub and ghcr.io that also work as [containerd mirrors](docs/containerd.md), [classic Helm chart repositories](docs/helm-repository.md) over charts pushed with `helm push`, [PyPI repositories](docs/pypi.md) (hosted, caching proxies of indexes such as pypi.org, and virtual indexes merging them) for pip, uv, and twine, local users and API tokens, the Docker token service, an [admin API](docs/auth.md), incremental [backups](docs/backup.md) with restore, an [audit log](docs/operations.md#audit-log) of every change, and online [garbage collection](docs/garbage-collection.md).
+> **Status: pre-alpha.** `flint serve` serves hosted OCI repositories (the OCI Distribution Spec v1.1, checked against the official conformance suite), caching proxies of upstream registries such as Docker Hub and ghcr.io that also work as [containerd mirrors](docs/containerd.md), [classic Helm chart repositories](docs/helm-repository.md) over charts pushed with `helm push`, [PyPI repositories](docs/pypi.md) (hosted, caching proxies of indexes such as pypi.org, and virtual indexes merging them) for pip, uv, and twine, [generic files repositories](docs/generic.md) (hosted, caching proxies of any download site, and virtual repositories merging them) for curl and wget, local users and API tokens, the Docker token service, an [admin API](docs/auth.md), incremental [backups](docs/backup.md) with restore, an [audit log](docs/operations.md#audit-log) of every change, and online [garbage collection](docs/garbage-collection.md).
 > See the [roadmap](docs/design.md#roadmap) for what comes next.
 
 ## Goals
@@ -11,6 +11,7 @@ It serves container images and OCI artifacts, and Python packages, from hosted r
 - **One static binary plus a data directory.** No database, cache server, or object store to run beside it.
 - **OCI and Docker:** the full OCI Distribution Spec v1.1, the referrers API, multi-arch images, and arbitrary OCI artifacts such as Helm charts.
 - **PyPI:** the simple API (PEP 503 and 691), metadata files, yanking, uploads from twine and uv, and a merged index with dependency-confusion protection.
+- **Generic files:** arbitrary files by path for curl, wget, and scripts, immutable by default, with digest-checked uploads and directory listings.
 - **Caching proxies** that keep upstream content forever, keep serving when the upstream is down, and never delete anything silently.
 - **Durable by construction:** a write is acknowledged only after it is on disk, and all content is stored once by its sha256 digest.
 

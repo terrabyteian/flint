@@ -71,6 +71,23 @@
         ],
         "publishTo": "pypi-local"
       }
+    },
+    {
+      "name": "files",
+      "format": "generic",
+      "type": "hosted"
+    },
+    {
+      "name": "tool-releases",
+      "format": "generic",
+      "type": "proxy",
+      "generic": {
+        "immutable": true
+      },
+      "proxy": {
+        "url": "https://github.com/acme/tool/releases/download/",
+        "allowHosts": ["release-assets.githubusercontent.com", "objects.githubusercontent.com"]
+      }
     }
   ],
   "proxyCache": {
@@ -95,7 +112,7 @@
     },
     "permissions": [
       {
-        "repositories": ["docker-local", "releases", "pypi-local"],
+        "repositories": ["docker-local", "releases", "pypi-local", "files"],
         "role": "write",
         "groups": ["ci"]
       },

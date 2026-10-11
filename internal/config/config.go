@@ -156,11 +156,12 @@ type Log struct {
 
 // Repository formats and types.
 const (
-	FormatOCI   = "oci"
-	FormatPyPI  = "pypi"
-	TypeHosted  = "hosted"
-	TypeProxy   = "proxy"
-	TypeVirtual = "virtual"
+	FormatOCI     = "oci"
+	FormatPyPI    = "pypi"
+	FormatGeneric = "generic"
+	TypeHosted    = "hosted"
+	TypeProxy     = "proxy"
+	TypeVirtual   = "virtual"
 )
 
 // Repository declares one repository.
@@ -192,6 +193,8 @@ type Repository struct {
 	// Virtual configures a virtual repository's members. Required for
 	// type "virtual", and not allowed for other types.
 	Virtual *Virtual `json:"virtual,omitempty"`
+	// Generic holds the settings of a generic files repository.
+	Generic *Generic `json:"generic,omitempty"`
 }
 
 // Proxy configures the upstream registry a proxy repository caches.
@@ -201,6 +204,9 @@ type Proxy struct {
 	// Hub, single-component image names get the "library/" prefix. For
 	// PyPI, it is the simple index URL, such as
 	// "https://pypi.org/simple/"; a URL without a path gets "/simple/".
+	// For generic files, it is any base URL, such as
+	// "https://example.com/releases/download/", under which a request
+	// for <path> fetches <url>/<path>.
 	URL string `json:"url"`
 	// Username and PasswordFile, if set, authenticate to the upstream.
 	// PasswordFile holds the password or access token, such as a mounted
@@ -669,7 +675,8 @@ func validateProxy(v *validator, path, format string, p *Proxy) {
 }
 
 // checkUpstreamURL checks an upstream's URL: a registry's base URL for
-// OCI, or a simple index URL, which may have a path, for PyPI.
+// OCI, or a URL that may have a path: a simple index URL for PyPI, and a
+// base URL for generic files.
 func checkUpstreamURL(s, format string) error {
 	u, err := url.Parse(s)
 	switch {
@@ -683,7 +690,7 @@ func checkUpstreamURL(s, format string) error {
 		return errors.New("must not contain credentials; use username and passwordFile")
 	case u.RawQuery != "" || u.Fragment != "" || u.ForceQuery:
 		return errors.New("must not have a query or fragment")
-	case format != FormatPyPI && u.Path != "" && u.Path != "/":
+	case format != FormatPyPI && format != FormatGeneric && u.Path != "" && u.Path != "/":
 		return errors.New("must be the registry's base URL, without a path: the registry API is served at /v2/")
 	}
 	return nil

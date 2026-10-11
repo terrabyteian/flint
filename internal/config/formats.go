@@ -33,6 +33,48 @@ type formatSpec struct {
 var formats = []formatSpec{
 	{name: FormatOCI, types: []string{TypeHosted, TypeProxy}},
 	{name: FormatPyPI, types: []string{TypeHosted, TypeProxy, TypeVirtual}},
+	{name: FormatGeneric, types: []string{TypeHosted, TypeProxy, TypeVirtual},
+		settings: func(r *Repository) any {
+			if r.Generic == nil {
+				return nil
+			}
+			return r.Generic
+		},
+		check: checkGeneric},
+}
+
+// Generic holds the settings of a generic files repository.
+type Generic struct {
+	// AllowOverwrite lets a client with write replace a file, and one
+	// with delete remove it without leaving a tombstone, such as for a
+	// scratch area or a "latest build" directory. Without it, files are
+	// immutable: an upload of different content to a file's path is
+	// refused, and a deleted file's path can never be used again. Hosted
+	// repositories only.
+	AllowOverwrite bool `json:"allowOverwrite,omitempty"`
+	// Immutable caches files fetched from the upstream forever, never
+	// revalidating them, as suits release download sites whose files
+	// never change. Without it, a cached file is checked upstream again
+	// after the repository's revalidateAfter. Proxy repositories only.
+	Immutable bool `json:"immutable,omitempty"`
+}
+
+// checkGeneric checks a generic files repository's settings, at path.
+func checkGeneric(v *validator, path string, r *Repository) {
+	if g := r.Generic; g != nil {
+		if g.AllowOverwrite && r.Type != TypeHosted {
+			v.addf(path+".allowOverwrite", "is only allowed for a hosted repository")
+		}
+		if g.Immutable && r.Type != TypeProxy {
+			v.addf(path+".immutable", "is only allowed for a proxy repository")
+		}
+	}
+	// Only files cached forever count against a size limit; a file that
+	// is revalidated is a document of the proxy cache, which does not.
+	if p := r.Proxy; r.Type == TypeProxy && p != nil && (p.SizeLimit.set || p.SizeLimit.Bytes != 0) && (r.Generic == nil || !r.Generic.Immutable) {
+		base, _ := strings.CutSuffix(path, "."+FormatGeneric)
+		v.addf(base+".proxy.sizeLimit", "needs generic.immutable: only files cached forever count against a size limit")
+	}
 }
 
 // Formats returns the names of the package formats the configuration

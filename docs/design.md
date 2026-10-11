@@ -177,8 +177,9 @@ Illustrative v1 key space:
 | `pypi\0name\0<repo>\0<normalized filename>` | hosted file name as uploaded, by its normalized form; kept forever, so no spelling of the name can be used again | `internal/pypi` |
 | `pypi\0metadata\0<repo>\0<filename>` | core-metadata file a proxy repository cached | `internal/pypi` |
 | `pypi\0pulled\0file\0<repo>\0<filename>` | last pull of a file cached by a size-limited proxy repository (also `...\0metadata\0...`) | `internal/pypi` |
-| `cache\0doc\0<repo>\0<key>` | document a proxy repository cached, such as a PyPI project page (`<key>` is the format's name for it): blob digest of the upstream's bytes, upstream ETag and Last-Modified, content type, URL, fetch time | `internal/upstream` |
-| `cache\0file\0<repo>\0<path>` | immutable file a path-addressed proxy repository cached: blob digest, size, content type, the other digests verified or computed | `internal/upstream` |
+| `generic\0file\0<repo>\0<path>` | hosted file record (blob digest, size, content type, upload time); kept as a tombstone, without a digest, after delete in an immutable repository | `internal/generic` |
+| `cache\0doc\0<repo>\0<key>` | document a proxy repository cached, such as a PyPI project page or a generic file that is revalidated (`<key>` is the format's name for it): blob digest of the upstream's bytes, upstream ETag and Last-Modified, content type, URL, fetch time | `internal/upstream` |
+| `cache\0file\0<repo>\0<path>` | immutable file a path-addressed proxy repository cached, such as a generic file with `generic.immutable`: blob digest, size, content type, the other digests verified or computed | `internal/upstream` |
 | `cache\0pulled\0file\0<repo>\0<path>` | last pull of a file cached by a size-limited path-addressed proxy repository | `internal/upstream` |
 | `gc\0epoch` | GC epoch counter, incremented by each sweep round's start batch | `internal/gc` |
 | `gc\0doomed\0<digest>` | doomed set of the sweep round in progress; cleared when the round ends, and at startup | `internal/gc` |
@@ -464,7 +465,7 @@ type Marker map[string]MarkFunc
 func Guard(v meta.View, b *meta.Batch, ds ...blob.Digest) error
 ```
 
-- **Registration.** `flint serve` gives the collector the `Marker` of every package that writes metadata (`oci.GCMarker`, `pypi.GCMarker`, `upstream.Marks` for the proxy cache the formats share, `auth.GCMarker`; later formats add theirs). No prefix may start with another. The collector knows no format's encodings: it only calls the functions.
+- **Registration.** `flint serve` gives the collector the `Marker` of every package that writes metadata (`oci.GCMarker`, `pypi.GCMarker`, `generic.GCMarker`, `upstream.Marks` for the proxy cache the formats share, `auth.GCMarker`; later formats add theirs). No prefix may start with another. The collector knows no format's encodings: it only calls the functions.
 - **Unknown records stop deletion.** Marking scans the keys under the registered prefixes, and also the keys between them. A live key under no registered prefix, or a record its function cannot read, makes the run refuse to delete anything and report the key family (the key up to its second separator, such as `pypi\0file\0`), so a format that forgot to register can never lose data.
 - **Proof in tests.** A format's tests write every kind of record the format can, then call `gctest.CheckMarked` or `gctest.CheckStored`, which fail on any key or record the format's marker does not cover.
 - **Links.** A batch that makes a blob visible calls `Guard` with a view it read before its blob-existence check, and fails with a retryable error on `ErrDoomed`. A record that references a blob without linking it, such as a manifest listing its layers, instead requires, at the version it read, a record that references the blob and was written under the same rules, such as the layer's link.
@@ -484,6 +485,7 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/auth` | Users, API tokens, Docker bearer-token service, OIDC, permission checks. |
 | `internal/oci` | OCI distribution API: hosted and proxy repositories, referrers. |
 | `internal/pypi` | PyPI simple API, JSON API, uploads: hosted, proxy, and virtual repositories. |
+| `internal/generic` | Generic files by path, with uploads, downloads, deletes, and listings: hosted, proxy, and virtual repositories. |
 | `internal/upstream` | Shared upstream client and caching-proxy pieces: credentials, retries, offline fallback, the fetch policy and concurrency cap, revalidation windows, the shared fetcher with its verifier hook, the document cache, the path-cache engine, the negative cache, free-space watcher, size limits, and proxy metrics. |
 | `internal/hostpattern` | The `proxy.allowHosts` host patterns, parsed alike by configuration validation and the upstream fetch policy. |
 | `internal/metrics` | Prometheus text exposition. |
@@ -499,8 +501,8 @@ Everything is under `internal/` until a stable public Go API is a deliberate dec
 
 ## Repository types
 
-OCI and PyPI have hosted and caching-proxy repositories, and PyPI virtual repositories; the formats that follow build on the same [repository model](#repository-model).
-Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, and a per-repository index URL for PyPI.
+OCI, PyPI, and generic files have hosted and caching-proxy repositories, and PyPI and generic files virtual repositories; the formats that follow build on the same [repository model](#repository-model).
+Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, a per-repository index URL for PyPI, and a per-repository base URL for generic files.
 For OCI, the first path component of a repository name is the configured repository and the rest, at least one component, is an image name below it: `docker-local/team/app` is image `team/app` in repository `docker-local`, served at `/v2/docker-local/team/app/...`.
 Repository names are unique across formats, so permissions and metrics name a repository unambiguously.
 
@@ -519,6 +521,17 @@ Pages link files relatively (`../../files/<project>/<filename>`), so they do not
 Every format lives under its own path prefix (`/v2/`, `/pypi/`), so the formats that follow PyPI (npm, Maven, Go modules, Cargo) get their own prefixes on the same server; [Repository model](#repository-model) states the rule.
 The admin API's PyPI endpoints, which yank, unyank, and delete, are under `/api/v1/pypi/<repo>/`.
 
+Generic files repositories serve arbitrary files by path for curl, wget, and scripts, each under `/generic/<repo>/`:
+
+| Request | Serves |
+| --- | --- |
+| `GET`, `HEAD /generic/<repo>/<path>` | a file, with `Range` and conditional requests; `ETag` is its sha256 digest |
+| `PUT /generic/<repo>/<path>` | upload; hosted repositories, and virtual repositories with `publishTo` |
+| `DELETE /generic/<repo>/<path>` | delete; hosted repositories |
+| `GET`, `HEAD /generic/<repo>/<dir>/` | the files and directories directly below `<dir>`, as JSON with `Accept: application/json`, else an HTML page of relative links |
+
+A path is one or more `/`-separated segments, none empty, `.`, or `..`, of at most 1024 bytes of UTF-8 without control characters, compared exactly. Every download carries `Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff`, so uploaded content never runs as a page of flint's origin.
+
 ### Hosted
 
 Clients push and pull first-party artifacts.
@@ -527,6 +540,7 @@ PyPI filenames are never reusable, even after the file is deleted: a deleted fil
 Names are compared in normalized form, the project name normalized with `_` (PEP 625 and the wheel file name specification) and the version canonical (PEP 440), so `Foo-1.0.tar.gz`, `foo-1.0.tar.gz`, and `foo-1.0.0.tar.gz` are one name: a `pypi\0name` record, kept forever, claims each normalized name for the spelling first uploaded. As on PyPI, a release has at most one source distribution.
 The upload batch requires the file record and the name record to be absent, and an sdist upload also the project record unchanged, so of concurrent uploads under one name, or of two sdists of a release, exactly one wins; uploading the very same file again succeeds without a change, as on PyPI, so retries are harmless.
 A tombstone keeps only the project, version, and deletion time, no digest, so garbage collection reclaims the file's bytes.
+Generic files follow the [immutable-name rule](#repository-model) for path-shaped formats: uploading the very same content to a path again succeeds without a change, different content is refused with `409`, and a deleted path keeps a tombstone without a digest and is never usable again. The upload batch requires the path's record unchanged (`repo.Publish`), so of concurrent uploads to one path, all with identical content succeed and of different content exactly one does. An upload's `Content-Digest` (`sha-256`, RFC 9530) or `X-Checksum-Sha256` is verified when its blob commits, so content that does not match is never linked. A repository with `generic.allowOverwrite` opts out: an upload with `write` replaces a file, and a delete removes its record without a tombstone, for scratch areas and "latest build" directories. A file's content type is the one given at upload, unless absent or a form type (which curl and wget send by default), else the one its extension implies, recorded at upload so it never changes with the host's MIME tables.
 Hosted PyPI uploads verify the sha256, MD5, and BLAKE2b-256 digests the client sends, and store the file's core metadata (a wheel's `METADATA`, a source distribution's `PKG-INFO`) as its own blob, served as the PEP 658 metadata file where it is reliable.
 Deletes are admin-only, hide the artifact immediately, and leave space reclamation to garbage collection.
 
@@ -536,7 +550,7 @@ Only explicit retention policies delete, and those are opt-in (see [Cleanup and 
 
 ### Caching proxy
 
-A proxy repository fronts one upstream (Docker Hub, ghcr.io, quay.io, PyPI, or another registry), with optional upstream credentials.
+A proxy repository fronts one upstream (Docker Hub, ghcr.io, quay.io, PyPI, or another registry, or for generic files any web server), with optional upstream credentials.
 
 - Digest-addressed content (blobs, manifests by digest, package files) is immutable and is **cached forever**.
 - Mutable lookups (tags, package listings) are revalidated upstream after a short TTL. For Docker Hub, revalidation uses `HEAD` requests on manifests, which do not count against its pull rate limit.
@@ -581,10 +595,17 @@ How the PyPI proxy meets the same rules (M3), with the same shared pieces:
 - **Files are digest-addressed content.** The page names each file's sha256 digest, which is the blob store's digest, so a file is fetched once through the shared fetcher from where the page links, within the fetch policy (often another host, which never gets the upstream credentials), verified at commit, cached forever, and linked with a `pypi\0file` record under the GC precondition. A proxy repository serves only bytes its own upstream sent it: a file is fetched even when a blob with its digest is already stored for another repository, since a digest is not a secret and a page can name any digest; the content-addressed blob store still stores the bytes once. A file whose entry has no sha256 digest cannot be verified and is passed through without being cached. Core-metadata files are fetched, verified against the page's metadata digest, and cached the same way, under the same rule.
 - **Disk pressure and size limits** use the shared free-space watcher and size-limit tracker; files and metadata files count against a size limit, pages do not.
 
+How the generic files proxy meets the same rules, as the first user of the path-cache engine:
+
+- **Any base URL.** The upstream is a base URL, which may have a path; a request for `<path>` fetches `<upstream>/<path>`. Query strings are refused, so the cache key is always the path. Directory listings are not proxied.
+- **Revalidated by default.** flint cannot know whether a path of an arbitrary upstream changes, so each file is a mutable document of the shared document cache (`cache\0doc\0<repo>\0<path>`), revalidated after `revalidateAfter` with a conditional request, served stale while the upstream cannot be reached, and answered `404` once the upstream says it is gone.
+- **`generic.immutable`.** For release download sites, each file is immutable path-cache content (`cache\0file\0<repo>\0<path>`): fetched once through the shared fetcher, cached forever, never revalidated. Only these files count against a size limit, so the configuration refuses `sizeLimit` without `generic.immutable`.
+- **Fetch policy.** The format allows no hosts beyond the upstream's own, so a download site that redirects elsewhere, as GitHub release downloads do, needs that host in `proxy.allowHosts`.
+
 ### Virtual
 
 A virtual repository serves one merged view over an ordered list of hosted and proxy repositories of its format, so clients need a single URL.
-v1 has virtual repositories for PyPI, and OCI and the first-wave formats build on the same model.
+v1 has virtual repositories for PyPI and generic files, and OCI and the other first-wave formats build on the same model.
 The rules are format-agnostic and live in `internal/repo`; each format decides what owning a name means, how names are normalized, and how members' answers merge.
 
 - **Members and filters.** Each member may carry `include` and `exclude` package-name patterns, in which `*` matches any run of characters, as in permission grants. A member is consulted for a name only if the name matches one of its include patterns (any name when it has none) and none of its exclude patterns. Names and patterns are compared after the format's normalization (PEP 503 for PyPI; the exact name for npm, `groupId:artifactId` for Maven, the module path for Go, lowercase with `-` and `_` equal for Cargo).
@@ -598,6 +619,11 @@ For PyPI:
 
 - A hosted repository owns a project from the first upload of one of its files; the `pypi\0project` record is kept forever, so deleting every file does not hand the name back to the upstream.
 - A project page merges the pages of the members that may serve it by file name, the first member's file winning, and the virtual repository's file URLs resolve to that member. The JSON API merges the same way, and the root index lists the projects each member's filters admit.
+
+For generic files:
+
+- The name is the file's path, compared exactly, and filters match whole paths. A hosted member owns a path while it holds a file or a tombstone there.
+- A file is served by the first member, of those `Sources` gives for its path, that has it: a proxy member is asked only after the members before it lack the path, and one that fails is skipped as above. A directory listing merges the hosted members' listings, each filtered, the first member's entry winning.
 
 ## Repository model
 
@@ -616,6 +642,14 @@ For PyPI:
 - Arbitrary OCI artifacts, such as Helm charts and signatures, by media type.
 - A classic Helm chart repository view (`index.yaml` and chart archives) at `/helm/<repo>/` over the charts pushed with `helm push` to a hosted repository with `helmIndex`. Nothing is stored for it: the index is derived from the tags and manifest records, written as JSON (which Helm reads as JSON or, before 3.17, as YAML, so flint needs no YAML code), and cached in memory until a tag in the view changes.
 - Not supported: Docker schema 1.
+
+### Generic files
+
+- `PUT`, `GET`, `HEAD`, and `DELETE` of files by path, with `Range` and conditional requests (`If-None-Match`, `If-Modified-Since`, `If-Range`).
+- Upload digests in `Content-Digest` (RFC 9530, `sha-256`) and `X-Checksum-Sha256`; downloads carry an `ETag` of the sha256 digest.
+- Directory listings as JSON or HTML that `wget -r` can follow.
+- Clients: curl and wget, with basic credentials, a `.netrc` file, or an API token as a bearer token.
+- Not supported: WebDAV, multipart form uploads, and archive extraction or bundling.
 
 ### PyPI
 
@@ -654,7 +688,7 @@ For PyPI:
 - **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping removes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads. The sweep uses a GC epoch counter (`gc\0epoch`): its start batch bumps the epoch and records the doomed set (`gc\0doomed\0<digest>`), and its end batch clears the doomed set. Every link batch, from an upload or a mount, reads the epoch and the digest's doomed entry from the same view, commits with a `Require` on that epoch, and fails with a retryable error if the digest is doomed in that view or the precondition fails; a mount then falls back to a normal upload. Two guarantees make a concurrent link and sweep unable to both succeed: the sweep deletes only doomed blobs that are unreferenced in a view taken after its start batch and in every view pinned with the garbage collector (such as a running backup's), and a link reads the epoch and the doomed entry from one view before its blob-existence check (`Upload.Commit` or the mount's source check), so a sweep that starts after that read makes its precondition fail and a sweep already running is caught by the doomed entry in that view. The `internal/gc` package documentation describes the algorithm that meets these guarantees, and its tests, including crash tests and deterministic interleavings of links with sweeps, prove them.
 - **Garbage-collection decisions.**
   - The grace period is 24 hours by default, configurable, and never below one hour; it counts from the blob's commit time.
-  - A blob is referenced while any record a `Marker` reads names it: in OCI, a blob link, a manifest record (its own bytes, config, layers, and child manifests), a tag, or a referrers entry (not its subject); in PyPI, a hosted file (its bytes and core metadata, but not once it is a tombstone), or a file or core-metadata file a proxy repository cached; in the proxy cache the formats share, a document, such as a PyPI project page, or a file a proxy repository cached.
+  - A blob is referenced while any record a `Marker` reads names it: in OCI, a blob link, a manifest record (its own bytes, config, layers, and child manifests), a tag, or a referrers entry (not its subject); in PyPI, a hosted file (its bytes and core metadata, but not once it is a tombstone), or a file or core-metadata file a proxy repository cached; in generic files, a hosted file (but not its tombstone); in the proxy cache the formats share, a document, such as a PyPI project page, or a file a proxy repository cached.
   - A blob link, in a hosted or proxy repository, is a root only while a manifest stored in its repository name is its blob or lists it (as a config, layer, or child manifest), or its link time, its last read by a blob `HEAD` or `GET`, or the server's start is within the grace period. Reads are kept in memory, not written, so the server's start is their floor. A run first removes the other links, through the `Pruner` the OCI package registers: it finds them in the view it marks, which skips them, and removes each only if it, and its repository name's manifest generation key, are still at the versions it found, and it was not read since; reads wait while a removal commits. Every batch that writes a manifest record writes that generation key without a precondition, so manifest pushes never conflict with each other, while a push and a removal of a link it references cannot both commit: a push after the removal's view changes the key, and one before it requires the link unchanged and fails with `MANIFEST_BLOB_UNKNOWN`. So a manifest delete by any client reclaims the manifest's bytes, and its config and layers once nothing else uses them. Removing a link only takes a reference away, so it needs no epoch precondition; blobs are deleted only by the sweep. A link written before link times were recorded counts as past the grace period.
   - A sweep runs in rounds of at most 50,000 doomed blobs. A round writes its doomed set in batches, the last of which increments the epoch and is the round's start batch; it then takes a view and only after that reads the pinned views, so a view pinned meanwhile follows that view and holds no reference to a doomed blob that view lacks.
   - A doomed set left by a crash is cleared at startup and before every run, without deleting more; the next run starts over.
@@ -667,7 +701,7 @@ For PyPI:
 - **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup takes and pins its metadata view with the garbage collector in one step and holds it until it finishes copying, so the sweep's deletion check covers it and every blob its snapshot references is still present when it is copied. [backup.md](backup.md) is the operator's guide; the decisions behind it:
   - **It runs in the server.** Only the live process can pin a view with the garbage collector, so a backup is started through the admin API (`POST /api/v1/backup`, global admin), which `flint backup` drives and waits on. The target is `backup.directory` from the configuration, never a path in the request, so an admin token cannot make the server write elsewhere. One backup runs at a time, and a `LOCK` file in the target keeps out another process.
   - **The target is a content-addressed blob store** (`internal/blob`'s filesystem layout) shared by every backup in it, plus `backups/<id>/` holding the metadata snapshot (`meta.WriteSnapshot` of the pinned view), the list of blobs the backup needs, and `backup.json`. Copies go through blob store uploads, so each is verified against its digest and fsynced before it counts. `backup.json` records the digests of the other two files and is renamed into place, then its directory fsynced, only after everything else is durable, so an interrupted backup never looks complete. Nothing is deleted from the target, not even incomplete backups.
-  - **It copies every blob in the data directory**, not only those it can tell are referenced, so a backup never depends on every format package reporting its references correctly: every blob the view references was committed before the view was taken, so the blob walk finds it, and a blob that disappears during the walk was unreferenced. Each format package also reports the blobs its records reference (`oci.References`, `pypi.References`), and the backup fails if one is missing.
+  - **It copies every blob in the data directory**, not only those it can tell are referenced, so a backup never depends on every format package reporting its references correctly: every blob the view references was committed before the view was taken, so the blob walk finds it, and a blob that disappears during the walk was unreferenced. Each format package also reports the blobs its records reference (`oci.References`, `pypi.References`, `generic.References`), and the backup fails if one is missing.
   - **Restore** (`flint restore`) writes a backup into a new, empty data directory with `meta.Restore`, re-verifying every blob as it copies it, behind a `RESTORE-INCOMPLETE` marker that `flint serve` refuses. The restored store keeps every record's version and continues the log after the backup's sequence number. `flint backup verify` checks a backup the same way without restoring it.
   - **Secrets.** A backup holds the metadata, including password and API token hashes, but not the signing keys: a restored server generates new ones, which only invalidates bearer tokens and signed URLs that live minutes anyway, so backups never contain private key material. The configuration file and the files it names (TLS keys, the bootstrap password, upstream credentials) belong to the deployment and are not backed up either.
 

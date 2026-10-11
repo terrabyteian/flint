@@ -439,3 +439,94 @@ jobs:
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"
+
+  generic:
+    name: Generic files end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          # GitHub redirects release downloads to another host, which the
+          # proxies must be allowed to fetch from.
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "generic-local", "format": "generic", "type": "hosted"},
+              {"name": "generic-scratch", "format": "generic", "type": "hosted", "generic": {"allowOverwrite": true}},
+              {"name": "flint-releases", "format": "generic", "type": "proxy", "anonymousPull": true,
+               "generic": {"immutable": true},
+               "proxy": {"url": "https://github.com/terrabyteian/flint/releases/download/",
+                         "allowHosts": ["release-assets.githubusercontent.com", "objects.githubusercontent.com"]}},
+              {"name": "flint-releases-revalidated", "format": "generic", "type": "proxy", "anonymousPull": true,
+               "proxy": {"url": "https://github.com/terrabyteian/flint/releases/download/", "revalidateAfter": "1s",
+                         "allowHosts": ["release-assets.githubusercontent.com", "objects.githubusercontent.com"]}},
+              {"name": "generic-all", "format": "generic", "type": "virtual",
+               "virtual": {"publishTo": "generic-local", "members": ["generic-local", "flint-releases"]}}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [
+                {"repositories": ["generic-local", "generic-scratch"], "role": "delete", "groups": ["ci"]},
+                {"repositories": ["generic-all"], "role": "read", "groups": ["ci"]}
+              ]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/flint.pid"
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+          # curl and wget get a Basic challenge.
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:5000/generic/generic-local/)" = 401
+      - name: Create a CI user and API token
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          token=$(curl -fsS -u "ci-bot:$bot_password" http://127.0.0.1:5000/api/v1/tokens \
+            -d '{"name": "e2e", "expiresIn": "2h"}' | jq -r .token)
+          echo "::add-mask::$token"
+          echo "E2E_TOKEN=$token" >>"$GITHUB_ENV"
+      - name: Upload, download, and list with curl and wget
+        env:
+          E2E_USERNAME: ci-bot
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-generic" scripts/e2e-generic.sh online 127.0.0.1:5000 \
+            generic-local generic-scratch flint-releases flint-releases-revalidated generic-all
+      - name: Restart flint with its upstreams unreachable
+        run: |
+          pid=$(cat "$RUNNER_TEMP/flint.pid")
+          kill "$pid"
+          while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+          # Every upstream request now goes to a proxy that refuses connections.
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 NO_PROXY= \
+            "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >>"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Download again from the cache
+        env:
+          E2E_USERNAME: ci-bot
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-generic" scripts/e2e-generic.sh offline 127.0.0.1:5000 \
+            generic-local generic-scratch flint-releases flint-releases-revalidated generic-all
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"
