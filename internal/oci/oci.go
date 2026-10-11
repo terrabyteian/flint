@@ -4,7 +4,9 @@
 // manifests and indexes, Docker schema 2 manifests and manifest lists),
 // the referrers API, paginated tag and catalog listings, and deletes.
 // Proxy repositories cache an upstream registry and are read-only; see
-// proxy.go.
+// proxy.go. Hosted repositories with helmIndex also serve the Helm charts
+// pushed to them as a classic Helm chart repository at /helm/; see
+// helm.go.
 //
 // Clients address an image as <repository>/<name>: the first path
 // component is a repository declared in the configuration, and the rest
@@ -103,6 +105,10 @@ type Options struct {
 	FetchIdleTimeout time.Duration
 	// Authorizer authorizes every request. Required.
 	Authorizer Authorizer
+	// HelmAuthorizer, if set, authorizes the Helm view's requests instead,
+	// so they can be answered in the challenge style Helm clients expect:
+	// they send HTTP basic credentials and know no token service.
+	HelmAuthorizer Authorizer
 	// Logger receives failures; nil means slog.Default().
 	Logger *slog.Logger
 	// Metrics, if set, receives the OCI metrics.
@@ -119,6 +125,7 @@ type Options struct {
 type repository struct {
 	name          string
 	immutableTags bool
+	helmIndex     bool       // serve the Helm view
 	proxy         *proxyRepo // nil for a hosted repository
 }
 
@@ -128,9 +135,11 @@ type Handler struct {
 	blobs blob.Store
 	repos map[string]*repository
 	auth  Authorizer
-	log   *slog.Logger
-	actor func(*http.Request) string
-	now   func() time.Time
+	// helmAuth authorizes the Helm view: Options.HelmAuthorizer, or auth.
+	helmAuth Authorizer
+	log      *slog.Logger
+	actor    func(*http.Request) string
+	now      func() time.Time
 
 	uploadBytes   *metrics.Counter
 	manifestPuts  *metrics.Counter
@@ -146,6 +155,11 @@ type Handler struct {
 	validated     map[string]time.Time // tag key: when the upstream last confirmed it
 	listings      listingCache
 	evictKick     chan struct{}
+
+	// The Helm view.
+	helmMu     sync.Mutex
+	helmViews  map[string]*helmView // by repository and path; only views with charts
+	helmBuilds upstream.Group[*helmView]
 
 	proxyResults   *metrics.Counter
 	upstreamErrors *metrics.Counter
@@ -167,6 +181,7 @@ func New(opts Options) (*Handler, error) {
 		blobs:     opts.Blobs,
 		repos:     map[string]*repository{},
 		auth:      opts.Authorizer,
+		helmAuth:  opts.HelmAuthorizer,
 		log:       opts.Logger,
 		actor:     opts.Actor,
 		now:       opts.Now,
@@ -174,9 +189,13 @@ func New(opts Options) (*Handler, error) {
 		fetcher:   upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout),
 		validated: map[string]time.Time{},
 		evictKick: make(chan struct{}, 1),
+		helmViews: map[string]*helmView{},
 	}
 	if h.log == nil {
 		h.log = slog.Default()
+	}
+	if h.helmAuth == nil {
+		h.helmAuth = h.auth
 	}
 	if h.now == nil {
 		h.now = time.Now
@@ -197,7 +216,7 @@ func New(opts Options) (*Handler, error) {
 		}
 		switch rc.Type {
 		case config.TypeHosted:
-			h.repos[rc.Name] = &repository{name: rc.Name, immutableTags: rc.ImmutableTags}
+			h.repos[rc.Name] = &repository{name: rc.Name, immutableTags: rc.ImmutableTags, helmIndex: rc.HelmIndex}
 		case config.TypeProxy:
 			if rc.Proxy == nil {
 				return nil, fmt.Errorf("oci: proxy repository %s has no upstream", rc.Name)
@@ -275,9 +294,11 @@ func (h *Handler) loadTrackers() error {
 	return nil
 }
 
-// Register mounts the handler at /v2/ on a server.
+// Register mounts the handler at /v2/ on a server, and the Helm view at
+// /helm/.
 func (h *Handler) Register(s interface{ Handle(string, http.Handler) }) {
 	s.Handle("/v2/", h)
+	s.Handle("/helm/", http.HandlerFunc(h.serveHelm))
 }
 
 // repoName is a parsed, validated repository name.

@@ -17,6 +17,7 @@ config:
       type: hosted
       immutableTags: true
       anonymousPull: true
+      helmIndex: true
     - name: dockerhub
       format: oci
       type: proxy

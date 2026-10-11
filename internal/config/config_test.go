@@ -44,7 +44,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 4 || !c.Repositories[1].ImmutableTags || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 4 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -184,8 +184,10 @@ func TestValidation(t *testing.T) {
 			"anonymousPull": true, "proxy": {"url": "https://registry-1.docker.io", "username": "me", "passwordFile": "/run/pw",
 			"revalidateAfter": "1m", "sizeLimit": "500GiB"}}]}`, nil},
 		{"proxy minimal", `{"dataDir": "/d", "repositories": [{"name": "ghcr", "format": "oci", "type": "proxy", "proxy": {"url": "http://localhost:5001/"}}]}`, nil},
-		{"proxy missing", `{"dataDir": "/d", "repositories": [{"name": "p", "format": "oci", "type": "proxy", "immutableTags": true}]}`,
-			[]string{`repositories[0].proxy: is required for type "proxy"`, "repositories[0].immutableTags: is not allowed"}},
+		{"proxy missing", `{"dataDir": "/d", "repositories": [{"name": "p", "format": "oci", "type": "proxy", "immutableTags": true, "helmIndex": true}]}`,
+			[]string{`repositories[0].proxy: is required for type "proxy"`, "repositories[0].immutableTags: is not allowed",
+				"repositories[0].helmIndex: is not allowed for a proxy repository"}},
+		{"helm index", `{"dataDir": "/d", "repositories": [{"name": "charts", "format": "oci", "type": "hosted", "helmIndex": true}]}`, nil},
 		{"proxy on hosted", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "oci", "type": "hosted", "proxy": {"url": "https://ghcr.io"}}]}`,
 			[]string{`repositories[0].proxy: is only allowed for type "proxy"`}},
 		{"proxy bad settings", `{"dataDir": "/d", "repositories": [{"name": "p", "format": "oci", "type": "proxy", "proxy": {

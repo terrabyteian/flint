@@ -124,6 +124,10 @@ type Repository struct {
 	ImmutableTags bool `json:"immutableTags,omitempty"`
 	// AnonymousPull lets unauthenticated clients pull.
 	AnonymousPull bool `json:"anonymousPull,omitempty"`
+	// HelmIndex also serves the Helm charts pushed to the repository as a
+	// classic Helm chart repository at /helm/<name>/. Hosted OCI
+	// repositories only.
+	HelmIndex bool `json:"helmIndex,omitempty"`
 	// Proxy configures a proxy repository's upstream. Required for type
 	// "proxy", and not allowed for other types.
 	Proxy *Proxy `json:"proxy,omitempty"`
@@ -418,6 +422,9 @@ func (c *Config) Validate() error {
 		case TypeProxy:
 			if r.ImmutableTags {
 				v.addf(path+".immutableTags", "is not allowed for a proxy repository, whose tags follow the upstream")
+			}
+			if r.HelmIndex {
+				v.addf(path+".helmIndex", "is not allowed for a proxy repository, which holds only the charts pulled through it")
 			}
 			if r.Proxy == nil {
 				v.addf(path+".proxy", "is required for type %q", TypeProxy)

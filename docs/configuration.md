@@ -40,7 +40,8 @@ Repositories and permission grants declared here are read-only through the API.
       "format": "oci",
       "type": "hosted",
       "immutableTags": true,
-      "anonymousPull": true
+      "anonymousPull": true,
+      "helmIndex": true
     },
     {
       "name": "dockerhub",
@@ -143,6 +144,7 @@ A bare IP address means that one address; IPv4-mapped IPv6 addresses match IPv4 
 | `type` | string | required | Repository type: `hosted`, which clients push to, or `proxy`, a read-only cache of an upstream registry. `virtual` arrives with milestone M3. |
 | `immutableTags` | bool | `false` | Hosted repositories only. Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
+| `helmIndex` | bool | `false` | Hosted repositories only. Also serve the Helm charts pushed to the repository as a classic Helm chart repository at `/helm/<name>/`; see [Helm chart repositories](#helm-chart-repositories). |
 | `proxy` | object | required for `proxy` | The upstream of a proxy repository; see below. Not allowed for other types. |
 
 ### Proxy repository settings
@@ -217,6 +219,11 @@ A proxy repository serves pulls of its upstream's images, such as `registry.exam
 - **Read-only.** Pushes and deletes are refused with `405 UNSUPPORTED`.
 
 Proxy repositories use the same permissions as hosted ones: pulling needs the `read` role or `anonymousPull`. With `anonymousPull`, clients pull without credentials or a token, which is how a containerd registry mirror reaches flint; [containerd mirrors](containerd.md) shows the setup.
+
+### Helm chart repositories
+
+A hosted OCI repository with `helmIndex` also serves the Helm charts pushed to it with `helm push` as a classic Helm chart repository at `/helm/<repository>/`.
+[Helm chart repositories](helm-repository.md) describes the view, its access rules, and client setup.
 
 ### Built-in endpoints
 

@@ -177,15 +177,24 @@ func TestRecords(t *testing.T) {
 	m := manifestRecord{
 		MediaType: mtOCIManifest, Size: 1234, ArtifactType: "application/x", Subject: d1,
 		Annotations: `{"a":"b"}`, Refs: []manifestRef{{refBlob, d1}, {refManifest, d2}},
+		Pushed: time.Unix(1700000000, 7),
 	}
 	got, err := decodeManifest(m.encode())
 	if err != nil || got.MediaType != m.MediaType || got.Size != m.Size || got.ArtifactType != m.ArtifactType ||
-		got.Subject != d1 || got.Annotations != m.Annotations || !slices.Equal(got.Refs, m.Refs) {
+		got.Subject != d1 || got.Annotations != m.Annotations || !slices.Equal(got.Refs, m.Refs) || !got.Pushed.Equal(m.Pushed) {
 		t.Errorf("manifest round trip = %+v, %v", got, err)
 	}
 	empty := manifestRecord{MediaType: mtOCIIndex}
-	if got, err := decodeManifest(empty.encode()); err != nil || !got.Subject.IsZero() || len(got.Refs) != 0 {
+	if got, err := decodeManifest(empty.encode()); err != nil || !got.Subject.IsZero() || len(got.Refs) != 0 || !got.Pushed.IsZero() {
 		t.Errorf("empty manifest round trip = %+v, %v", got, err)
+	}
+	// A version 1 record, written before manifest records had a push
+	// time, decodes without one.
+	v1 := newEnc().str(mtOCIManifest).uvarint(10).str("") // no artifact type
+	v1 = append(v1, 0).str("").uvarint(1)                 // no subject, no annotations, one reference
+	v1 = append(v1, byte(refBlob)).digest(d1)
+	if got, err := decodeManifest(v1); err != nil || got.Size != 10 || !got.Pushed.IsZero() || !slices.Equal(got.Refs, []manifestRef{{refBlob, d1}}) {
+		t.Errorf("version 1 manifest = %+v, %v", got, err)
 	}
 	if d, err := decodeTag(encodeTag(d2)); err != nil || d != d2 {
 		t.Errorf("tag round trip = %v, %v", d, err)
