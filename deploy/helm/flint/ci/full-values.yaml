@@ -42,8 +42,6 @@ tls:
     ipAddresses: ["192.168.1.50"]
     duration: 2160h
     renewBefore: 360h
-bootstrapAdmin:
-  existingSecret: flint-admin
 persistence:
   storageClass: "-"
   size: 50Gi

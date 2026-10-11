@@ -82,13 +82,6 @@ tls:
     # secretName defaults to <fullname>-tls.
     secretName: ""
 
-bootstrapAdmin:
-  # An existing secret holding the initial admin password, mounted read-only
-  # at /etc/flint/bootstrap-admin/password. Local users arrive with milestone
-  # M1's authentication; until then flint does not read it.
-  existingSecret: ""
-  key: password
-
 persistence:
   # Keep the data directory on a PersistentVolumeClaim. Disabled, the data
   # directory is an emptyDir and is lost with the pod.

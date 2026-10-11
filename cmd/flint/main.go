@@ -23,11 +23,11 @@ commands:
 `
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // run executes the subcommand named by args and returns the process exit code.
-func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 2
@@ -42,7 +42,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		context.AfterFunc(ctx, stop)
 		return serve(ctx, args[1:], stderr)
 	case "config":
-		return configCmd(args[1:], stdin, stdout, stderr)
+		return configCmd(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "flint %s\n", version)
 		return 0

@@ -4,6 +4,9 @@
 # flint takes an exclusive lock on its data directory, so the chart runs one
 # replica. A StatefulSet stops the old pod before starting its replacement,
 # and never runs two pods for one claim, even when a node is unreachable.
+# Parallel pod management lets an update replace a pod that never became
+# ready, which OrderedReady waits on forever; with one replica it orders
+# nothing else.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -14,7 +17,7 @@ metadata:
 spec:
   replicas: 1
   serviceName: {{ include "flint.fullname" . }}
-  podManagementPolicy: OrderedReady
+  podManagementPolicy: Parallel
   updateStrategy:
     type: RollingUpdate
   selector:
@@ -103,11 +106,6 @@ spec:
               mountPath: /etc/flint/tls
               readOnly: true
             {{- end }}
-            {{- if .Values.bootstrapAdmin.existingSecret }}
-            - name: bootstrap-admin
-              mountPath: /etc/flint/bootstrap-admin
-              readOnly: true
-            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -129,16 +127,6 @@ spec:
                 path: tls.crt
               - key: tls.key
                 path: tls.key
-        {{- end }}
-        {{- with .Values.bootstrapAdmin }}
-        {{- if .existingSecret }}
-        - name: bootstrap-admin
-          secret:
-            secretName: {{ .existingSecret }}
-            items:
-              - key: {{ .key }}
-                path: password
-        {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

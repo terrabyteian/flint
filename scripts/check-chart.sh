@@ -27,8 +27,8 @@ check() {
 	helm template flint "$chart" --namespace flint --kube-version "$kube_version" "$@" > "$tmp/manifests.yaml"
 	kubeconform -strict -summary -kubernetes-version "$kube_version" \
 		-schema-location default -schema-location "$crd_schemas" "$tmp/manifests.yaml"
-	yq -e 'select(.kind == "ConfigMap") | .data["config.json"]' "$tmp/manifests.yaml" |
-		"$tmp/flint" config check -
+	yq -e 'select(.kind == "ConfigMap") | .data["config.json"]' "$tmp/manifests.yaml" > "$tmp/config.json"
+	"$tmp/flint" config check "$tmp/config.json"
 }
 
 check "default values"

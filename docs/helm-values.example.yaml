@@ -43,12 +43,6 @@ tls:
     dnsNames: ["registry.example.internal"]
     ipAddresses: ["192.168.1.50"]
 
-# The initial admin password, from a secret you create:
-#   kubectl create secret generic flint-admin --namespace flint \
-#     --from-literal=password="$(openssl rand -base64 24)"
-bootstrapAdmin:
-  existingSecret: flint-admin
-
 persistence:
   size: 50Gi
 

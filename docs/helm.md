@@ -9,8 +9,6 @@ Start from [`helm-values.example.yaml`](helm-values.example.yaml), which serves 
 
 ```sh
 kubectl create namespace flint
-kubectl create secret generic flint-admin --namespace flint \
-  --from-literal=password="$(openssl rand -base64 24)"
 helm install flint oci://ghcr.io/terrabyteian/charts/flint --version 0.1.0 \
   --namespace flint --values helm-values.example.yaml
 kubectl rollout status statefulset/flint --namespace flint
@@ -50,12 +48,12 @@ The chart sets three fields itself and refuses to render if you set them:
 | `tls` | `tls.enabled`: the certificate is mounted at `/etc/flint/tls` |
 
 flint validates everything else when it starts, and does not start with an invalid configuration.
-To check a configuration before deploying it, render it and pass it to `flint config check`:
+To check a configuration before deploying it, render it to a file and pass that to `flint config check`:
 
 ```sh
 helm template flint oci://ghcr.io/terrabyteian/charts/flint --version 0.1.0 --values my-values.yaml |
-  yq 'select(.kind == "ConfigMap") | .data["config.json"]' |
-  flint config check -
+  yq 'select(.kind == "ConfigMap") | .data["config.json"]' > config.json
+flint config check config.json
 ```
 
 Keep `config.shutdownTimeout` plus `lifecycle.preStopSleepSeconds` below `terminationGracePeriodSeconds` (defaults 25s, 5, and 40), so a shutdown finishes before the kubelet kills flint.
@@ -79,7 +77,6 @@ The main ones:
 | `tls.enabled` | `false` | Serve HTTPS. Needs `tls.existingSecret` or `tls.certManager.enabled`. |
 | `tls.existingSecret` | none | A `kubernetes.io/tls` secret to serve. |
 | `tls.certManager.enabled` | `false` | Create a cert-manager Certificate from `tls.certManager.issuerRef`. Its names are `tls.certManager.dnsNames` and `ipAddresses` plus the Service's cluster names. |
-| `bootstrapAdmin.existingSecret` | none | A secret with the initial admin password under `bootstrapAdmin.key` (default `password`), mounted at `/etc/flint/bootstrap-admin/password`. flint reads it once local users land in milestone M1. |
 | `persistence.enabled` | `true` | Keep data on a volume; disabled, it is an `emptyDir` lost with the pod. |
 | `persistence.size`, `persistence.storageClass` | `10Gi`, cluster default | The claim template. Kubernetes does not let a StatefulSet's claim template change after install: to grow the volume, resize the claim directly if its storage class allows it. |
 | `persistence.existingClaim` | none | Use this claim instead of the claim template. |
@@ -95,4 +92,5 @@ To terminate TLS in a proxy instead, leave `tls.enabled` off and list the proxy'
 ## Upgrades and uninstalling
 
 `helm upgrade` replaces the pod; flint is unavailable from the moment the old pod stops until the new one is ready.
+If an upgrade leaves the pod failing, for example with a configuration flint rejects or an image tag that does not exist, upgrading again with corrected values or running `helm rollback` replaces the failing pod; the StatefulSet's `Parallel` pod management lets it do so without waiting for the pod to become ready.
 `helm uninstall` leaves the data claim, `data-<statefulset>-0` such as `data-flint-0`, in place, so reinstalling with the same release name reuses the data.

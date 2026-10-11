@@ -39,7 +39,7 @@ const runMainEnv = "FLINT_TEST_RUN_MAIN"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(runMainEnv) == "1" {
-		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+		os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())
 }

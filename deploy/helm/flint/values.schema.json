@@ -158,19 +158,6 @@
         }
       }
     },
-    "bootstrapAdmin": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "existingSecret": {
-          "type": "string"
-        },
-        "key": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
-    },
     "persistence": {
       "type": "object",
       "additionalProperties": false,
