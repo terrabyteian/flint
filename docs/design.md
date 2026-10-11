@@ -724,7 +724,7 @@ For Maven:
 
 - Names are `groupId:artifactId`; filters compare them with `:` and `.` as one separator, so `com.acme.*` keeps group `com.acme` and its subgroups internal.
 - A hosted repository owns an artifact from the first deploy of one of its files; the `maven\0version` record is kept forever.
-- Artifact-level metadata merges the members' version lists by union and recomputes `latest` and `release` from the merged list; group-level plugin entries merge by artifactId, each admitted by the member's filters and ownership as `groupId:artifactId`.
+- Artifact-level metadata merges the members' version lists by union and recomputes `latest` and `release` from the merged list; group-level plugin entries merge by artifactId and by prefix, the first member's winning, so a prefix resolves to one plugin; each is admitted by the member's filters and ownership as `groupId:artifactId`.
 - A file comes from the member that supplied its version: a hosted member that lists the version serves every file of it, and otherwise the first proxy member that has the file. A snapshot version's metadata comes from the first member that has the version.
 - Deploys and deletes go to `publishTo`.
 
