@@ -107,8 +107,8 @@ func TestCredentialedTokenFlow(t *testing.T) {
 	if strings.Contains(err.Error(), "wrong") {
 		t.Errorf("the error reveals the password: %v", err)
 	}
-	if c.Offline() {
-		t.Error("a refused token marked the upstream offline")
+	if !c.Offline() {
+		t.Error("a refused token did not mark the upstream offline")
 	}
 	// The password file is read again, so a rotated secret works at once.
 	if err := os.WriteFile(pwFile, []byte("s3cret\n"), 0o600); err != nil {

@@ -7,9 +7,10 @@
 // anonymously or with the configured credentials and cached until it
 // expires; a Basic challenge is answered with the credentials directly.
 // Transient failures (network errors, 429, 500, 502, 503, and 504) are
-// retried with exponential backoff. A request that still fails marks the
-// upstream offline for a short time, so callers that hold a cached copy
-// serve it at once instead of waiting on an upstream that is down.
+// retried with exponential backoff. A request that still fails, or whose
+// authentication fails, marks the upstream offline for a short time, so
+// callers that hold a cached copy serve it at once instead of waiting on
+// an upstream that is down or asking one that refuses flint's access.
 //
 // Content is verified against its digest while it streams: a manifest
 // before it is returned, and a blob before its final bytes are released
@@ -117,7 +118,7 @@ type Options struct {
 	// later one; zero means DefaultBackoff.
 	Backoff time.Duration
 	// OfflineFor is how long a request that failed with ErrUnavailable
-	// marks the upstream offline; zero means DefaultOfflineFor.
+	// or ErrAuth marks the upstream offline; zero means DefaultOfflineFor.
 	OfflineFor time.Duration
 	// Logger receives warnings; nil means slog.Default().
 	Logger *slog.Logger
@@ -225,7 +226,7 @@ func (c *Client) URL() string { return c.base.String() }
 func (c *Client) Host() string { return c.base.Host }
 
 // Offline reports whether a recent request found the upstream
-// unavailable. Callers holding a cached copy serve it without asking the
+// unavailable or failed to authenticate. Callers holding a cached copy serve it without asking the
 // upstream while it is offline.
 func (c *Client) Offline() bool {
 	c.mu.Lock()
@@ -292,6 +293,9 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 		case ctx.Err() != nil:
 			return nil, c.ctxError(op, ctx)
 		case !errors.Is(err, ErrUnavailable):
+			if errors.Is(err, ErrAuth) {
+				c.setOffline(true)
+			}
 			return nil, err
 		default:
 			lastErr = err

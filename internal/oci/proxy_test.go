@@ -917,7 +917,8 @@ func TestProxyCredentials(t *testing.T) {
 	pe.pull("hub/private/app", "v1", img)
 
 	// When the credentials stop working, the cached tag and its listing
-	// keep being served, and the failure is logged and counted.
+	// keep being served, and the failure is logged and counted once: the
+	// upstream is then offline, so later pulls do not ask for a token.
 	if err := os.WriteFile(pw, []byte("expired\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -925,16 +926,24 @@ func TestProxyCredentials(t *testing.T) {
 	pe.h = pe.newHandler(0, func(p *config.Proxy) { p.Username, p.PasswordFile = "bot", pw })
 	pe.h.log = slog.New(slog.NewTextHandler(&logs, nil))
 	pe.get("/v2/hub/private/app/manifests/v1", img.Manifest)
+	if !pe.h.repos["hub"].proxy.client.Offline() {
+		t.Error("refused credentials did not mark the upstream offline")
+	}
+	tokens := pe.up.Count("GET", "/token")
+	pe.get("/v2/hub/private/app/manifests/v1", img.Manifest)
 	w := pe.do("GET", "/v2/hub/private/app/tags/list", nil)
 	want(t, w, 200, "")
 	if !strings.Contains(w.Body.String(), `"tags":["v1"]`) {
 		t.Errorf("tags with expired credentials: %s", w.Body)
 	}
-	if got := pe.metric(`flint_proxy_requests_total{repository="hub",result="stale"}`); got != "2" {
-		t.Errorf("stale = %q, want 2", got)
+	if n := pe.up.Count("GET", "/token") - tokens; n != 0 {
+		t.Errorf("pulls while offline sent %d token requests", n)
 	}
-	if got := pe.metric(`flint_proxy_upstream_errors_total{repository="hub"}`); got != "2" {
-		t.Errorf("upstream errors = %q, want 2", got)
+	if got := pe.metric(`flint_proxy_requests_total{repository="hub",result="stale"}`); got != "3" {
+		t.Errorf("stale = %q, want 3", got)
+	}
+	if got := pe.metric(`flint_proxy_upstream_errors_total{repository="hub"}`); got != "1" {
+		t.Errorf("upstream errors = %q, want 1", got)
 	}
 	if !strings.Contains(logs.String(), "authentication failed: the token service refused the credentials") {
 		t.Errorf("no warning names the refused credentials:\n%s", logs.String())
