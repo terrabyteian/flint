@@ -160,6 +160,7 @@ const (
 	FormatPyPI    = "pypi"
 	FormatGeneric = "generic"
 	FormatCargo   = "cargo"
+	FormatNPM     = "npm"
 	TypeHosted    = "hosted"
 	TypeProxy     = "proxy"
 	TypeVirtual   = "virtual"
