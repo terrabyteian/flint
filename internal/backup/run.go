@@ -364,7 +364,7 @@ func (m *Manager) execute(ctx context.Context, p *progress, v meta.View) Run {
 // backup writes the backup of v. See the package documentation.
 func (m *Manager) backup(ctx context.Context, p *progress, v meta.View) error {
 	dir := m.opts.Dir
-	if err := mkdirDurable(m.fs, dir); err != nil {
+	if err := MkdirDurable(m.fs, dir, 0o755); err != nil {
 		return fmt.Errorf("creating the backup directory: %w", err)
 	}
 	unlock, err := m.opts.Lock(filepath.Join(dir, lockFile))
@@ -385,7 +385,7 @@ func (m *Manager) backup(ctx context.Context, p *progress, v meta.View) error {
 		m.log.Info("backup: removed the partial blob copies of an interrupted backup", "count", n)
 	}
 	backups := filepath.Join(dir, backupsDir)
-	if err := mkdirDurable(m.fs, backups); err != nil {
+	if err := MkdirDurable(m.fs, backups, 0o755); err != nil {
 		return err
 	}
 	bdir := filepath.Join(backups, p.run.ID)
@@ -626,20 +626,20 @@ func (s *summer) sum() FileSum {
 	return FileSum{Size: s.n, Digest: d}
 }
 
-// mkdirDurable creates dir and any missing parents, syncing the parent of
-// each directory it creates.
-func mkdirDurable(fsy fsys.FS, dir string) error {
+// MkdirDurable creates dir and any missing parents with perm, syncing the
+// parent of each directory it creates.
+func MkdirDurable(fsy fsys.FS, dir string, perm os.FileMode) error {
 	dir = filepath.Clean(dir)
 	if _, err := fsy.Stat(dir); err == nil {
 		return nil
 	}
 	parent := filepath.Dir(dir)
 	if parent != dir {
-		if err := mkdirDurable(fsy, parent); err != nil {
+		if err := MkdirDurable(fsy, parent, perm); err != nil {
 			return err
 		}
 	}
-	if err := fsy.Mkdir(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := fsy.Mkdir(dir, perm); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
 	return fsy.SyncDir(parent)

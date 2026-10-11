@@ -171,7 +171,7 @@ flint restore /var/backups/flint /var/lib/flint-restored
 flint restore -backup 20261011T020000.123Z-48211 /var/backups/flint /var/lib/flint-restored
 ```
 
-It refuses a data directory that holds anything, so it never mixes a backup with other data, and it takes the data directory's lock, so it cannot run on a directory a server is using.
+It refuses a data directory that holds anything but the `lost+found` directory of a new ext4 volume, so it never mixes a backup with other data, and it takes the data directory's lock, so it cannot run on a directory a server is using.
 It checks the backup as `verify` does, and each blob's digest as it copies it; a damaged backup is not restored.
 Then start flint with `dataDir` pointing at the restored directory, or move it into place.
 The restored server holds exactly the state of the backup, continues its metadata log from the backup's sequence number, and creates a new token-signing key.

@@ -514,6 +514,22 @@ func TestRestoreRefusesNonEmptyDataDir(t *testing.T) {
 	if _, err := Restore(context.Background(), backupDir, restoreDir+"2", VerifyOptions{FS: e.dst}); err != nil {
 		t.Fatalf("Restore next to a LOCK file: %v", err)
 	}
+	// So is the lost+found directory of a new ext4 volume, but not a
+	// file of that name.
+	e.dst.MkdirAll(restoreDir+"3/lost+found", 0o700)
+	if _, err := Restore(context.Background(), backupDir, restoreDir+"3", VerifyOptions{FS: e.dst}); err != nil {
+		t.Fatalf("Restore next to lost+found: %v", err)
+	}
+	e.dst.MkdirAll(restoreDir+"4", 0o755)
+	f, err = e.dst.OpenFile(restoreDir+"4/lost+found", os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	_, err = Restore(context.Background(), backupDir, restoreDir+"4", VerifyOptions{FS: e.dst})
+	if err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("Restore next to a lost+found file: %v", err)
+	}
 }
 
 func TestOneBackupAtATime(t *testing.T) {
@@ -716,10 +732,9 @@ func TestRestoreCrash(t *testing.T) {
 	}
 }
 
-// TestRestoreIntoCreatedDataDir restores into a data directory the
-// caller created, with any missing parents, without syncing them, as
-// flint restore does to lock it, and checks that the restored directory
-// survives a crash.
+// TestRestoreIntoCreatedDataDir restores into a data directory created,
+// with missing parents, by MkdirDurable, as flint restore does to lock
+// it, and checks that the restored directory survives a crash.
 func TestRestoreIntoCreatedDataDir(t *testing.T) {
 	e := newEnv(t)
 	e.put("a")
@@ -728,7 +743,7 @@ func TestRestoreIntoCreatedDataDir(t *testing.T) {
 	}
 	fsy := e.dst.Restart(nil)
 	target := restoreDir + "/nested/data"
-	if err := fsy.MkdirAll(target, 0o755); err != nil {
+	if err := MkdirDurable(fsy, target, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Restore(context.Background(), backupDir, target, VerifyOptions{FS: fsy}); err != nil {

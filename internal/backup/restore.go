@@ -20,7 +20,9 @@ import (
 const RestoreMarker = "RESTORE-INCOMPLETE"
 
 // Restore restores a complete backup from the backup directory dir into
-// dataDir, which must not exist or be empty apart from a LOCK file. It
+// dataDir, which must not exist or hold nothing but a LOCK file and a
+// lost+found directory, as on a new ext4 volume. A caller that creates
+// dataDir first, to lock it, creates it with [MkdirDurable]. It
 // checks the backup as Verify does, and each blob's digest as it copies
 // it; a backup with problems is not restored, and the report says why.
 // The restored data directory holds the backed-up metadata and blobs;
@@ -35,7 +37,7 @@ func Restore(ctx context.Context, dir, dataDir string, opts VerifyOptions) (*Rep
 		return nil, err
 	}
 	for _, e := range ents {
-		if e.Name() != lockFile {
+		if e.Name() != lockFile && (e.Name() != "lost+found" || !e.IsDir()) {
 			return nil, fmt.Errorf("the data directory %s is not empty; restore needs a new or empty one", dataDir)
 		}
 	}
@@ -47,14 +49,8 @@ func Restore(ctx context.Context, dir, dataDir string, opts VerifyOptions) (*Rep
 		return rep, rep.Err()
 	}
 
-	if err := mkdirDurable(fsy, dataDir); err != nil {
+	if err := MkdirDurable(fsy, dataDir, 0o750); err != nil {
 		return nil, err
-	}
-	for d := filepath.Clean(dataDir); d != filepath.Dir(d); {
-		d = filepath.Dir(d)
-		if err := fsy.SyncDir(d); err != nil {
-			return nil, err
-		}
 	}
 	if err := writeFileAtomic(fsy, dataDir, RestoreMarker,
 		[]byte("flint restore of backup "+rep.Record.ID+" did not finish; remove this data directory and restore again\n")); err != nil {

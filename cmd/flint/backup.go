@@ -17,6 +17,7 @@ import (
 
 	"github.com/terrabyteian/flint/internal/auth"
 	"github.com/terrabyteian/flint/internal/backup"
+	"github.com/terrabyteian/flint/internal/fsys"
 )
 
 const backupUsage = `usage:
@@ -298,7 +299,7 @@ digest as it copies it. Start flint on the data directory afterwards.
 		return 2
 	}
 	dir, dataDir := fs.Arg(0), fs.Arg(1)
-	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+	if err := backup.MkdirDurable(fsys.OS, dataDir, 0o750); err != nil {
 		fmt.Fprintf(stderr, "flint restore: creating the data directory: %v\n", err)
 		return 1
 	}
