@@ -2,8 +2,9 @@
 #
 # Runs when a v* tag is pushed; recover from a failed run with "Re-run failed
 # jobs". It publishes the multi-arch image to ghcr.io with a cosign signature and an
-# SPDX SBOM attestation, and a GitHub release with static binaries, their
-# checksums, a cosign bundle for the checksums, and the SBOM.
+# SPDX SBOM attestation, the Helm chart to ghcr.io with a cosign signature, and
+# a GitHub release with static binaries, their checksums, a cosign bundle for
+# the checksums, the SBOM, and the chart package.
 #
 # Authentication is the workflow's GITHUB_TOKEN and its OIDC identity only;
 # there are no stored secrets.
@@ -21,6 +22,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/terrabyteian/flint
+  CHARTS: ghcr.io/terrabyteian/charts
 
 jobs:
   version:
@@ -132,13 +134,59 @@ jobs:
           path: sbom/
           if-no-files-found: error
 
-  # The Helm chart task adds a chart job here that pushes deploy/helm/flint to
-  # oci://ghcr.io/terrabyteian/charts and signs it, and adds it to the release
-  # job's needs.
+  chart:
+    name: Helm chart
+    # The chart deploys the image of the same release by default, so it is
+    # published only once that image is.
+    needs: [version, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+      id-token: write # cosign keyless signing
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.0
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # For cosign; helm keeps its own registry login, below.
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Package
+        # Chart versions are SemVer without the tag's "v"; appVersion keeps
+        # it, since it is the image tag.
+        run: |
+          mkdir chart
+          helm package deploy/helm/flint --version "${VERSION#v}" --app-version "$VERSION" --destination chart
+      - name: Push and sign
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+          helm push "chart/flint-${VERSION#v}.tgz" "oci://${CHARTS}" 2>&1 | tee push.log
+          digest=$(sed -n 's/^Digest: //p' push.log)
+          if [ -z "$digest" ]; then
+            echo "::error::helm push printed no digest"
+            exit 1
+          fi
+          cosign sign --yes "${CHARTS}/flint@${digest}"
+          echo "Published ${CHARTS}/flint:${VERSION#v} (${CHARTS}/flint@${digest})" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chart
+          path: chart/
+          if-no-files-found: error
 
   release:
     name: GitHub release
-    needs: [version, binaries, image]
+    needs: [version, binaries, image, chart]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and upload its assets

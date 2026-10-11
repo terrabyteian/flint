@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "flint.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {{- include "flint.config" . | nindent 4 }}

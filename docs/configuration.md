@@ -1,12 +1,13 @@
 # Configuration
 
 flint reads one JSON file, given with `flint serve -config <file>` (default `/etc/flint/config.json`).
-The Helm chart renders it from YAML values; outside Kubernetes you write it by hand.
+The [Helm chart](helm.md#configuration) renders it from YAML values; outside Kubernetes you write it by hand.
 
 The file is decoded strictly.
 An unknown field, a value of the wrong type, or anything after the top-level object is an error, so a misspelled field never falls back to a default silently.
 Every problem found is reported at startup, each with its JSON path, for example `repositories[1].name: "Docker" is not a valid repository name: ...`.
 flint does not start with an invalid configuration.
+`flint config check <file>` checks a file the same way without starting the server, and prints `<file>: ok` or the problems it found; a file of `-` reads standard input.
 
 Users and API tokens are runtime data kept in the metadata store, not configuration.
 Repositories and permission grants declared here are read-only through the API.

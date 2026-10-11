@@ -1,0 +1,19 @@
+apiVersion: v2
+name: flint
+description: Artifact registry for OCI images and Python packages.
+type: application
+# The release workflow sets version and appVersion from the release tag, so
+# a released chart deploys the image of the same release by default. These
+# values are placeholders for the unreleased chart in the repository.
+version: 0.0.0-dev
+appVersion: dev
+# The preStop hook uses the sleep action, since the image has no shell.
+kubeVersion: ">=1.30.0-0"
+home: https://github.com/terrabyteian/flint
+sources:
+  - https://github.com/terrabyteian/flint
+keywords:
+  - registry
+  - oci
+  - docker
+  - pypi

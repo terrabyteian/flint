@@ -1,0 +1,42 @@
+{{- if .Values.tls.certManager.enabled }}
+{{- $fullname := include "flint.fullname" . }}
+{{- with .Values.tls.certManager }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "flint.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ include "flint.tlsSecretName" $ }}
+  issuerRef:
+    name: {{ .issuerRef.name }}
+    kind: {{ .issuerRef.kind }}
+    group: {{ .issuerRef.group }}
+  dnsNames:
+    {{- range .dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+    - {{ $fullname }}
+    - {{ printf "%s.%s" $fullname $.Release.Namespace }}
+    - {{ printf "%s.%s.svc" $fullname $.Release.Namespace }}
+  {{- with .ipAddresses }}
+  ipAddresses:
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- end }}
+  {{- with .duration }}
+  duration: {{ . }}
+  {{- end }}
+  {{- with .renewBefore }}
+  renewBefore: {{ . }}
+  {{- end }}
+  privateKey:
+    {{- toYaml .privateKey | nindent 4 }}
+  usages:
+    - server auth
+    - digital signature
+{{- end }}
+{{- end }}

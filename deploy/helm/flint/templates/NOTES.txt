@@ -1,0 +1,18 @@
+flint {{ .Chart.AppVersion }} is running as {{ include "flint.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+{{- $scheme := ternary "https" "http" .Values.tls.enabled }}
+
+In the cluster it serves {{ $scheme }}://{{ include "flint.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+{{- if eq .Values.service.type "LoadBalancer" }}
+
+Find its external address with:
+  kubectl get service --namespace {{ .Release.Namespace }} {{ include "flint.fullname" . }}
+{{- end }}
+
+Check that it is ready:
+  kubectl port-forward --namespace {{ .Release.Namespace }} service/{{ include "flint.fullname" . }} {{ .Values.service.port }}
+  curl {{ if .Values.tls.enabled }}--insecure {{ end }}{{ $scheme }}://localhost:{{ .Values.service.port }}/readyz
+{{- if not .Values.persistence.enabled }}
+
+WARNING: persistence is disabled. The registry's data is lost when the pod is deleted.
+{{- end }}

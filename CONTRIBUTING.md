@@ -51,6 +51,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/flint
 ```
 
 It also builds the container image for linux/amd64 and linux/arm64 from the [`Dockerfile`](Dockerfile); see [releasing](docs/releasing.md#building-the-image-locally) to build it locally.
+Changes to the Helm chart in [`deploy/helm/flint`](deploy/helm/flint) are checked by `scripts/check-chart.sh`, which needs helm, yq, and kubeconform; see [releasing](docs/releasing.md#checking-the-chart-locally).
 
 ## Pull requests
 

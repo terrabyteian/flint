@@ -1,0 +1,177 @@
+{{- include "flint.validate" . }}
+{{- $scheme := ternary "HTTPS" "HTTP" .Values.tls.enabled }}
+{{- $port := ternary "https" "http" .Values.tls.enabled }}
+# flint takes an exclusive lock on its data directory, so the chart runs one
+# replica. A StatefulSet stops the old pod before starting its replacement,
+# and never runs two pods for one claim, even when a node is unreachable.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "flint.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "flint.fullname" . }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "flint.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flint.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # flint reads its configuration at startup, so a change restarts it.
+        checksum/config: {{ include "flint.config" . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "flint.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: flint
+          image: {{ include "flint.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "-config", "/etc/flint/config.json"]
+          ports:
+            - name: {{ $port }}
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $port }}
+              scheme: {{ $scheme }}
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $port }}
+              scheme: {{ $scheme }}
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ $port }}
+              scheme: {{ $scheme }}
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          {{- if gt (int .Values.lifecycle.preStopSleepSeconds) 0 }}
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ int .Values.lifecycle.preStopSleepSeconds }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/flint/config.json
+              subPath: config.json
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/flint
+            {{- if .Values.tls.enabled }}
+            # Mounted without subPath, so flint sees renewed certificates.
+            - name: tls
+              mountPath: /etc/flint/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.bootstrapAdmin.existingSecret }}
+            - name: bootstrap-admin
+              mountPath: /etc/flint/bootstrap-admin
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "flint.fullname" . }}
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- else if .Values.persistence.existingClaim }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+        {{- end }}
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "flint.tlsSecretName" . }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        {{- end }}
+        {{- with .Values.bootstrapAdmin }}
+        {{- if .existingSecret }}
+        - name: bootstrap-admin
+          secret:
+            secretName: {{ .existingSecret }}
+            items:
+              - key: {{ .key }}
+                path: password
+        {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "flint.selectorLabels" . | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ if eq . "-" }}""{{ else }}{{ . }}{{ end }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}
