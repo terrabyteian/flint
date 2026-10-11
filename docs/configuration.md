@@ -145,6 +145,7 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `tls.certFile` | string | required with `tls` | PEM certificate chain, leaf first. |
 | `tls.keyFile` | string | required with `tls` | PEM private key for the certificate. |
 | `trustedProxies` | array of strings | `[]` | IP addresses or CIDR prefixes of proxies whose forwarded headers are believed. |
+| `publicURL` | string | none | The URL clients reach flint at, such as `"https://flint.example.com"`; see [public URL](#public-url). |
 | `shutdownTimeout` | duration string | `"25s"` | How long a graceful shutdown waits for in-flight requests before closing their connections. Must be positive. |
 | `log.level` | string | `"info"` | Minimum log level: `debug`, `info`, `warn`, or `error`. |
 | `repositories` | array | `[]` | Repositories declared in configuration; see below. |
@@ -176,13 +177,22 @@ The client address is found by reading `X-Forwarded-For` from right to left and 
 `X-Forwarded-Proto` (`http` or `https`) and `X-Forwarded-Host` use their first value.
 A bare IP address means that one address; IPv4-mapped IPv6 addresses match IPv4 entries.
 
+### Public URL
+
+Some package protocols put absolute URLs into the metadata clients store, such as the URLs in PyPI's JSON API, which tools record, and later npm tarball URLs in lockfiles.
+`publicURL` is the base of every absolute URL flint writes into served metadata, so those URLs stay the same however a client reached flint: through an ingress, a port forward, or an internal service name.
+It is an `http` or `https` URL without credentials, a query, or a fragment; it may have a path, when a reverse proxy serves flint under one and strips it before forwarding.
+Without it, absolute URLs are built from the scheme and host of each request, as seen through [trusted proxies](#trusted-proxies).
+Where a protocol allows relative URLs, such as PyPI's project pages and the classic Helm index, flint writes relative ones and `publicURL` does not matter.
+Cached upstream content is stored as the upstream sent it and rewritten when served, so changing `publicURL` takes effect at once.
+
 ### Repositories
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `name` | string | required | The repository's name, which clients address it by: the path prefix of its images, as in `host/docker-local/team/app`, or of its PyPI index, as in `host/pypi/pypi-local/simple/`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique across formats. |
 | `format` | string | required | Package format: `oci` for container images and OCI artifacts, or `pypi` for Python packages. |
-| `type` | string | required | Repository type: `hosted`, which clients publish to; `proxy`, a read-only cache of an upstream registry or index; or, for `pypi`, `virtual`, one index merged from other repositories. |
+| `type` | string | required | Repository type: `hosted`, which clients publish to; `proxy`, a read-only cache of an upstream registry or index; or, for `pypi`, `virtual`, one index merged from other repositories. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
 | `immutableTags` | bool | `false` | Hosted OCI repositories only. Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
 | `helmIndex` | bool | `false` | Hosted OCI repositories only. Also serve the Helm charts pushed to the repository as a classic Helm chart repository at `/helm/<name>/`; see [Helm chart repositories](#helm-chart-repositories). |
@@ -223,10 +233,21 @@ A virtual repository serves one index merged from an ordered list of hosted and 
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `virtual.members` | array of strings | required | The member repositories, in order of precedence: hosted or proxy repositories of the same format, each named once. Where several members have a file of the same name, the first one's is served. |
-| `virtual.dependencyConfusionProtection` | bool | `true` | Once a hosted member owns a package name, never serve that name from a proxy member, so a package published upstream under the same name can never replace or mix with the first-party one. A hosted repository owns a name from the first upload of a file of it, also after every file is deleted. |
+| `virtual.members` | array | required | The member repositories, in order of precedence: hosted or proxy repositories of the same format, each named once. Where several members have the same version or file of a package, the first one's is served. Each member is a repository name, or an object with `name` and the filters below, such as `{"name": "pypi", "exclude": ["acme-*"]}`. |
+| `virtual.members[].name` | string | required | The member repository. |
+| `virtual.members[].include` | array of strings | all names | Package names, or patterns in which `*` matches any run of characters, that the member is consulted for. Without it, the member is consulted for every name. |
+| `virtual.members[].exclude` | array of strings | none | Package names or patterns the member is never consulted for, even if `include` matches them. |
+| `virtual.publishTo` | string | none | A hosted member that receives what clients publish to the virtual repository, so one URL serves both installing and publishing. Without it, the virtual repository refuses uploads. |
+| `virtual.dependencyConfusionProtection` | bool | `true` | Once a hosted member owns a package name, never serve that name from a proxy member, so a package published upstream under the same name can never replace or mix with the first-party one. A hosted repository owns a name from the first upload of a file of it, also after every file is deleted. Only a hosted member whose filters admit a name can own it. |
 
-Pulling through a virtual repository needs the `read` role on the virtual repository itself, or its `anonymousPull`; the members' own permissions are not consulted. Publishing goes to a hosted member directly: a virtual repository refuses uploads.
+Filters are compared with package names after the format's normalization, as clients may spell a name several ways: for PyPI, case and runs of `-`, `_`, and `.` do not matter, so `Acme_*` and `acme-*` are the same filter. A pattern is 1 to 256 printable characters other than space.
+
+> **Recommendation: exclude your internal names from proxy members.**
+> Dependency-confusion protection covers a name only once a hosted member owns it. Until your first upload of a new internal package, or while the hosted member that has it is left out by its filters, a public package of the same name would be served from a proxy member. An `exclude` pattern for every internal prefix or scope on each proxy member, such as `"exclude": ["acme-*"]`, keeps those names out of the upstream for good.
+
+A member that fails, such as a proxy whose upstream cannot be reached and that has nothing cached for a package, is left out of the response, which is built from the other members; flint logs a warning and counts it in `flint_virtual_member_skips_total`. The request fails only if no member could answer.
+
+Pulling through a virtual repository needs the `read` role on the virtual repository itself, or its `anonymousPull`; the members' own permissions are not consulted. Publishing through it needs the role publishing to its `publishTo` member directly needs.
 
 ### Permissions
 
@@ -347,6 +368,7 @@ Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime
 | `flint_oci_link_retries_total` | Link batches retried because a concurrent change, such as a garbage-collection sweep starting, failed their precondition. |
 | `flint_pypi_uploads_total{repository}` | Distribution files uploaded to hosted PyPI repositories. |
 | `flint_pypi_upload_bytes_total{repository}` | Bytes of distribution files uploaded to hosted PyPI repositories. |
+| `flint_virtual_member_skips_total{repository,member}` | Members of virtual repositories left out of a response because they failed, such as a proxy whose upstream could not be reached with nothing cached. |
 | `flint_proxy_requests_total{repository,result}` | Pulls from proxy repositories, by result: `hit` (served from the cache), `revalidated` (served after the upstream confirmed a tag, listing, or project page), `fetched` (fetched from the upstream and cached), `passthrough` (fetched without caching, under disk pressure, over the size limit, or for a PyPI file whose index entry has no sha256 digest), and `stale` (served from the cache because the upstream failed). |
 | `flint_proxy_upstream_errors_total{repository}` | Upstream requests that failed: unreachable, server errors, denied access, failed authentication, or content that did not match its digest. A blob fetch shared by several clients counts once. |
 | `flint_proxy_upstream_bytes_total{repository}` | Bytes fetched from upstream registries and indexes. |

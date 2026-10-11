@@ -8,7 +8,7 @@ When a decision here changes, update this document in the same pull request.
 
 flint is a self-hosted artifact registry, built from scratch.
 
-- Serve container images and OCI artifacts, and Python packages, from one server.
+- Serve container images and OCI artifacts, Python packages, and the other popular package formats from one server.
 - Host first-party artifacts and cache upstream registries (Docker Hub, ghcr.io, quay.io, PyPI) behind the same endpoint.
 - Be efficient: one static binary plus a data directory, low memory per artifact, streaming I/O, and zero-copy `sendfile` reads over plain HTTP/1.1 (for example behind a TLS-terminating trusted proxy).
 - Be safe with data: an acknowledged write survives a crash, and nothing is ever deleted silently.
@@ -18,7 +18,7 @@ flint is a self-hosted artifact registry, built from scratch.
 
 - **Migration from other registries.** flint is a fresh build; there is no import tool.
 - **Multi-server high availability in v1.** v1 is a single server. The data layout and metadata store are designed so HA can be added later without a data migration (see [High availability later](#high-availability-later)).
-- **Every package format.** v1 supports OCI/Docker and PyPI. Other formats come later, on the same storage and metadata core.
+- **Every package format in v1.** v1.0 supports OCI/Docker, PyPI, and a first wave of further formats on the same storage, metadata, and repository core: npm, Maven, Go modules (proxy and virtual), Cargo, generic files, and the classic Helm repository view. A first-wave format that is not ready when the rest of v1.0 is ships in v1.1. NuGet and Terraform come next. Hosted Go modules are deferred: the go command has no publish, and private modules are usually served from version control.
 - **Docker image manifest schema 1.** It is deprecated and unsupported.
 - **PyPI XML-RPC search.** PyPI itself disabled it; flint will never implement it.
 - **Hand-written SAML.** Enterprises that need SAML put an OIDC bridge such as Keycloak or Dex in front (see [Auth and permissions](#auth-and-permissions)).
@@ -480,7 +480,7 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/blob` | Digest type, blob store interface, filesystem implementation (S3 later). |
 | `internal/config` | JSON config loading and validation. |
 | `internal/server` | HTTP server, routing, TLS with hot reload, trusted-proxy handling, health endpoints. |
-| `internal/repo` | Repository model (hosted, proxy, virtual), config-declared and runtime-created repositories. M3 adds the virtual repository rules: member order and dependency-confusion protection, for every format. |
+| `internal/repo` | Repository model (hosted, proxy, virtual), config-declared and runtime-created repositories: the virtual repository rules for every format (member order and filters, dependency-confusion protection, skipping failing members, `publishTo`), the `/<format>/<repo>/` layout, and the immutable-name rule. |
 | `internal/auth` | Users, API tokens, Docker bearer-token service, OIDC, permission checks. |
 | `internal/oci` | OCI distribution API: hosted and proxy repositories, referrers. |
 | `internal/pypi` | PyPI simple API, JSON API, uploads: hosted, proxy, and virtual repositories. |
@@ -499,7 +499,7 @@ Everything is under `internal/` until a stable public Go API is a deliberate dec
 
 ## Repository types
 
-v1 has hosted and caching-proxy repositories for both formats, plus virtual repositories for PyPI.
+OCI and PyPI have hosted and caching-proxy repositories, and PyPI virtual repositories; the formats that follow build on the same [repository model](#repository-model).
 Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, and a per-repository index URL for PyPI.
 For OCI, the first path component of a repository name is the configured repository and the rest, at least one component, is an image name below it: `docker-local/team/app` is image `team/app` in repository `docker-local`, served at `/v2/docker-local/team/app/...`.
 Repository names are unique across formats, so permissions and metrics name a repository unambiguously.
@@ -516,7 +516,7 @@ For PyPI, each repository is served under `/pypi/<repo>/`, following the layout 
 | `/pypi/<repo>/pypi/<project>/json`, `/pypi/<repo>/pypi/<project>/<version>/json` | JSON API |
 
 Pages link files relatively (`../../files/<project>/<filename>`), so they do not depend on the host name a client used and can be cached as they are; only the JSON API, whose URLs are absolute as on PyPI, uses the request's scheme and host.
-Every format lives under its own path prefix (`/v2/`, `/pypi/`), so the formats that follow PyPI (npm, Maven, Go modules, Cargo) get their own prefixes on the same server.
+Every format lives under its own path prefix (`/v2/`, `/pypi/`), so the formats that follow PyPI (npm, Maven, Go modules, Cargo) get their own prefixes on the same server; [Repository model](#repository-model) states the rule.
 The admin API's PyPI endpoints, which yank, unyank, and delete, are under `/api/v1/pypi/<repo>/`.
 
 ### Hosted
@@ -550,7 +550,7 @@ flint never deletes cached content silently to make room.
 
 For containers, a Docker Hub proxy is addressable by path prefix (`host/dockerhub/library/nginx`) and works as a containerd registry mirror.
 Other upstreams (ghcr.io, quay.io) are further proxy repositories.
-OCI virtual repositories are deferred; the hosted-plus-proxy pattern covers v1 needs.
+OCI virtual repositories, which put several registries behind one path, are planned for v1.0 on the shared virtual repository model.
 
 Every format's proxy is built on the shared proxy core in `internal/upstream`, which guarantees:
 
@@ -583,17 +583,28 @@ How the PyPI proxy meets the same rules (M3), with the same shared pieces:
 
 ### Virtual
 
-A virtual repository serves one merged index over an ordered list of hosted and proxy repositories of its format, so `pip` and `uv` need a single index URL.
-v1 has virtual repositories for PyPI only; OCI virtual repositories are deferred, and the formats that follow PyPI build on the same model.
-Dependency-confusion protection is on by default: once a hosted member owns a package name, upstream versions of that name are never served through the virtual repository.
+A virtual repository serves one merged view over an ordered list of hosted and proxy repositories of its format, so clients need a single URL.
+v1 has virtual repositories for PyPI, and OCI and the first-wave formats build on the same model.
+The rules are format-agnostic and live in `internal/repo`; each format decides what owning a name means, how names are normalized, and how members' answers merge.
 
-The rules are format-agnostic and live in `internal/repo`: given the members in order and whether each hosted member owns a name, it returns the members that may serve the name, which with protection are only the hosted ones once any owns it, so the proxies are never even asked.
-The format package decides what owning means and how members merge. For PyPI:
+- **Members and filters.** Each member may carry `include` and `exclude` package-name patterns, in which `*` matches any run of characters, as in permission grants. A member is consulted for a name only if the name matches one of its include patterns (any name when it has none) and none of its exclude patterns. Names and patterns are compared after the format's normalization (PEP 503 for PyPI; the exact name for npm, `groupId:artifactId` for Maven, the module path for Go, lowercase with `-` and `_` equal for Cargo).
+- **Dependency-confusion protection**, on by default: if a hosted member that the filters admit owns a name, only hosted members are consulted for it, so upstream versions of a name a hosted member owns are never served, and the proxies are not even asked. A hosted member owns a name it holds published, yanked or deprecated, or as a tombstone. Filters close the gap ownership alone leaves, such as an internal name not published yet: an exclude pattern for every internal scope, group, or prefix on the proxy members keeps a public package under that name out.
+- **Merging.** Otherwise members are consulted in order. Listings merge by union, and where members have the same version or file, the first member's wins, files and metadata alike; a file is served from the member whose listing supplied it. Pointers a format defines (npm dist-tags, Go `@latest`) come from the first member that has the name; pointers a format computes (Maven `latest` and `release`) are computed from the merged listing.
+- **Failing members.** A member that fails, such as a proxy whose upstream cannot be reached with nothing cached, is skipped: the response is built from the other members, the skip is logged, and `flint_virtual_member_skips_total` counts it. The request fails only if no member could answer.
+- **Publishing.** An optional `publishTo` names one hosted member that receives what clients publish to the virtual repository, so one URL serves both install and publish. Without it, a virtual repository refuses publishes, naming its hosted members.
+- **Permissions.** Reading through a virtual repository needs `read` on it only; members' permissions are not consulted. Publishing through it needs the permissions publishing to its `publishTo` member needs.
+
+For PyPI:
 
 - A hosted repository owns a project from the first upload of one of its files; the `pypi\0project` record is kept forever, so deleting every file does not hand the name back to the upstream.
-- A project page merges the pages of the members that may serve it: where several have a file of the same name, the first member's is served, and the virtual repository's file URLs resolve to that member. The JSON API merges the same way.
-- A member that fails (an unreachable upstream with the project uncached) is left out with a warning, so one upstream outage does not take the index down; the request fails only if no member could answer.
-- Pulling needs `read` on the virtual repository itself; members' permissions are not consulted. Uploads are refused, naming the hosted members.
+- A project page merges the pages of the members that may serve it by file name, the first member's file winning, and the virtual repository's file URLs resolve to that member. The JSON API merges the same way, and the root index lists the projects each member's filters admit.
+
+## Repository model
+
+- **URL layout.** Every format but OCI serves a repository at `/<format>/<repo>/`, such as `/pypi/<repo>/` and later `/npm/<repo>/`, `/maven/<repo>/`, `/go/<repo>/`, `/cargo/<repo>/`, and `/generic/<repo>/`. OCI stays at `/v2/<repo>/...`, which its protocol fixes. A request whose format segment does not match the repository's format is a `404`. The format segment keeps repository names from colliding with flint's own paths (`/v2/`, `/api/`, `/auth/`, `/metrics`, `/healthz`, `/readyz`, `/.well-known/`, the UI) and lets the server dispatch without a lookup. Repository names stay one namespace across formats, so a permission grant addresses one name.
+- **Formats and settings.** The configuration accepts a format once flint serves it, with the repository types that format supports. A format with settings of its own has a settings object named after it, such as `"maven": {...}`, allowed only on repositories of that format and validated as strictly as the rest of the file.
+- **Public URL.** An optional top-level `publicURL` is the base of every absolute URL flint writes into the metadata it serves (the PyPI JSON API today; npm tarball URLs, Cargo's `config.json`, and NuGet's service index later), so clients that store those URLs, as in lockfiles, see one stable URL however they reached flint. Without it, absolute URLs are built from the request's scheme and host as seen through trusted proxies. Where a protocol allows relative URLs (PyPI pages, Helm indexes), flint writes relative ones. Upstream bytes are stored verbatim and rewritten when served, so changing `publicURL` needs no cache flush.
+- **Immutable names.** A published version or file never changes. Path-shaped formats (Maven, generic files) accept an upload of identical content to a published name again without a change, because build tools retry individual file uploads, and refuse different content with `409`. Publish-shaped formats (npm, Cargo, PyPI, NuGet) refuse a duplicate version, as their public registries do (PyPI accepts the very same file again, as PyPI does). Deleting an immutable name leaves a tombstone, and the name is never usable again, not even with identical content; this is PyPI's rule for file names, applied to every format.
 
 ## Spec coverage
 
@@ -668,5 +679,7 @@ The format package decides what owning means and how members merge. For PyPI:
 | M1 hosted OCI | Hosted OCI repositories passing the conformance suite, local users and tokens, Docker token auth, metrics and logs, image and chart on ghcr.io, first homelab deployment. |
 | M2 container proxy | Docker Hub proxy and containerd mirror. |
 | M3 PyPI | PyPI hosted, proxy, and merged virtual index. |
-| M4 v1.0 | Garbage collection, backup, UI, audit log, OIDC; tagged v1.0. |
+| M4 | Garbage collection, backup, UI, audit log, OIDC. |
+| v1.0 | M4 plus the first wave of formats on the shared format core: npm, Maven, Go modules (proxy and virtual), Cargo, generic files, the classic Helm view, and OCI virtual repositories; tagged v1.0. A first-wave format not ready when the rest is ships in v1.1. |
+| v1.1 | First-wave formats that missed v1.0; then NuGet and Terraform. |
 | After v1 | S3 storage, retention policies, trusted publishing, ACME, LDAP, then multi-server HA. |
