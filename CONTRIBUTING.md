@@ -15,6 +15,9 @@ git commit -s
 This adds `Signed-off-by: Your Name <you@example.com>` using your git `user.name` and `user.email`.
 To sign off commits you already made on a branch, run `git rebase --signoff main`.
 
+Outside contributors must sign off every commit.
+The `dco` job in CI runs [`scripts/check-dco.sh`](scripts/check-dco.sh) on every pull request and fails on any commit without a `Signed-off-by` line matching its author; commits authored by the project owner are exempt.
+
 ## Standard library only
 
 flint builds with the Go standard library and nothing else.
