@@ -827,6 +827,21 @@ func TestVirtualPushUpstreamIndex(t *testing.T) {
 		ve.pullImage("local/library/nginx", img.Digest, img)
 		ve.pullImage("hub/library/nginx", img.Digest, img)
 	}
+
+	// As crane tag retags an image pulled for one platform, pushing only
+	// the index without checking for the platform images: those no member
+	// has cached are fetched from the proxy member's upstream, as a pull
+	// by digest would, with their blobs.
+	ve = newVirtualEnv(t)
+	index, platforms = ve.putUpstreamIndex("library/nginx", "1.27")
+	ve.pull("all/library/nginx", "1.27", index, nil)
+	ve.pullImage("all/library/nginx", platforms[0].Digest, platforms[0])
+	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/pinned", index, "Content-Type", mtOCIIndex), http.StatusCreated, "")
+	ve.pull("local/library/nginx", "pinned", index, nil)
+	for _, img := range platforms {
+		ve.pullImage("local/library/nginx", img.Digest, img)
+	}
+	ve.pull("all/library/nginx", "pinned", index, nil)
 }
 
 // TestVirtualPushUpstreamIndexRefused checks that a push of an index
@@ -872,13 +887,25 @@ func TestVirtualPushUpstreamIndexRefused(t *testing.T) {
 		})
 	}
 
-	// A platform image no member holds: the push reports it, and the other
-	// platform image, which the proxy member holds, is not linked either.
+	// A platform image no member holds and the upstream does not have: the
+	// push reports it, and the other platform image, which the proxy
+	// member holds, is not linked either.
 	ve := newVirtualEnv(t)
 	index, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
 	ve.pull("all/library/nginx", "1.27", index, nil)
 	ve.pullImage("all/library/nginx", platforms[0].Digest, platforms[0])
-	want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", index, "Content-Type", mtOCIIndex), http.StatusBadRequest, codeManifestBlobUnknown)
+	ve.hub.SetStatus(func(r *http.Request) int {
+		if strings.HasSuffix(r.URL.Path, "/manifests/"+platforms[1].Digest) {
+			return http.StatusNotFound
+		}
+		return 0
+	})
+	w := ve.do("PUT", "/v2/all/library/nginx/manifests/1.27", index, "Content-Type", mtOCIIndex)
+	want(t, w, http.StatusBadRequest, codeManifestBlobUnknown)
+	if msg := errorMessage(t, w); !strings.Contains(msg, platforms[1].Digest) {
+		t.Errorf("the refusal does not name the platform image: %s", msg)
+	}
+	ve.hub.SetStatus(nil)
 	want(t, ve.do("GET", "/v2/local/library/nginx/tags/list", nil), http.StatusNotFound, codeNameUnknown)
 	ve.pull("all/library/nginx", "1.27", index, nil)
 }
