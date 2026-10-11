@@ -127,10 +127,9 @@ func (s *Service) grant(p *Principal, params []string) ([]access, bool) {
 			if !ok || typ != "repository" {
 				continue
 			}
-			role := s.Role(p, name)
 			var allowed []string
 			for _, a := range actions {
-				if need, ok := actionRole(a); ok && role >= need && !slices.Contains(allowed, a) {
+				if need, ok := actionRole(a); ok && s.scopeRole(p, name, a) >= need && !slices.Contains(allowed, a) {
 					allowed = append(allowed, a)
 				}
 			}
@@ -149,6 +148,21 @@ func (s *Service) grant(p *Principal, params []string) ([]access, bool) {
 		}
 	}
 	return granted, true
+}
+
+// scopeRole returns the role that governs action on repository path name
+// for p: p's role on name, or for a push or delete through a virtual
+// repository, p's role on the same path within its publishTo member, as
+// AuthorizeVirtual checks it, and none without a publishTo.
+func (s *Service) scopeRole(p *Principal, name, action string) Role {
+	governing, ok := s.policy.through(name, action)
+	switch {
+	case !ok:
+		return s.Role(p, name)
+	case governing == "":
+		return RoleNone
+	}
+	return s.Role(p, governing)
 }
 
 // parseScope splits a scope "type:name:actions" at its first and last

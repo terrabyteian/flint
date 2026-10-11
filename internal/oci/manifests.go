@@ -279,7 +279,7 @@ func (h *Handler) putManifest(w http.ResponseWriter, r *http.Request, rn *repoNa
 	}
 	h.manifestPuts.With(rn.repo).Inc()
 	hd := w.Header()
-	hd.Set("Location", "/v2/"+rn.full+"/manifests/"+d.String())
+	hd.Set("Location", "/v2/"+rn.path()+"/manifests/"+d.String())
 	hd.Set("Docker-Content-Digest", d.String())
 	if !pm.record.Subject.IsZero() {
 		hd.Set("OCI-Subject", pm.record.Subject.String())

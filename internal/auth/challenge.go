@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/terrabyteian/flint/internal/server"
@@ -65,13 +66,25 @@ func (s *Service) Authorizer(c Challenge) *Authorizer {
 // check is one action on one repository that a request needs.
 type check struct {
 	repo, action string
+	// scope, if set, is the repository a token from the token service
+	// must grant the action on instead of repo: the virtual repository a
+	// push through it addresses, whose roles are repo's.
+	scope string
+}
+
+// scopeRepo returns the repository a token must grant c's action on.
+func (c check) scopeRepo() string {
+	if c.scope != "" {
+		return c.scope
+	}
+	return c.repo
 }
 
 // checksFor returns the checks for actions on repo.
 func checksFor(repo string, actions []string) []check {
 	cs := make([]check, len(actions))
 	for i, a := range actions {
-		cs[i] = check{repo, a}
+		cs[i] = check{repo: repo, action: a}
 	}
 	return cs
 }
@@ -107,15 +120,17 @@ func (a *Authorizer) AuthorizeVirtual(w http.ResponseWriter, r *http.Request, vi
 }
 
 // virtualChecks maps actions through virtual repository virtual onto the
-// repositories whose roles govern them.
+// repositories whose roles govern them. A token from the token service
+// must grant each on virtual, the repository the client addresses: the
+// token service grants a push on a virtual repository for the role on
+// its publishTo member.
 func virtualChecks(virtual, publishTo string, actions []string) []check {
 	cs := make([]check, len(actions))
 	for i, act := range actions {
-		repo := virtual
+		cs[i] = check{repo: virtual, action: act}
 		if act != ActionPull {
-			repo = publishTo
+			cs[i] = check{repo: publishTo, action: act, scope: virtual}
 		}
-		cs[i] = check{repo, act}
 	}
 	return cs
 }
@@ -127,13 +142,16 @@ func scopeOf(cs []check) string {
 	var repos []string
 	byRepo := map[string][]string{}
 	for _, c := range cs {
-		if c.repo == "" {
+		repo := c.scopeRepo()
+		if repo == "" {
 			continue
 		}
-		if _, ok := byRepo[c.repo]; !ok {
-			repos = append(repos, c.repo)
+		if _, ok := byRepo[repo]; !ok {
+			repos = append(repos, repo)
 		}
-		byRepo[c.repo] = append(byRepo[c.repo], c.action)
+		if !slices.Contains(byRepo[repo], c.action) {
+			byRepo[repo] = append(byRepo[repo], c.action)
+		}
 	}
 	for _, repo := range repos {
 		scopes = append(scopes, repoScope(repo, byRepo[repo]))
@@ -201,7 +219,7 @@ func (s *Service) permits(c credentials, cs []check) bool {
 		if !ok || ch.repo == "" || s.Role(c.principal, ch.repo) < need {
 			return false
 		}
-		if c.kind == credJWT && !c.jwt.allows(ch.repo, ch.action) {
+		if c.kind == credJWT && !c.jwt.allows(ch.scopeRepo(), ch.action) {
 			return false
 		}
 	}

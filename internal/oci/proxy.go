@@ -123,6 +123,22 @@ func (p *proxyRepo) upstreamName(name string) string {
 	return name
 }
 
+// mirrors reports whether the proxy's upstream is the registry ns, as
+// containerd names the registry of an image in the ns parameter of a
+// mirror request: the upstream's host, or for Docker Hub, docker.io or
+// another host Docker Hub goes by.
+func (p *proxyRepo) mirrors(ns string) bool {
+	if p.dockerHub {
+		switch strings.ToLower(ns) {
+		case "docker.io", "index.docker.io", dockerHubHost:
+			return true
+		}
+		return false
+	}
+	host := p.client.Host()
+	return strings.EqualFold(ns, host) || strings.EqualFold(ns, strings.TrimSuffix(host, ":443"))
+}
+
 // proxied is a manifest resolved through a proxy repository.
 type proxied struct {
 	d      blob.Digest

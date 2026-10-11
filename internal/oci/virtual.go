@@ -1,0 +1,606 @@
+package oci
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/repo"
+	"github.com/terrabyteian/flint/internal/server"
+)
+
+// A virtual repository serves one view of its members, hosted and proxy
+// OCI repositories, at /v2/<virtual>/<name>, by the rules of
+// repo.Virtual:
+//
+//   - A pull asks the members that may serve the image name (see
+//     repo.Virtual.Sources) in order, and the first that has what it asks
+//     for serves it, as a pull from that member would. With
+//     dependency-confusion protection, once a hosted member holds a
+//     manifest of the name, the proxy members are not asked about it, so
+//     an upstream image never shadows a first-party one.
+//   - A manifest by tag follows the members' order, so the first member's
+//     tag wins. Content addressed by digest is the same whichever member
+//     serves it, so a manifest by digest or a blob is asked first of the
+//     members that hold it under the name already, then of the member
+//     that last served a manifest of the name, then of the others in
+//     order. Each member serves only what it legitimately holds under the
+//     name: a hosted member what is linked there, a proxy what its
+//     upstream has under the name. The virtual repository links nothing,
+//     so it never links a blob by its digest alone.
+//   - A tag listing is the union of the members' listings, sorted and
+//     paginated as a hosted repository's is.
+//   - Referrers of a manifest are served by the member that holds it.
+//   - A member that fails, such as a proxy whose upstream cannot be
+//     reached with nothing cached, is skipped (see repo.First); a request
+//     fails only if no member answered.
+//   - A request with the ns query parameter, which containerd adds to the
+//     requests it sends to a registry mirror to name the registry the
+//     image comes from, is answered by the proxy members whose upstream is
+//     that registry only, so one mirror endpoint fronts several
+//     registries. Without such a member it is not found, and containerd
+//     tries its next host.
+//   - Pushes and deletes go to the publishTo member, as if addressed to
+//     it, with the locations in responses naming the virtual repository.
+//     They are refused if there is no publishTo or its filters do not
+//     admit the name.
+//
+// A virtual repository stores nothing of its own; it remembers in memory
+// only which member last served a manifest of each name.
+
+const (
+	// maxSuppliers bounds the names whose manifest's member is
+	// remembered.
+	maxSuppliers = 4096
+	// maxTagPages bounds the pages of one member's tag listing that a
+	// virtual repository's listing reads.
+	maxTagPages = 64
+	// maxHeldError bounds the body of a member's error response held back.
+	maxHeldError = 64 << 10
+)
+
+// errMiss means a member does not have what a request asks for.
+var errMiss = errors.New("oci: the member does not have it")
+
+func isMiss(err error) bool { return errors.Is(err, errMiss) }
+
+// serveFunc serves a request for repository name rn.
+type serveFunc func(http.ResponseWriter, *http.Request, *repoName, string)
+
+// suppliers remembers which member of a virtual repository last served a
+// manifest of each image name, so the blobs of the image are asked of
+// that member first.
+type suppliers struct {
+	mu sync.Mutex
+	m  map[string]string // member by full name in the virtual repository
+}
+
+func (s *suppliers) get(full string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.m[full]
+}
+
+func (s *suppliers) put(full, member string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = map[string]string{}
+	}
+	if _, ok := s.m[full]; !ok && len(s.m) >= maxSuppliers {
+		for k := range s.m { // drop an arbitrary entry
+			delete(s.m, k)
+			break
+		}
+	}
+	s.m[full] = member
+}
+
+// member returns name rn of a virtual repository within its member
+// called member.
+func (h *Handler) member(rn *repoName, member string) *repoName {
+	return &repoName{full: member + "/" + rn.name, repo: member, name: rn.name, cfg: h.repos[member], addr: rn.full}
+}
+
+// serveVirtual serves a request to virtual repository rn, which a hosted
+// repository would serve with o.
+func (h *Handler) serveVirtual(w http.ResponseWriter, r *http.Request, rn *repoName, ep endpoint, arg string, o op) {
+	if !slices.Equal(o.actions, []string{ActionPull}) {
+		h.virtualPublish(w, r, rn, ep, arg, o)
+		return
+	}
+	if !h.auth.Authorize(w, r, rn.full, ActionPull) {
+		return
+	}
+	members, err := h.virtualSources(r, rn)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	switch ep {
+	case epBlob:
+		h.virtualBlob(w, r, rn, members, arg)
+	case epManifest:
+		h.virtualManifest(w, r, rn, members, arg)
+	case epTags:
+		h.virtualTags(w, r, rn, members)
+	case epReferrers:
+		h.virtualReferrers(w, r, rn, members, arg)
+	}
+}
+
+// virtualPublish serves a push or delete to virtual repository rn, with
+// o, the operation of its publishTo member.
+func (h *Handler) virtualPublish(w http.ResponseWriter, r *http.Request, rn *repoName, ep endpoint, arg string, o op) {
+	v := rn.cfg.virtual
+	if v.PublishTo == "" {
+		allowed := "" // uploads: nothing is allowed
+		if ep == epBlob || ep == epManifest {
+			allowed = "GET, HEAD"
+		}
+		instead := "a hosted repository"
+		if hosted := v.Hosted(); len(hosted) > 0 {
+			instead = "one of its hosted members: " + strings.Join(hosted, ", ")
+		}
+		w.Header().Set("Allow", allowed)
+		h.writeError(w, r, newError(http.StatusMethodNotAllowed, codeUnsupported,
+			"repository %s is a virtual repository without publishTo; push to %s", rn.repo, instead))
+		return
+	}
+	mrn := h.member(rn, v.PublishTo)
+	if !h.authorizeVirtual(w, r, rn, mrn, o.actions...) {
+		return
+	}
+	if err := v.CheckPublish(rn.name); err != nil {
+		h.writeError(w, r, newError(http.StatusForbidden, codeDenied, "%v", err))
+		return
+	}
+	server.LogAttrs(r.Context(), slog.String("member", mrn.repo))
+	o.serve(w, r, mrn, arg)
+}
+
+// authorizeVirtual authorizes actions through virtual repository name rn,
+// whose publishTo member's name is mrn.
+func (h *Handler) authorizeVirtual(w http.ResponseWriter, r *http.Request, rn, mrn *repoName, actions ...string) bool {
+	if va, ok := h.auth.(VirtualAuthorizer); ok {
+		return va.AuthorizeVirtual(w, r, rn.full, mrn.full, actions...)
+	}
+	for _, a := range actions {
+		target := mrn.full
+		if a == ActionPull {
+			target = rn.full
+		}
+		if !h.auth.Authorize(w, r, target, a) {
+			return false
+		}
+	}
+	return true
+}
+
+// virtualSources returns the members of virtual repository rn that may
+// serve a pull of its image name, in order: for a request with the ns
+// parameter, the proxy members that mirror that registry and admit the
+// name, and otherwise the members repo.Virtual.Sources returns.
+func (h *Handler) virtualSources(r *http.Request, rn *repoName) ([]repo.Member, error) {
+	ns := r.URL.Query().Get("ns")
+	if ns == "" {
+		return h.sourcesOf(rn), nil
+	}
+	v := rn.cfg.virtual
+	var out []repo.Member
+	for _, m := range v.Members {
+		if p := h.repos[m.Name].proxy; p != nil && p.mirrors(ns) && v.Admits(m, rn.name) {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		return nil, newError(http.StatusNotFound, codeNameUnknown,
+			"virtual repository %s has no member that mirrors registry %s for %s", rn.repo, abbrev(ns), rn.name)
+	}
+	return out, nil
+}
+
+// sourcesOf returns the members of virtual repository rn that may serve
+// its image name; a hosted member owns the name once it holds a manifest
+// of it.
+func (h *Handler) sourcesOf(rn *repoName) []repo.Member {
+	v := h.view()
+	defer v.Release()
+	return rn.cfg.virtual.Sources(rn.name, func(hosted string) bool {
+		return nameExists(v, &repoName{repo: hosted, name: rn.name})
+	})
+}
+
+// byDigest orders members for content addressed by digest: first those
+// that hold it under rn's image name already, as held reports, then the
+// member that last served a manifest of the name, then the others, each
+// in the members' order.
+func (h *Handler) byDigest(rn *repoName, members []repo.Member, held func(meta.View, *repoName) bool) []repo.Member {
+	v := h.view()
+	defer v.Release()
+	supplier := h.suppliers.get(rn.full)
+	rank := make(map[string]int, len(members))
+	for _, m := range members {
+		switch {
+		case held(v, h.member(rn, m.Name)):
+			rank[m.Name] = 0
+		case m.Name == supplier:
+			rank[m.Name] = 1
+		default:
+			rank[m.Name] = 2
+		}
+	}
+	out := slices.Clone(members)
+	slices.SortStableFunc(out, func(a, b repo.Member) int { return rank[a.Name] - rank[b.Name] })
+	return out
+}
+
+// virtualFirst serves a request to virtual repository rn from the first
+// of members that has what it asks for, with the handler serve returns
+// for the member. If none has it, it answers notFound, or the first
+// member's failure if one failed. It returns the member that served the
+// request.
+func (h *Handler) virtualFirst(w http.ResponseWriter, r *http.Request, rn *repoName, members []repo.Member, arg string,
+	serve func(repo.Member) serveFunc, notFound error) (repo.Member, bool) {
+	a, ok, err := repo.First(r.Context(), rn.cfg.virtual, members, rn.name, func(ctx context.Context, m repo.Member) (struct{}, error) {
+		mw := newMemberWriter(w)
+		serve(m)(mw, r, h.member(rn, m.Name), arg)
+		return struct{}{}, mw.result()
+	}, isMiss)
+	switch {
+	case ok:
+		server.LogAttrs(r.Context(), slog.String("member", a.Member.Name))
+	case err == nil:
+		h.writeError(w, r, notFound)
+	default:
+		h.writeMemberError(w, r, err)
+	}
+	return a.Member, ok
+}
+
+// writeMemberError answers with err, a member's failure: its response
+// as the member wrote it, if it is one.
+func (h *Handler) writeMemberError(w http.ResponseWriter, r *http.Request, err error) {
+	var held *heldResponse
+	switch {
+	case errors.As(err, &held):
+		held.replay(w, r)
+	case r.Context().Err() != nil: // the client went away
+	default:
+		h.writeError(w, r, err)
+	}
+}
+
+// virtualManifest serves GET and HEAD /v2/<name>/manifests/<reference> of
+// a virtual repository.
+func (h *Handler) virtualManifest(w http.ResponseWriter, r *http.Request, rn *repoName, members []repo.Member, ref string) {
+	switch {
+	case strings.Contains(ref, ":"):
+		d, err := parseDigest(ref)
+		if err != nil {
+			h.writeError(w, r, err)
+			return
+		}
+		members = h.byDigest(rn, members, func(v meta.View, mrn *repoName) bool {
+			_, ok := v.Get(manifestKey(mrn, d))
+			return ok
+		})
+	case !validTag(ref):
+		h.writeError(w, r, manifestUnknown(rn, ref))
+		return
+	}
+	m, ok := h.virtualFirst(w, r, rn, members, ref, func(m repo.Member) serveFunc {
+		if h.repos[m.Name].proxy != nil {
+			return h.proxyGetManifest
+		}
+		return h.memberGetManifest
+	}, manifestUnknown(rn, ref))
+	if ok {
+		h.suppliers.put(rn.full, m.Name)
+	}
+}
+
+// memberGetManifest is getManifest for a hosted member of a virtual
+// repository. Once the member holds the manifest, its answer is final,
+// even a 404 because the request's Accept header does not include the
+// manifest's media type: another member's manifest of the tag must not
+// take its place.
+func (h *Handler) memberGetManifest(w http.ResponseWriter, r *http.Request, rn *repoName, ref string) {
+	v := h.view()
+	_, _, _, err := lookupManifest(v, rn, ref)
+	v.Release()
+	if mw, ok := w.(*memberWriter); ok && err == nil {
+		mw.final = true
+	}
+	h.getManifest(w, r, rn, ref)
+}
+
+// virtualBlob serves GET and HEAD /v2/<name>/blobs/<digest> of a virtual
+// repository.
+func (h *Handler) virtualBlob(w http.ResponseWriter, r *http.Request, rn *repoName, members []repo.Member, arg string) {
+	d, err := parseDigest(arg)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	members = h.byDigest(rn, members, func(v meta.View, mrn *repoName) bool {
+		_, ok := v.Get(blobKey(mrn, d))
+		return ok
+	})
+	h.virtualFirst(w, r, rn, members, arg, func(m repo.Member) serveFunc {
+		if h.repos[m.Name].proxy != nil {
+			return h.proxyGetBlob
+		}
+		return h.getBlob
+	}, blobUnknown(d))
+}
+
+// virtualTags serves GET /v2/<name>/tags/list of a virtual repository:
+// the union of its members' tags, in lexical order.
+func (h *Handler) virtualTags(w http.ResponseWriter, r *http.Request, rn *repoName, members []repo.Member) {
+	n, last, err := pageParams(r)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	answers, err := repo.Consult(r.Context(), rn.cfg.virtual, members, rn.name,
+		func(ctx context.Context, m repo.Member) ([]string, error) {
+			return h.memberTags(r, h.member(rn, m.Name))
+		}, isMiss)
+	if err != nil {
+		h.writeMemberError(w, r, err)
+		return
+	}
+	if len(answers) == 0 {
+		h.writeError(w, r, newError(http.StatusNotFound, codeNameUnknown, "repository %s has no manifests", rn.full))
+		return
+	}
+	lists := make([][]string, len(answers))
+	for i, a := range answers {
+		lists[i] = a.Value
+	}
+	all := repo.Merge(lists, func(t string) string { return t })
+	sort.Strings(all)
+	i := sort.SearchStrings(all, last)
+	if i < len(all) && last != "" && all[i] == last {
+		i++
+	}
+	tags := all[i:]
+	more := len(tags) > n
+	if more {
+		tags = tags[:n]
+	}
+	if more && n > 0 {
+		setNextLink(w, "/v2/"+rn.full+"/tags/list", n, tags[len(tags)-1])
+	}
+	writeJSON(w, "application/json", struct {
+		Name string   `json:"name"`
+		Tags []string `json:"tags"`
+	}{rn.full, tags})
+}
+
+// memberTags returns every tag a member's tag listing holds, reading its
+// pages, or errMiss if the member does not know the name.
+func (h *Handler) memberTags(r *http.Request, mrn *repoName) ([]string, error) {
+	serve := serveFunc(h.listTags)
+	if mrn.cfg.proxy != nil {
+		serve = h.proxyListTags
+	}
+	tags := []string{}
+	query := ""
+	for range maxTagPages {
+		req := r.Clone(r.Context())
+		req.URL.RawQuery = query
+		mw := newMemberWriter(nil)
+		serve(mw, req, mrn, "")
+		if err := mw.result(); err != nil {
+			return nil, err
+		}
+		var tl struct {
+			Tags []string `json:"tags"`
+		}
+		if err := json.Unmarshal(mw.body, &tl); err != nil {
+			return nil, fmt.Errorf("the tag listing of %s is not valid JSON: %w", mrn.full, err)
+		}
+		tags = append(tags, tl.Tags...)
+		if query = nextQuery(mw.header.Get("Link")); query == "" {
+			break
+		}
+	}
+	return tags, nil
+}
+
+// virtualReferrers serves GET /v2/<name>/referrers/<digest> of a virtual
+// repository: the referrers the member that holds the manifest serves, or
+// none if no member holds it.
+func (h *Handler) virtualReferrers(w http.ResponseWriter, r *http.Request, rn *repoName, members []repo.Member, arg string) {
+	d, err := parseDigest(arg)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	m, ok := h.subjectHolder(r, rn, members, d)
+	switch {
+	case ok && h.repos[m.Name].proxy != nil:
+		server.LogAttrs(r.Context(), slog.String("member", m.Name))
+		h.proxyListReferrers(w, r, h.member(rn, m.Name), arg)
+	case ok:
+		server.LogAttrs(r.Context(), slog.String("member", m.Name))
+		h.listReferrers(w, r, h.member(rn, m.Name), arg)
+	case r.Context().Err() != nil:
+	default:
+		if r.URL.Query().Get("artifactType") != "" {
+			w.Header().Set("OCI-Filters-Applied", "artifactType")
+		}
+		writeJSON(w, mtOCIIndex, struct {
+			SchemaVersion int        `json:"schemaVersion"`
+			MediaType     string     `json:"mediaType"`
+			Manifests     []struct{} `json:"manifests"`
+		}{2, mtOCIIndex, []struct{}{}})
+	}
+}
+
+// subjectHolder returns the member that holds manifest d under rn's image
+// name: the first of members that holds it, or referrers of it, already,
+// or else the first that can serve it.
+func (h *Handler) subjectHolder(r *http.Request, rn *repoName, members []repo.Member, d blob.Digest) (repo.Member, bool) {
+	v := h.view()
+	for _, m := range members {
+		mrn := h.member(rn, m.Name)
+		if _, ok := v.Get(manifestKey(mrn, d)); ok || hasReferrers(v, mrn, d) {
+			v.Release()
+			return m, true
+		}
+	}
+	v.Release()
+	head := r.Clone(r.Context())
+	head.Method = http.MethodHead
+	head.Header.Del("Accept") // the referrers request's, for the index it wants
+	a, ok, _ := repo.First(r.Context(), rn.cfg.virtual, h.byDigest(rn, members, func(meta.View, *repoName) bool { return false }), rn.name,
+		func(ctx context.Context, m repo.Member) (struct{}, error) {
+			mrn := h.member(rn, m.Name)
+			mw := newMemberWriter(nil)
+			if mrn.cfg.proxy != nil {
+				h.proxyGetManifest(mw, head, mrn, d.String())
+			} else {
+				h.getManifest(mw, head, mrn, d.String())
+			}
+			return struct{}{}, mw.result()
+		}, isMiss)
+	return a.Member, ok
+}
+
+// hasReferrers reports whether rn holds a manifest whose subject is d.
+func hasReferrers(v meta.View, rn *repoName, d blob.Digest) bool {
+	found := false
+	v.Scan(referrerPrefix(rn, d), nil, func([]byte, meta.Record) bool {
+		found = true
+		return false
+	})
+	return found
+}
+
+// memberWriter is the ResponseWriter through which a member of a virtual
+// repository answers a request. A success, or an error other than not
+// found or a server failure, passes through to the client as the member
+// writes it. A not found or a server failure is held back, so that the
+// next member can be asked instead, unless final is set. With no client
+// writer, every response is held back, for the virtual repository to
+// read.
+type memberWriter struct {
+	w      http.ResponseWriter // nil to hold back every response
+	header http.Header
+	status int
+	passed bool // the response passes through to w
+	final  bool // pass through whatever the status
+	body   []byte
+	limit  int // bounds a held-back body
+}
+
+func newMemberWriter(w http.ResponseWriter) *memberWriter {
+	mw := &memberWriter{w: w, header: http.Header{}, limit: maxHeldError}
+	if w == nil {
+		mw.limit = maxListingSize
+	}
+	return mw
+}
+
+func (m *memberWriter) Header() http.Header { return m.header }
+
+func (m *memberWriter) WriteHeader(status int) {
+	if m.status != 0 {
+		return
+	}
+	m.status = status
+	if m.w == nil || !m.final && (status == http.StatusNotFound || status >= 500) {
+		return
+	}
+	m.passed = true
+	hd := m.w.Header()
+	for k, vs := range m.header {
+		hd[k] = vs
+	}
+	m.w.WriteHeader(status)
+}
+
+func (m *memberWriter) Write(p []byte) (int, error) {
+	if m.status == 0 {
+		m.WriteHeader(http.StatusOK)
+	}
+	if m.passed {
+		return m.w.Write(p)
+	}
+	if len(m.body)+len(p) > m.limit {
+		return 0, errors.New("oci: the response is too large to hold back")
+	}
+	m.body = append(m.body, p...)
+	return len(p), nil
+}
+
+// ReadFrom passes a blob the member serves from the blob store through to
+// the client's writer, so it still reaches net/http's sendfile path.
+func (m *memberWriter) ReadFrom(src io.Reader) (int64, error) {
+	if m.status == 0 {
+		m.WriteHeader(http.StatusOK)
+	}
+	if rf, ok := m.w.(io.ReaderFrom); ok && m.passed {
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(struct{ io.Writer }{m}, src)
+}
+
+// result returns nil if the member answered the request, errMiss if it
+// does not have what the request asks for, and otherwise its failure.
+func (m *memberWriter) result() error {
+	switch {
+	case m.status == 0:
+		return errors.New("oci: the member wrote no response")
+	case m.passed, m.status != http.StatusNotFound && m.status < 500:
+		return nil
+	case m.status == http.StatusNotFound:
+		return errMiss
+	}
+	return &heldResponse{status: m.status, header: m.header, body: m.body}
+}
+
+// heldResponse is a member's failure, the response it wrote.
+type heldResponse struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
+func (e *heldResponse) Error() string {
+	msg := bytes.TrimSpace(e.body)
+	if len(msg) > 200 {
+		msg = msg[:200]
+	}
+	return fmt.Sprintf("status %d: %s", e.status, msg)
+}
+
+// replay writes the response to the client.
+func (e *heldResponse) replay(w http.ResponseWriter, r *http.Request) {
+	hd := w.Header()
+	for k, vs := range e.header {
+		hd[k] = vs
+	}
+	if r.Method != http.MethodHead {
+		hd.Set("Content-Length", strconv.Itoa(len(e.body)))
+	}
+	w.WriteHeader(e.status)
+	if r.Method != http.MethodHead {
+		w.Write(e.body)
+	}
+}
