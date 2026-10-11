@@ -32,6 +32,30 @@ config:
       type: proxy
       proxy:
         url: https://ghcr.io
+    - name: pypi-local
+      format: pypi
+      type: hosted
+    - name: pypi
+      format: pypi
+      type: proxy
+      proxy:
+        url: https://pypi.org/simple/
+        revalidateAfter: 10m
+        sizeLimit: 500GiB
+    - name: private-index
+      format: pypi
+      type: proxy
+      proxy:
+        url: https://pypi.example.internal/simple/
+        username: flint-mirror
+        passwordFile: /etc/flint/upstream/private-index/password
+    - name: pypi-all
+      format: pypi
+      type: virtual
+      anonymousPull: true
+      virtual:
+        members: [pypi-local, private-index, pypi]
+        dependencyConfusionProtection: true
   proxyCache:
     minFreeSpace: 20GiB
   audit:
@@ -40,7 +64,7 @@ config:
       maxSize: 10GiB
   auth:
     permissions:
-      - repositories: ["docker-local", "releases"]
+      - repositories: ["docker-local", "releases", "pypi-local"]
         role: write
         groups: ["ci"]
 bootstrapAdmin:
@@ -50,6 +74,8 @@ bootstrapAdmin:
 upstreamSecrets:
   - name: dockerhub
     existingSecret: dockerhub-credentials
+  - name: private-index
+    existingSecret: private-index-credentials
 containerPort: 8443
 service:
   type: LoadBalancer

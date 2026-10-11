@@ -103,6 +103,14 @@ type Options struct {
 	// FetchIdleTimeout is how long a proxy's blob fetch waits for the
 	// upstream to send more; zero means upstream.DefaultIdleTimeout.
 	FetchIdleTimeout time.Duration
+	// Fetcher, if set, fetches proxied blobs, shared with other formats'
+	// proxy repositories; nil means a new one with FetchIdleTimeout.
+	Fetcher *upstream.Fetcher
+	// ProxyMetrics, if set, are the proxy metrics shared with other
+	// formats' proxy repositories; nil registers them on Metrics, with
+	// the fetches in flight and, with a proxy repository, the disk
+	// pressure of Space.
+	ProxyMetrics *upstream.Metrics
 	// Authorizer authorizes every request. Required.
 	Authorizer Authorizer
 	// HelmAuthorizer, if set, authorizes the Helm view's requests instead,
@@ -186,7 +194,7 @@ func New(opts Options) (*Handler, error) {
 		actor:     opts.Actor,
 		now:       opts.Now,
 		space:     opts.Space,
-		fetcher:   upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout),
+		fetcher:   opts.Fetcher,
 		validated: map[string]time.Time{},
 		evictKick: make(chan struct{}, 1),
 		helmViews: map[string]*helmView{},
@@ -196,6 +204,9 @@ func New(opts Options) (*Handler, error) {
 	}
 	if h.helmAuth == nil {
 		h.helmAuth = h.auth
+	}
+	if h.fetcher == nil {
+		h.fetcher = upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout)
 	}
 	if h.now == nil {
 		h.now = time.Now
@@ -239,35 +250,19 @@ func New(opts Options) (*Handler, error) {
 		"Manifests pushed, by repository.", "repository")
 	h.linkConflicts = reg.Counter("flint_oci_link_retries_total",
 		"Link batches retried after a metadata precondition failed.").With()
-	h.proxyResults = reg.Counter("flint_proxy_requests_total",
-		"Pulls from proxy repositories, by repository and result: hit (served from the cache), "+
-			"revalidated (served after the upstream confirmed a tag or listing), fetched (fetched from the upstream and cached), "+
-			"passthrough (fetched from the upstream without caching), stale (served from the cache because the upstream failed).",
-		"repository", "result")
-	h.upstreamErrors = reg.Counter("flint_proxy_upstream_errors_total",
-		"Proxy requests to upstream registries that failed, by repository.", "repository")
-	h.upstreamBytes = reg.Counter("flint_proxy_upstream_bytes_total",
-		"Bytes proxy repositories fetched from upstream registries, by repository.", "repository")
-	h.evictions = reg.Counter("flint_proxy_evictions_total",
-		"Cached items proxy repositories evicted to stay within their size limits, by repository.", "repository")
-	h.cachedBytes = reg.Gauge("flint_proxy_cached_bytes",
-		"Bytes cached by size-limited proxy repositories, by repository.", "repository")
-	fetcher := h.fetcher
-	reg.GaugeFunc("flint_proxy_fetches_in_flight", "Blobs proxy repositories are fetching from upstream registries.",
-		func() float64 { return float64(fetcher.Active()) })
-	if h.space != nil && h.hasProxy {
+	pm := opts.ProxyMetrics
+	if pm == nil {
 		space := h.space
-		reg.GaugeFunc("flint_proxy_disk_pressure",
-			"1 while the data directory's free space is below proxyCache.minFreeSpace and proxy repositories pass new content through without caching it, else 0.",
-			func() float64 {
-				if space.Pressure() {
-					return 1
-				}
-				return 0
-			})
-		reg.GaugeFunc("flint_data_free_bytes", "Free bytes on the data directory's filesystem, as last measured.",
-			func() float64 { return float64(space.Free()) })
+		if !h.hasProxy {
+			space = nil
+		}
+		pm = upstream.NewMetrics(reg, h.fetcher, space)
 	}
+	h.proxyResults = pm.Requests
+	h.upstreamErrors = pm.UpstreamErrors
+	h.upstreamBytes = pm.UpstreamBytes
+	h.evictions = pm.Evictions
+	h.cachedBytes = pm.CachedBytes
 	if err := h.loadTrackers(); err != nil {
 		return nil, err
 	}
@@ -280,11 +275,11 @@ func (h *Handler) loadTrackers() error {
 	v := h.view()
 	defer v.Release()
 	for _, c := range h.trackers() {
-		if err := c.load(v); err != nil {
-			return fmt.Errorf("oci: loading the cache of proxy repository %s: %w", c.repo, err)
+		if err := loadTracker(c, v); err != nil {
+			return fmt.Errorf("oci: loading the cache of proxy repository %s: %w", c.Repo(), err)
 		}
-		h.cachedBytes.With(c.repo).Set(float64(c.size()))
-		if c.size() > c.limit {
+		h.cachedBytes.With(c.Repo()).Set(float64(c.Size()))
+		if c.Size() > c.Limit() {
 			select {
 			case h.evictKick <- struct{}{}:
 			default:

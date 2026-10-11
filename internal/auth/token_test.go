@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/terrabyteian/flint/internal/meta"
 )
 
 // parseChallenge parses a Bearer WWW-Authenticate challenge.
@@ -467,5 +470,51 @@ func TestCatalog(t *testing.T) {
 	}
 	if resp := e.do(request{path: "/test/catalog", user: "alice", pass: "wrong-password"}); resp.status != http.StatusUnauthorized {
 		t.Errorf("catalog with a wrong password: %d", resp.status)
+	}
+}
+
+// TestPermit checks the basic-credential check PyPI clients go through.
+func TestPermit(t *testing.T) {
+	e := newEnv(t, testConfig)
+	e.addUser("carol", "carol-password", false, "ci")
+	tok := e.addToken("carol", false, time.Time{})
+	readOnly := e.addToken("carol", false, time.Time{}, Scope{Repositories: []string{"docker-local"}, Role: RoleRead})
+	jwt := func() string {
+		resp, tok := e.dockerFlow("/test/pull/docker-local/app", "carol", "carol-password")
+		if resp.status != http.StatusOK {
+			t.Fatalf("docker flow: %d", resp.status)
+		}
+		return tok
+	}()
+	for _, tt := range []struct {
+		name      string
+		auth      func(*http.Request)
+		repo      string
+		actions   []string
+		want      int
+		wantActor string
+	}{
+		{"anonymous on a private repository", nil, "docker-local", []string{"pull"}, http.StatusUnauthorized, ""},
+		{"anonymous pull with anonymousPull", nil, "public", []string{"pull"}, http.StatusOK, meta.ActorAnonymous},
+		{"anonymous push with anonymousPull", nil, "public", []string{"pull", "push"}, http.StatusUnauthorized, ""},
+		{"password", func(r *http.Request) { r.SetBasicAuth("carol", "carol-password") }, "docker-local", []string{"pull", "push"}, http.StatusOK, "carol"},
+		{"__token__", func(r *http.Request) { r.SetBasicAuth(TokenUser, tok) }, "docker-local", []string{"pull", "push"}, http.StatusOK, "carol"},
+		{"read-only token pushing", func(r *http.Request) { r.SetBasicAuth(TokenUser, readOnly) }, "docker-local", []string{"pull", "push"}, http.StatusForbidden, ""},
+		{"no delete role", func(r *http.Request) { r.SetBasicAuth("carol", "carol-password") }, "docker-local", []string{"delete"}, http.StatusForbidden, ""},
+		{"wrong password", func(r *http.Request) { r.SetBasicAuth("carol", "wrong-password") }, "public", []string{"pull"}, http.StatusUnauthorized, ""},
+		{"bearer token", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+jwt) }, "docker-local", []string{"pull"}, http.StatusUnauthorized, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/pypi/x/simple/", nil)
+			if tt.auth != nil {
+				tt.auth(r)
+			}
+			if got := e.svc.Permit(r, tt.repo, tt.actions...); got != tt.want {
+				t.Fatalf("Permit = %d, want %d", got, tt.want)
+			}
+			if tt.wantActor != "" && !strings.HasPrefix(e.svc.Actor(r), tt.wantActor) {
+				t.Errorf("Actor = %q, want %q", e.svc.Actor(r), tt.wantActor)
+			}
+		})
 	}
 }

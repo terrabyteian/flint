@@ -21,6 +21,7 @@ import (
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
+	"github.com/terrabyteian/flint/internal/pypi"
 	"github.com/terrabyteian/flint/internal/server"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
@@ -113,8 +114,12 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	// keep the audit log current, in the background until the stores close.
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
 	var janitors sync.WaitGroup
-	janitors.Go(func() { a.registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
-	janitors.Go(func() { a.registry.RunProxy(janitorCtx) })
+	janitors.Go(func() { a.oci.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
+	janitors.Go(func() { a.oci.RunProxy(janitorCtx) })
+	janitors.Go(func() { a.pypi.RunProxy(janitorCtx) })
+	if a.space != nil {
+		janitors.Go(func() { a.space.Run(janitorCtx, upstream.SpaceCheckInterval) })
+	}
 	janitors.Go(func() { a.audit.Run(janitorCtx) })
 	defer func() {
 		stopJanitor()
@@ -147,12 +152,16 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	return nil
 }
 
-// app is a server and the parts of it that run in the background.
+// app is a server and the parts of it that run in the background: the
+// package format handlers, the free-space watcher their proxy
+// repositories share, the audit log, and the backup manager.
 type app struct {
-	srv      *server.Server
-	registry *oci.Handler
-	audit    *audit.Log
-	backups  *backup.Manager
+	srv     *server.Server
+	oci     *oci.Handler
+	pypi    *pypi.Handler
+	space   *upstream.Space // nil without proxy repositories
+	audit   *audit.Log
+	backups *backup.Manager // nil unless backups are configured
 }
 
 // newServer builds the HTTP server and its metrics over open stores. The
@@ -235,6 +244,11 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 			break
 		}
 	}
+	// Proxy repositories of every format share one fetcher and one set of
+	// proxy metrics.
+	fetcher := upstream.NewFetcher(blobs, 0)
+	proxyMetrics := upstream.NewMetrics(reg, fetcher, space)
+	upOpts := upstream.Options{UserAgent: "flint/" + version}
 	registry, err := oci.New(oci.Options{
 		Meta:         store,
 		Blobs:        blobs,
@@ -245,13 +259,32 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Actor:          authz.Actor,
 		Logger:         logger,
 		Metrics:        reg,
-		Upstream:       upstream.Options{UserAgent: "flint/" + version},
+		Upstream:       upOpts,
 		Space:          space,
+		Fetcher:        fetcher,
+		ProxyMetrics:   proxyMetrics,
 	})
 	if err != nil {
 		return nil, err
 	}
 	registry.Register(srv)
+	index, err := pypi.New(pypi.Options{
+		Meta:         store,
+		Blobs:        blobs,
+		Repositories: cfg.Repositories,
+		Authorizer:   authz,
+		Actor:        authz.Actor,
+		Logger:       logger,
+		Metrics:      reg,
+		Upstream:     upOpts,
+		Space:        space,
+		Fetcher:      fetcher,
+		ProxyMetrics: proxyMetrics,
+	})
+	if err != nil {
+		return nil, err
+	}
+	index.Register(srv)
 
 	var backups *backup.Manager
 	if cfg.Backup.Directory != "" {
@@ -269,12 +302,12 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		}
 	}
 	backup.Register(srv, backups, authz.AdminHandler, authz.Actor)
-	return &app{srv: srv, registry: registry, audit: auditLog, backups: backups}, nil
+	return &app{srv: srv, oci: registry, pypi: index, space: space, audit: auditLog, backups: backups}, nil
 }
 
 // blobReferences report the blobs every format package's records
 // reference, for backups to check that they hold them all.
-var blobReferences = []backup.References{oci.References}
+var blobReferences = []backup.References{oci.References, pypi.References}
 
 // registerStoreMetrics exposes the metadata store's counters and health.
 func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {

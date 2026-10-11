@@ -36,6 +36,10 @@ Actions:
 | `oci.upload.expire`, `oci.upload.forget` | `(system)`: an abandoned upload session removed. |
 | `oci.proxy.cache` | A proxy repository cached content for the client that pulled it. |
 | `oci.proxy.pulled`, `oci.proxy.evict` | `(system)`: a size-limited proxy repository saved its pull times (about once a minute while it is pulled from) or evicted content. |
+| `pypi.upload` | A file uploaded to a hosted [PyPI repository](pypi.md). |
+| `pypi.yank`, `pypi.unyank`, `pypi.delete` | A PyPI release yanked or unyanked, or a release's files or one file deleted. |
+| `pypi.proxy.cache` | A PyPI proxy repository cached a project listing or file for the client that fetched it. |
+| `pypi.proxy.pulled`, `pypi.proxy.evict` | `(system)`: a size-limited PyPI proxy repository saved its pull times or evicted content. |
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |

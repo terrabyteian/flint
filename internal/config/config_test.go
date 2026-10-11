@@ -44,12 +44,19 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 4 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 7 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
 		p.PasswordFile != "/etc/flint/upstream/dockerhub/password" || c.Repositories[3].Proxy.SizeLimit.Bytes != 200<<30 {
 		t.Errorf("unexpected proxy settings: %+v", c.Repositories[2:])
+	}
+	if p := c.Repositories[5].Proxy; c.Repositories[4].Format != FormatPyPI || p == nil || PyPIIndexURL(p.URL) != "https://pypi.org/simple/" ||
+		p.RevalidateAfter.Duration != 10*time.Minute {
+		t.Errorf("unexpected PyPI repositories: %+v", c.Repositories[4:6])
+	}
+	if v := c.Repositories[6].Virtual; v == nil || !v.Protected() || len(v.Members) != 2 || !c.Repositories[6].AnonymousPull {
+		t.Errorf("unexpected virtual repository: %+v", c.Repositories[6])
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
@@ -178,8 +185,39 @@ func TestValidation(t *testing.T) {
 			[]string{`repositories[1].name: "a" is already declared by repositories[0]`}},
 		{"repo missing format and type", `{"dataDir": "/d", "repositories": [{"name": "a"}]}`,
 			[]string{"repositories[0].format: is required", "repositories[0].type: is required"}},
-		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "pypi", "type": "virtual"}]}`,
-			[]string{`repositories[0].format: "pypi" is not supported`, `repositories[0].type: "virtual" is not supported`}},
+		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "npm", "type": "group"}]}`,
+			[]string{`repositories[0].format: "npm" is not supported`, `repositories[0].type: "group" is not supported`}},
+		{"oci virtual", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "oci", "type": "hosted"},
+			{"name": "a", "format": "oci", "type": "virtual", "virtual": {"members": ["h"]}}]}`,
+			[]string{`repositories[1].type: "virtual" is not supported for format oci`}},
+		{"pypi good", `{"dataDir": "/d", "repositories": [
+			{"name": "pypi-local", "format": "pypi", "type": "hosted"},
+			{"name": "pypi", "format": "pypi", "type": "proxy", "anonymousPull": true,
+			 "proxy": {"url": "https://pypi.org/simple/", "revalidateAfter": "10m", "sizeLimit": "100GiB"}},
+			{"name": "torch", "format": "pypi", "type": "proxy", "proxy": {"url": "https://download.pytorch.org/whl/cpu"}},
+			{"name": "pypi-all", "format": "pypi", "type": "virtual", "anonymousPull": true,
+			 "virtual": {"members": ["pypi-local", "pypi", "torch"], "dependencyConfusionProtection": false}}]}`, nil},
+		{"pypi virtual problems", `{"dataDir": "/d", "repositories": [
+			{"name": "h", "format": "pypi", "type": "hosted", "immutableTags": true, "helmIndex": true, "virtual": {"members": []}},
+			{"name": "o", "format": "oci", "type": "hosted"},
+			{"name": "v", "format": "pypi", "type": "virtual", "virtual": {"members": ["h", "h", "o", "v", "x", "w"]}},
+			{"name": "w", "format": "pypi", "type": "virtual", "virtual": {"members": []}},
+			{"name": "n", "format": "pypi", "type": "virtual"}]}`,
+			[]string{"repositories[0].immutableTags: is only allowed for a hosted OCI repository",
+				"repositories[0].helmIndex: is only allowed for a hosted OCI repository",
+				`repositories[0].virtual: is only allowed for type "virtual"`,
+				`repositories[2].virtual.members[1]: "h" is named twice`,
+				`repositories[2].virtual.members[2]: "o" is a oci repository, not pypi`,
+				"repositories[2].virtual.members[3]: a virtual repository cannot be its own member",
+				`repositories[2].virtual.members[4]: "x" is not a declared repository`,
+				`repositories[2].virtual.members[5]: "w" is a virtual repository; members must be hosted or proxy repositories`,
+				"repositories[3].virtual.members: must name at least one",
+				`repositories[4].virtual: is required for type "virtual"`}},
+		{"pypi proxy url", `{"dataDir": "/d", "repositories": [
+			{"name": "a", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple?x=1"}},
+			{"name": "b", "format": "pypi", "type": "proxy", "proxy": {"url": "pypi.org"}}]}`,
+			[]string{`repositories[0].proxy.url: "https://pypi.org/simple?x=1" must not have a query`,
+				`repositories[1].proxy.url: "pypi.org" must be an http or https URL`}},
 		{"proxy good", `{"dataDir": "/d", "proxyCache": {"minFreeSpace": "20GiB"}, "repositories": [{"name": "dockerhub", "format": "oci", "type": "proxy",
 			"anonymousPull": true, "proxy": {"url": "https://registry-1.docker.io", "username": "me", "passwordFile": "/run/pw",
 			"revalidateAfter": "1m", "sizeLimit": "500GiB"}}]}`, nil},
@@ -382,5 +420,33 @@ func TestLoadErrors(t *testing.T) {
 	_, err = Load(path)
 	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "dataDir") {
 		t.Errorf("invalid file: err = %v, want it to name the file and field", err)
+	}
+}
+
+func TestPyPIIndexURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://pypi.org":                     "https://pypi.org/simple/",
+		"https://pypi.org/":                    "https://pypi.org/simple/",
+		"https://pypi.org/simple":              "https://pypi.org/simple/",
+		"https://pypi.org/simple/":             "https://pypi.org/simple/",
+		"https://download.pytorch.org/whl/cpu": "https://download.pytorch.org/whl/cpu/",
+		"http://flint:5000/pypi/pypi/simple/":  "http://flint:5000/pypi/pypi/simple/",
+	} {
+		if got := PyPIIndexURL(in); got != want {
+			t.Errorf("PyPIIndexURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestVirtualProtected(t *testing.T) {
+	off := false
+	on := true
+	for _, tt := range []struct {
+		v    Virtual
+		want bool
+	}{{Virtual{}, true}, {Virtual{DependencyConfusionProtection: &on}, true}, {Virtual{DependencyConfusionProtection: &off}, false}} {
+		if got := tt.v.Protected(); got != tt.want {
+			t.Errorf("Protected() with %v = %v", tt.v.DependencyConfusionProtection, got)
+		}
 	}
 }
