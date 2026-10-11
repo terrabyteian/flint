@@ -187,6 +187,17 @@ func (h *Handler) deleteBlob(w http.ResponseWriter, r *http.Request, rn *repoNam
 		h.writeError(w, r, storeError(err))
 		return
 	}
+	h.forgetLinkReads(string(blobKey(rn, d)))
 	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// forgetLinkReads forgets the reads of the deleted blob links among keys,
+// so the reads kept are only of links that exist.
+func (h *Handler) forgetLinkReads(keys ...string) {
+	h.linkMu.Lock()
+	defer h.linkMu.Unlock()
+	for _, k := range keys {
+		delete(h.linkReads, k)
+	}
 }

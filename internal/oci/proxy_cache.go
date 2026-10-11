@@ -327,6 +327,7 @@ func (h *Handler) evict(ctx context.Context, c *cacheTracker, keys []string) err
 	}
 	v.Release()
 	c.remove(gone)
+	h.forgetLinkReads(gone...)
 	if len(gone) == len(keys) {
 		return nil
 	}
@@ -339,6 +340,7 @@ func (h *Handler) evict(ctx context.Context, c *cacheTracker, keys []string) err
 		return err
 	}
 	c.remove(keys)
+	h.forgetLinkReads(keys...)
 	h.evictions.With(c.repo).Add(float64(len(keys) - len(gone)))
 	return nil
 }

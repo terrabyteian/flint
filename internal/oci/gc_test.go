@@ -833,6 +833,50 @@ func TestGCProxyEviction(t *testing.T) {
 	pe.get("/v2/small/app/blobs/"+layers[0].String(), data[0])
 }
 
+// TestGCLinkReadsForgotten forgets the reads of links a blob delete or a
+// proxy eviction removes, so the reads kept stay bounded by the links.
+func TestGCLinkReadsForgotten(t *testing.T) {
+	reads := func(h *Handler) map[string]bool {
+		h.linkMu.Lock()
+		defer h.linkMu.Unlock()
+		out := map[string]bool{}
+		for k := range h.linkReads {
+			out[k] = true
+		}
+		return out
+	}
+
+	ge := newGCEnv(t)
+	d := ge.pushBlob("hosted/app", []byte("read, then deleted"))
+	want(t, ge.do("HEAD", "/v2/hosted/app/blobs/"+d.String(), nil), http.StatusOK, "")
+	if r := reads(ge.h); len(r) != 1 {
+		t.Fatalf("reads after a HEAD = %v", r)
+	}
+	want(t, ge.do("DELETE", "/v2/hosted/app/blobs/"+d.String(), nil), http.StatusAccepted, "")
+	if r := reads(ge.h); len(r) != 0 {
+		t.Errorf("reads after the delete = %v", r)
+	}
+
+	pe := newProxyEnv(t, 2500)
+	var layers []blob.Digest
+	for _, s := range []string{"a", "b", "c"} {
+		b := bytes.Repeat([]byte(s), 1000)
+		d := digestOf(t, pe.up.PutBlob("app", b))
+		layers = append(layers, d)
+		pe.get("/v2/small/app/blobs/"+d.String(), b)
+		pe.get("/v2/small/app/blobs/"+d.String(), b)
+		pe.settle()
+		pe.advance(time.Minute)
+	}
+	if err := pe.h.Evict(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r := reads(pe.h)
+	if len(r) != 2 || r[string(blobKey(&repoName{repo: "small", name: "app"}, layers[0]))] {
+		t.Errorf("reads after the eviction = %v", r)
+	}
+}
+
 // TestGCStress runs pushes, deletes, mounts, and pulls in several
 // repositories while sweeps run back to back with the clock racing ahead,
 // and checks that every blob the metadata references is stored after
