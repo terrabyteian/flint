@@ -126,6 +126,9 @@ func (f *Fetcher) download(ctx context.Context, cancel func(), fe *Fetch, open S
 	defer watchdog.Stop()
 	body, size, err := open(ctx)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return blob.Info{}, fmt.Errorf("%w: no answer from the upstream for %v while fetching %s", ErrUnavailable, f.idle, fe.d)
+		}
 		return blob.Info{}, err
 	}
 	defer body.Close()

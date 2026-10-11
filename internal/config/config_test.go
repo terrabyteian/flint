@@ -42,7 +42,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 4 || !c.Repositories[1].ImmutableTags || len(c.Auth.Permissions) != 2 {
+	if len(c.Repositories) != 4 || !c.Repositories[1].ImmutableTags || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||

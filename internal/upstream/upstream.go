@@ -257,7 +257,8 @@ func (c *Client) password() (string, error) {
 // challenges and retries transient failures. A response with a 2xx or
 // 3xx status is returned for the caller to read and close; any other is
 // an *Error wrapping ErrNotFound, ErrDenied, ErrUnavailable, or a
-// generic error for other statuses.
+// generic error for other statuses. A request whose ctx deadline passes
+// fails with ErrUnavailable.
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, header http.Header, scope string) (*http.Response, error) {
 	u := *c.base
 	u.Path = path
@@ -279,7 +280,7 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 			lastErr = &Error{Op: op, Status: resp.StatusCode, Err: ErrUnavailable}
 			drain(resp)
 		case ctx.Err() != nil:
-			return nil, &Error{Op: op, Err: ctx.Err()}
+			return nil, c.ctxError(op, ctx)
 		case !errors.Is(err, ErrUnavailable):
 			return nil, err
 		default:
@@ -295,10 +296,21 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return nil, &Error{Op: op, Err: ctx.Err()}
+			return nil, c.ctxError(op, ctx)
 		case <-t.C:
 		}
 	}
+}
+
+// ctxError is the error of request op when ctx ends. A deadline means
+// the upstream took too long to answer, so it is ErrUnavailable and marks
+// the upstream offline; a cancellation means the caller gave up.
+func (c *Client) ctxError(op string, ctx context.Context) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		c.setOffline(true)
+		return &Error{Op: op, Err: fmt.Errorf("%w: %w", ErrUnavailable, ctx.Err())}
+	}
+	return &Error{Op: op, Err: ctx.Err()}
 }
 
 // send sends one request, answering an authentication challenge once.

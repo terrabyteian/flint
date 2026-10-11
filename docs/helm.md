@@ -118,6 +118,10 @@ Without `bootstrapAdmin`, flint starts with no administrator and logs a warning,
 ### Upstream credentials
 
 A [proxy repository](configuration.md#proxy-repository-settings) may authenticate to its upstream, for example with a Docker Hub account for higher pull limits.
+
+> **Warning:** flint sends every upstream request of the repository with this account, so anyone allowed to pull from the proxy repository can read whatever the account can read upstream, including its private repositories.
+> Use a dedicated account that has no private content, or an access token limited to public, read-only access, and do not combine credentials with `anonymousPull` unless the account can read only public content.
+
 Put the password or access token in a Secret under the key `password`, and list it in `upstreamSecrets` under a name; the chart mounts it at `/etc/flint/upstream/<name>/password`, the path to give as the repository's `passwordFile`:
 
 ```sh
@@ -131,7 +135,6 @@ config:
     - name: dockerhub
       format: oci
       type: proxy
-      anonymousPull: true
       proxy:
         url: https://registry-1.docker.io
         username: my-docker-hub-user

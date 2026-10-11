@@ -28,11 +28,12 @@ import (
 //     window after the upstream last confirmed it; after that a HEAD
 //     request asks the upstream for the tag's current digest, and the
 //     manifest is fetched again only if it moved.
-//   - When the upstream cannot be reached, or no longer has a tag, the
-//     cached copy is served.
+//   - When the upstream cannot be reached, the cached copy is served. A
+//     tag the upstream answers is not found or denied is answered so,
+//     even if it is cached.
 //   - Tag listings and referrers come from the upstream, cached in memory
 //     for the revalidation window, with the cached tags and referrers as
-//     the fallback.
+//     the fallback when the upstream cannot be reached.
 //
 // Cached content lives in the shared blob store, linked to the proxy
 // repository with the same records hosted repositories use. A blob that
@@ -45,14 +46,17 @@ import (
 //
 // Proxy repositories are read-only: pushes and deletes are refused.
 
-// Proxy timeouts.
-const (
+// Proxy timeouts; tests shorten them.
+var (
 	// revalidateTimeout bounds a tag revalidation when a cached copy
 	// could be served instead.
 	revalidateTimeout = 10 * time.Second
 	// fetchTimeout bounds fetching a manifest or listing that is not
 	// cached.
 	fetchTimeout = time.Minute
+)
+
+const (
 	// maxListingSize bounds an upstream tag listing or referrers index.
 	maxListingSize = 16 << 20
 	// maxListings bounds the in-memory cache of listings.
@@ -79,11 +83,8 @@ type proxyRepo struct {
 	cache      *cacheTracker // nil without a size limit
 }
 
-// dockerHubHosts are the names of Docker Hub's registry. The registry API
-// is served by registry-1.docker.io; the others are aliases clients use.
-var dockerHubHosts = map[string]bool{
-	"registry-1.docker.io": true, "docker.io": true, "index.docker.io": true, "registry.hub.docker.com": true,
-}
+// dockerHubHost is the host of Docker Hub's registry API.
+const dockerHubHost = "registry-1.docker.io"
 
 func newProxyRepo(rc config.Repository, defaults upstream.Options) (*proxyRepo, error) {
 	pc := rc.Proxy
@@ -91,18 +92,12 @@ func newProxyRepo(rc config.Repository, defaults upstream.Options) (*proxyRepo, 
 	if err != nil {
 		return nil, err
 	}
-	p := &proxyRepo{revalidate: pc.RevalidateAfter.Duration}
-	if dockerHubHosts[strings.ToLower(u.Hostname())] {
-		p.dockerHub = true
-		if u.Port() == "" {
-			u.Host = "registry-1.docker.io"
-		}
-	}
+	p := &proxyRepo{revalidate: pc.RevalidateAfter.Duration, dockerHub: strings.EqualFold(u.Hostname(), dockerHubHost)}
 	if p.revalidate <= 0 {
 		p.revalidate = config.DefaultRevalidateAfter
 	}
 	opts := defaults
-	opts.URL = u.String()
+	opts.URL = pc.URL
 	opts.Username, opts.PasswordFile = pc.Username, pc.PasswordFile
 	if p.client, err = upstream.New(opts); err != nil {
 		return nil, err
@@ -165,10 +160,12 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, rn *repoNam
 // upstreamFailure turns a failed upstream request into the response
 // error: notFound when the upstream does not have the content, and an
 // unavailable or bad-gateway error otherwise, which it logs and counts.
+// Only a cancelled ctx means the client went away; a ctx past its
+// deadline is an upstream that took too long.
 func (h *Handler) upstreamFailure(ctx context.Context, rn *repoName, err error, notFound *apiError) error {
 	p := rn.cfg.proxy
 	switch {
-	case ctx.Err() != nil:
+	case errors.Is(ctx.Err(), context.Canceled):
 		return ctx.Err()
 	case errors.Is(err, upstream.ErrNotFound):
 		return notFound
@@ -450,7 +447,8 @@ func (h *Handler) proxyManifestByDigest(r *http.Request, rn *repoName, d blob.Di
 // proxyManifestByTag resolves a manifest by tag: from the cache while the
 // upstream confirmed the tag within the revalidation window, and from the
 // upstream otherwise, falling back to the cached copy if the upstream
-// fails.
+// cannot be reached. A tag the upstream answers is not found or denied is
+// answered so.
 func (h *Handler) proxyManifestByTag(r *http.Request, rn *repoName, tag string) (*proxied, error) {
 	key := tagKey(rn, tag)
 	var cached blob.Digest
@@ -481,13 +479,14 @@ func (h *Handler) proxyManifestByTag(r *http.Request, rn *repoName, tag string) 
 		}
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		stale := func(err error) *proxied {
-			if !errors.Is(err, upstream.ErrNotFound) && !errors.Is(err, upstream.ErrDenied) {
-				h.upstreamErrors.With(rn.repo).Inc()
+		fail := func(err error) (*proxied, error) {
+			if crec == nil || errors.Is(err, upstream.ErrNotFound) || errors.Is(err, upstream.ErrDenied) {
+				return nil, h.upstreamFailure(ctx, rn, err, manifestUnknown(rn, tag).(*apiError))
 			}
+			h.upstreamErrors.With(rn.repo).Inc()
 			h.log.WarnContext(ctx, "serving a cached tag the upstream could not confirm", "repository", rn.full,
 				"tag", tag, "digest", cached.String(), "upstream", p.client.Host(), "err", err)
-			return &proxied{d: cached, rec: crec, result: resultStale}
+			return &proxied{d: cached, rec: crec, result: resultStale}, nil
 		}
 		if crec != nil {
 			if p.client.Offline() {
@@ -499,17 +498,14 @@ func (h *Handler) proxyManifestByTag(r *http.Request, rn *repoName, tag string) 
 				h.markValidated(key)
 				return &proxied{d: cached, rec: crec, result: resultRevalidated}, nil
 			case err != nil && !errors.Is(err, upstream.ErrNoDigest):
-				return stale(err), nil
+				return fail(err)
 			}
 			// The tag moved, or the upstream does not report digests on
 			// HEAD: fetch the manifest.
 		}
 		um, err := p.client.GetManifest(ctx, up, tag)
 		if err != nil {
-			if crec != nil {
-				return stale(err), nil
-			}
-			return nil, h.upstreamFailure(ctx, rn, err, manifestUnknown(rn, tag).(*apiError))
+			return fail(err)
 		}
 		res, err := h.cacheManifest(ctx, actor, rn, um, tag)
 		if err == nil && res.body == nil {
@@ -584,9 +580,6 @@ func (h *Handler) cacheManifest(ctx context.Context, actor string, rn *repoName,
 		return err
 	})
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
 		h.log.WarnContext(ctx, "caching a proxied manifest failed; serving it uncached", "repository", rn.full,
 			"digest", d.String(), "err", err)
 		return passThrough, nil
@@ -698,9 +691,10 @@ func (h *Handler) fetchListing(ctx context.Context, rn *repoName, path string, q
 // proxyListing serves a listing from the in-memory cache while it is
 // fresh, else from the upstream through fetch, which returns the
 // listing to cache and serve. If the upstream fails, it serves the
-// cached listing, or else calls local. A listing the upstream does not
-// have, or does not support, is served by local.
-func (h *Handler) proxyListing(w http.ResponseWriter, r *http.Request, rn *repoName, key string,
+// cached listing, or else calls local. A listing the upstream answers is
+// not found or denied is answered with notFound, or by local if notFound
+// is nil.
+func (h *Handler) proxyListing(w http.ResponseWriter, r *http.Request, rn *repoName, key string, notFound *apiError,
 	fetch func(ctx context.Context) (*listing, error), local func()) {
 	p := rn.cfg.proxy
 	cached := h.listings.get(key)
@@ -719,6 +713,10 @@ func (h *Handler) proxyListing(w http.ResponseWriter, r *http.Request, rn *repoN
 			writeListing(w, l)
 			return
 		case errors.Is(err, upstream.ErrNotFound), errors.Is(err, upstream.ErrDenied):
+			if notFound != nil {
+				h.writeError(w, r, h.upstreamFailure(r.Context(), rn, err, notFound))
+				return
+			}
 			h.proxyResults.With(rn.repo, resultHit).Inc()
 			local()
 			return
@@ -738,7 +736,8 @@ func (h *Handler) proxyListing(w http.ResponseWriter, r *http.Request, rn *repoN
 }
 
 // proxyListTags serves GET /v2/<name>/tags/list of a proxy repository:
-// the upstream's tags, or the cached ones if the upstream fails.
+// the upstream's tags, or the cached ones if the upstream cannot be
+// reached.
 func (h *Handler) proxyListTags(w http.ResponseWriter, r *http.Request, rn *repoName, _ string) {
 	if _, _, err := pageParams(r); err != nil {
 		h.writeError(w, r, err)
@@ -751,7 +750,8 @@ func (h *Handler) proxyListTags(w http.ResponseWriter, r *http.Request, rn *repo
 		}
 	}
 	up := rn.cfg.proxy.upstreamName(rn.name)
-	h.proxyListing(w, r, rn, "tags\x00"+rn.full+"?"+q.Encode(), func(ctx context.Context) (*listing, error) {
+	notFound := newError(http.StatusNotFound, codeNameUnknown, "repository %s is not known", rn.full)
+	h.proxyListing(w, r, rn, "tags\x00"+rn.full+"?"+q.Encode(), notFound, func(ctx context.Context) (*listing, error) {
 		body, hdr, err := h.fetchListing(ctx, rn, "/v2/"+up+"/tags/list", q)
 		if err != nil {
 			return nil, err
@@ -815,7 +815,7 @@ func (h *Handler) proxyListReferrers(w http.ResponseWriter, r *http.Request, rn 
 		q.Set("artifactType", at)
 	}
 	up := rn.cfg.proxy.upstreamName(rn.name)
-	h.proxyListing(w, r, rn, "referrers\x00"+rn.full+"@"+d.String()+"?"+q.Encode(), func(ctx context.Context) (*listing, error) {
+	h.proxyListing(w, r, rn, "referrers\x00"+rn.full+"@"+d.String()+"?"+q.Encode(), nil, func(ctx context.Context) (*listing, error) {
 		body, hdr, err := h.fetchListing(ctx, rn, "/v2/"+up+"/referrers/"+d.String(), q)
 		if err != nil {
 			return nil, err

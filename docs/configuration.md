@@ -46,7 +46,6 @@ Repositories and permission grants declared here are read-only through the API.
       "name": "dockerhub",
       "format": "oci",
       "type": "proxy",
-      "anonymousPull": true,
       "proxy": {
         "url": "https://registry-1.docker.io",
         "username": "flint-mirror",
@@ -76,6 +75,11 @@ Repositories and permission grants declared here are read-only through the API.
       {
         "repositories": ["docker-local", "releases"],
         "role": "write",
+        "groups": ["ci"]
+      },
+      {
+        "repositories": ["dockerhub", "ghcr"],
+        "role": "read",
         "groups": ["ci"]
       },
       {
@@ -142,11 +146,15 @@ A proxy repository caches one upstream registry, such as Docker Hub, ghcr.io, or
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `proxy.url` | string | required | The upstream registry's base URL, without a path, such as `"https://registry-1.docker.io"` or `"https://ghcr.io"`. For Docker Hub (`registry-1.docker.io`, or its aliases `docker.io` and `index.docker.io`), a single-component image name gets the `library/` prefix, as Docker clients add it: `dockerhub/nginx` pulls `library/nginx`. |
-| `proxy.username` | string | none | User name for the upstream, such as a Docker Hub account for its higher pull limits. Requires `passwordFile`. |
+| `proxy.url` | string | required | The upstream registry's base URL, without a path, such as `"https://registry-1.docker.io"` or `"https://ghcr.io"`. For Docker Hub (`registry-1.docker.io`), a single-component image name gets the `library/` prefix, as Docker clients add it: `dockerhub/nginx` pulls `library/nginx`. |
+| `proxy.username` | string | none | User name for the upstream, such as a Docker Hub account for its higher pull limits. Requires `passwordFile`. See the warning below. |
 | `proxy.passwordFile` | string | none | Absolute path of a file holding the upstream password or access token, such as a mounted Kubernetes Secret. One trailing newline is ignored. flint reads it at startup, failing to start if it cannot, and again whenever it authenticates to the upstream, so a rotated secret takes effect without a restart. It is never logged. Requires `username`. |
 | `proxy.revalidateAfter` | duration | `"5m"` | How long a cached tag, tag listing, or referrers listing is served before the upstream is asked again. Must be positive. |
 | `proxy.sizeLimit` | size | none | Cap the content cached in this repository. Over the cap, the least recently pulled content is evicted. Without it, everything is cached forever. |
+
+> **Warning: upstream credentials are shared with everyone who can pull.**
+> flint sends every upstream request of a proxy repository with its configured account, so anyone allowed to pull from that repository, including anonymous clients with `anonymousPull`, can read whatever that account can read upstream, including its private repositories.
+> Use a dedicated account that has no private content, or an access token limited to public, read-only access, such as a Docker Hub personal access token with the *Public Repo Read-only* scope.
 
 ### Permissions
 
@@ -195,7 +203,8 @@ A proxy repository serves pulls of its upstream's images, such as `registry.exam
 - **Content addressed by digest** (blobs, and manifests pulled by digest) never changes, so once cached it is served forever without asking the upstream.
 - **Tags** are served from the cache for `revalidateAfter` after the upstream last confirmed them. After that, flint asks the upstream for the tag's current digest with a `HEAD` request, which Docker Hub does not count against its pull rate limit, and fetches the manifest again only if the tag moved.
 - **Tag listings and the referrers API** come from the upstream and are kept in memory for `revalidateAfter`. An upstream without the referrers API is answered with the referrers of the manifests cached so far.
-- **When the upstream is unreachable or fails**, cached content keeps being served: tags as last confirmed, and listings as last fetched or, failing that, from the cached tags. After a failure flint treats the upstream as offline for 30 seconds and serves cached copies without waiting on it. A tag deleted upstream also stays cached. Content that was never cached cannot be served, and is answered with `503 UNAVAILABLE`.
+- **When the upstream is unreachable**, because of network errors, timeouts, `5xx` errors, or `429` rate limiting, cached content keeps being served: tags as last confirmed, and listings as last fetched or, failing that, from the cached tags. After such a failure flint treats the upstream as offline for 30 seconds and serves cached copies without waiting on it. Content that was never cached cannot be served, and is answered with `503 UNAVAILABLE`.
+- **When the upstream answers that a tag or tag listing is not found or denied** (`404`, `401`, or `403`), for example because the tag was deleted or the image made private, flint answers `404` too, even if it has the tag cached. Content addressed by digest stays cached and served.
 - **Fetching.** A blob that is not cached streams to the client while flint writes it to the store, and concurrent pulls of the same blob share one upstream request. Every blob and manifest is checked against its digest: a mismatched manifest is refused with `502`, and a mismatched blob is cut off before its last byte, so a client never receives it whole and it never enters the cache. Transient upstream failures (network errors, `429`, and `5xx`) are retried with backoff. The `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment variables apply to upstream requests.
 - **Disk space.** When the free space on the data directory's filesystem would fall below `proxyCache.minFreeSpace`, new content is passed through from the upstream without being cached, cached content keeps being served, flint logs a warning, and `flint_proxy_disk_pressure` is 1. flint never deletes cached content to make room.
 - **Size limit.** With `proxy.sizeLimit`, when the repository's cached content (each blob and manifest, counted once per image name) exceeds the limit, the least recently pulled items are evicted until it fits: a blob's link, or a manifest with the tags pointing to it. Content larger than the limit is passed through. Pull times are kept in memory and saved every minute, so a restart forgets at most the last minute's pulls. Eviction hides content at once; the disk space is reclaimed by garbage collection, which arrives with milestone M4.

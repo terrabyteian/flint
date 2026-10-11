@@ -287,8 +287,21 @@ func TestRetriesAndOffline(t *testing.T) {
 	reg.SetDown(true)
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := c.HeadManifest(cctx, "a", "v1"); !errors.Is(err, context.Canceled) {
-		t.Errorf("cancelled: %v", err)
+	if _, err := c.HeadManifest(cctx, "a", "v1"); !errors.Is(err, context.Canceled) || c.Offline() {
+		t.Errorf("cancelled: %v, offline %v", err, c.Offline())
+	}
+
+	// A deadline that passes while the upstream stalls means it is
+	// unavailable.
+	reg.SetDown(false)
+	reg.SetStatus(func(r *http.Request) int {
+		<-r.Context().Done()
+		return 0
+	})
+	dctx, dcancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer dcancel()
+	if _, err := c.HeadManifest(dctx, "a", "v1"); !errors.Is(err, upstream.ErrUnavailable) || !c.Offline() {
+		t.Errorf("past the deadline: %v, offline %v", err, c.Offline())
 	}
 }
 

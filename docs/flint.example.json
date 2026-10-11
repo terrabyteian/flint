@@ -27,7 +27,6 @@
       "name": "dockerhub",
       "format": "oci",
       "type": "proxy",
-      "anonymousPull": true,
       "proxy": {
         "url": "https://registry-1.docker.io",
         "username": "flint-mirror",
@@ -57,6 +56,11 @@
       {
         "repositories": ["docker-local", "releases"],
         "role": "write",
+        "groups": ["ci"]
+      },
+      {
+        "repositories": ["dockerhub", "ghcr"],
+        "role": "read",
         "groups": ["ci"]
       },
       {

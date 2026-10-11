@@ -383,19 +383,71 @@ func TestProxyOutage(t *testing.T) {
 	pe.advance(time.Hour)
 	pe.pull("hub/app", "v2", other)
 
-	// A tag deleted upstream keeps being served from the cache.
+	// A tag the upstream fails to answer keeps being served from the
+	// cache, and so does a rate-limited one.
+	for _, status := range []int{http.StatusInternalServerError, http.StatusTooManyRequests} {
+		pe.up.SetStatus(func(r *http.Request) int {
+			if r.Method == http.MethodHead {
+				return status
+			}
+			return 0
+		})
+		pe.advance(time.Hour)
+		pe.get("/v2/hub/app/manifests/v2", other.Manifest)
+	}
+	pe.up.SetStatus(nil)
+
+	// A tag deleted upstream is not found, although it is cached; its
+	// manifest stays cached by digest.
 	pe.up.DeleteTag("app", "v1")
-	pe.advance(testWindow)
-	pe.get("/v2/hub/app/manifests/v1", img.Manifest)
-	// So does one the upstream fails to answer.
+	pe.advance(time.Hour)
+	want(t, pe.do("GET", "/v2/hub/app/manifests/v1", nil), 404, codeManifestUnknown)
+	want(t, pe.do("HEAD", "/v2/hub/app/manifests/v1", nil), 404, "")
+	pe.get("/v2/hub/app/manifests/"+img.Digest, img.Manifest)
+	// So is one the upstream denies access to.
 	pe.up.SetStatus(func(r *http.Request) int {
-		if r.Method == http.MethodHead {
-			return http.StatusInternalServerError
+		if strings.Contains(r.URL.Path, "/manifests/") {
+			return http.StatusForbidden
 		}
 		return 0
 	})
 	pe.advance(testWindow)
-	pe.get("/v2/hub/app/manifests/v2", other.Manifest)
+	want(t, pe.do("GET", "/v2/hub/app/manifests/v2", nil), 404, codeManifestUnknown)
+	pe.get("/v2/hub/app/manifests/"+other.Digest, other.Manifest)
+}
+
+// TestProxyStalledUpstream checks that an upstream that accepts requests
+// but never answers counts as unavailable once the proxy's own timeouts
+// pass: a cached tag is served stale, uncached content is answered 503,
+// the failures are counted, and the upstream is marked offline.
+func TestProxyStalledUpstream(t *testing.T) {
+	defer func(f, r time.Duration) { fetchTimeout, revalidateTimeout = f, r }(fetchTimeout, revalidateTimeout)
+	fetchTimeout, revalidateTimeout = 200*time.Millisecond, 100*time.Millisecond
+	pe := newProxyEnv(t, 0)
+	pe.h.fetcher = upstream.NewFetcher(pe.blobs, 100*time.Millisecond)
+	img := pe.up.PutImage("app", "v1", []byte("x"))
+	other := pe.up.PutImage("app", "v2", []byte("y"))
+	pe.pull("hub/app", "v1", img)
+
+	pe.up.SetStatus(func(r *http.Request) int {
+		<-r.Context().Done()
+		return 0
+	})
+	pe.advance(testWindow)
+	pe.get("/v2/hub/app/manifests/v1", img.Manifest)
+	if got := pe.metric(`flint_proxy_requests_total{repository="hub",result="stale"}`); got != "1" {
+		t.Errorf("stale = %q, want 1", got)
+	}
+	if !pe.h.repos["hub"].proxy.client.Offline() {
+		t.Error("a stalled revalidation did not mark the upstream offline")
+	}
+	want(t, pe.do("GET", "/v2/hub/app/manifests/v2", nil), 503, codeUnavailable)
+	want(t, pe.do("GET", "/v2/hub/app/manifests/"+other.Digest, nil), 503, codeUnavailable)
+	want(t, pe.do("GET", "/v2/hub/app/blobs/"+other.Layers[0], nil), 503, codeUnavailable)
+	pe.settle()
+	if got := pe.metric(`flint_proxy_upstream_errors_total{repository="hub"}`); got != "5" {
+		t.Errorf("upstream errors = %q, want 5", got)
+	}
 }
 
 // server serves pe's handler over HTTP, so a response a handler aborts
@@ -759,6 +811,19 @@ func TestProxyTagList(t *testing.T) {
 	pe.up.SetDown(false)
 	pe.advance(time.Hour)
 	want(t, pe.do("GET", "/v2/hub/nope/tags/list", nil), 404, codeNameUnknown)
+	// So is one the upstream no longer has, or denies, although its
+	// tags are cached.
+	pe.pull("hub/library/app", "a", pe.up.PutImage("library/app", "a"))
+	for _, status := range []int{http.StatusNotFound, http.StatusForbidden} {
+		pe.up.SetStatus(func(r *http.Request) int {
+			if strings.HasSuffix(r.URL.Path, "/tags/list") {
+				return status
+			}
+			return 0
+		})
+		pe.advance(testWindow)
+		want(t, pe.do("GET", "/v2/hub/library/app/tags/list", nil), 404, codeNameUnknown)
+	}
 	want(t, pe.do("GET", "/v2/hub/library/app/tags/list?n=x", nil), 400, "PAGINATION_NUMBER_INVALID")
 }
 
@@ -833,8 +898,8 @@ func TestDockerHubNames(t *testing.T) {
 		base      string
 	}{
 		{"https://registry-1.docker.io", true, "https://registry-1.docker.io"},
-		{"https://docker.io", true, "https://registry-1.docker.io"},
-		{"https://index.docker.io/", true, "https://registry-1.docker.io"},
+		{"https://docker.io", false, "https://docker.io"},
+		{"https://index.docker.io", false, "https://index.docker.io"},
 		{"https://ghcr.io", false, "https://ghcr.io"},
 		{"http://localhost:5000", false, "http://localhost:5000"},
 	} {
