@@ -45,6 +45,9 @@ Pushing a tag is the only way to start a release.
 To recover from a failed run, for example after a transient failure, open the run in the Actions tab and choose *Re-run failed jobs*.
 Re-running the GitHub release job replaces the assets of a release that already exists.
 
+A pull request that changes the release workflow, the `Dockerfile`, or the chart also runs the release workflow as a dry run, versioned `v0.0.0-pr.<number>`.
+It builds the binaries and the image, generates the SBOM, packages the chart, and checks that the release job receives every asset, but pushes, signs, and releases nothing.
+
 ## Verifying a release
 
 Signing is keyless: each signature is tied to the release workflow's identity, recorded in the public Sigstore transparency log.
