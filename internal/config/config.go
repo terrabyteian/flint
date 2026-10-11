@@ -161,6 +161,7 @@ const (
 	FormatGeneric = "generic"
 	FormatCargo   = "cargo"
 	FormatNPM     = "npm"
+	FormatMaven   = "maven"
 	TypeHosted    = "hosted"
 	TypeProxy     = "proxy"
 	TypeVirtual   = "virtual"
@@ -197,6 +198,9 @@ type Repository struct {
 	Virtual *Virtual `json:"virtual,omitempty"`
 	// Generic holds the settings of a generic files repository.
 	Generic *Generic `json:"generic,omitempty"`
+	// Maven holds the settings of a Maven repository. Maven repositories
+	// only.
+	Maven *Maven `json:"maven,omitempty"`
 }
 
 // Proxy configures the upstream registry a proxy repository caches.
@@ -211,6 +215,8 @@ type Proxy struct {
 	// for <path> fetches <url>/<path>.
 	// For Cargo, it is the sparse index URL, such as
 	// "sparse+https://index.crates.io/"; the "sparse+" prefix is optional.
+	// For Maven, it is the repository's base URL, such as
+	// "https://repo.maven.apache.org/maven2".
 	URL string `json:"url"`
 	// Username and PasswordFile, if set, authenticate to the upstream.
 	// PasswordFile holds the password or access token, such as a mounted
@@ -680,8 +686,8 @@ func validateProxy(v *validator, path, format string, p *Proxy) {
 
 // checkUpstreamURL checks an upstream's URL: a registry's base URL for
 // OCI, or a URL that may have a path: a simple index URL for PyPI, a base
-// URL for generic files, and a sparse index URL, which may also have the
-// "sparse+" prefix, for Cargo.
+// URL for generic files, a sparse index URL, which may also have the
+// "sparse+" prefix, for Cargo, and a repository's base URL for Maven.
 func checkUpstreamURL(s, format string) error {
 	if format == FormatCargo {
 		s = strings.TrimPrefix(s, "sparse+")

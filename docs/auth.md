@@ -119,6 +119,14 @@ A request without valid credentials that needs them gets `401` without a `WWW-Au
 Tokens from the Docker token endpoint are not accepted.
 [npm](npm.md#configuring-clients) shows how to configure each client.
 
+## Maven and Gradle clients
+
+Maven and Gradle send HTTP basic credentials: a user name and its password, or a user name and one of the user's API tokens; Gradle can also send a token as `Authorization: Bearer <token>`.
+Both wait for a challenge before they send credentials for a download, so a request without valid credentials that needs them gets `401` with `WWW-Authenticate: Basic realm="flint"`, never `404`, and one whose credentials lack the permission gets `403`.
+Maven sends credentials with uploads right away.
+Tokens from the Docker token endpoint are not accepted.
+[Maven](maven.md#configuring-clients) shows how to configure each client.
+
 ## Docker clients
 
 Registry requests use the Docker token authentication flow:

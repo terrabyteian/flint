@@ -203,8 +203,8 @@ func TestValidation(t *testing.T) {
 			[]string{`repositories[1].name: "a" is already declared by repositories[0]`}},
 		{"repo missing format and type", `{"dataDir": "/d", "repositories": [{"name": "a"}]}`,
 			[]string{"repositories[0].format: is required", "repositories[0].type: is required"}},
-		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "maven", "type": "group"}]}`,
-			[]string{`repositories[0].format: "maven" is not supported`, `repositories[0].type: "group" is not supported`}},
+		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "nuget", "type": "group"}]}`,
+			[]string{`repositories[0].format: "nuget" is not supported`, `repositories[0].type: "group" is not supported`}},
 		{"npm proxy", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "npm", "type": "proxy", "proxy": {"url": "https://registry.npmjs.org"}}]}`,
 			[]string{`repositories[0].type: "proxy" is not supported for format npm; supported types: hosted`}},
 		{"oci virtual", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "oci", "type": "hosted"},
@@ -291,6 +291,25 @@ func TestValidation(t *testing.T) {
 			[]string{`publicURL: "https://flint.example.com/?a=b" must not have a query or fragment`}},
 		{"public URL credentials", `{"dataDir": "/d", "publicURL": "https://u:p@flint.example.com"}`,
 			[]string{`publicURL: "https://u:p@flint.example.com" must not contain credentials`}},
+		{"maven good", `{"dataDir": "/d", "repositories": [
+			{"name": "maven-releases", "format": "maven", "type": "hosted"},
+			{"name": "maven-snapshots", "format": "maven", "type": "hosted", "maven": {"versionPolicy": "snapshot"}},
+			{"name": "maven-mixed", "format": "maven", "type": "hosted", "maven": {"versionPolicy": "mixed"}},
+			{"name": "central", "format": "maven", "type": "proxy", "anonymousPull": true,
+			 "proxy": {"url": "https://repo.maven.apache.org/maven2", "sizeLimit": "500GiB"}},
+			{"name": "maven", "format": "maven", "type": "virtual", "virtual": {"publishTo": "maven-releases", "members": [
+				"maven-releases", "maven-snapshots", {"name": "central", "exclude": ["com.acme.*"]}]}}]}`, nil},
+		{"maven unknown setting", `{"dataDir": "/d", "repositories": [
+			{"name": "c", "format": "maven", "type": "hosted", "maven": {"policy": "release"}}]}`,
+			[]string{`unknown field "policy"`}},
+		{"maven settings", `{"dataDir": "/d", "repositories": [
+			{"name": "a", "format": "maven", "type": "hosted", "maven": {"versionPolicy": "nightly"}},
+			{"name": "b", "format": "maven", "type": "proxy", "maven": {"versionPolicy": "release"},
+			 "proxy": {"url": "https://repo.maven.apache.org/maven2"}},
+			{"name": "c", "format": "pypi", "type": "hosted", "maven": {}}]}`,
+			[]string{`repositories[0].maven.versionPolicy: "nightly" is not one of release, snapshot, mixed`,
+				`repositories[1].maven.versionPolicy: is only allowed for a hosted repository`,
+				`repositories[2].maven: is only allowed for a repository of format maven`}},
 		{"pypi proxy url", `{"dataDir": "/d", "repositories": [
 			{"name": "a", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple?x=1"}},
 			{"name": "b", "format": "pypi", "type": "proxy", "proxy": {"url": "pypi.org"}}]}`,
@@ -621,7 +640,7 @@ func TestFormatSettings(t *testing.T) {
 				v.addf(path, "is required")
 			}
 		}})
-	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "cargo", "npm", "test"}) {
+	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "cargo", "npm", "maven", "test"}) {
 		t.Errorf("Formats() = %q", got)
 	}
 	_, err := Parse([]byte(`{"dataDir": "/d", "repositories": [
