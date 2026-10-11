@@ -91,8 +91,8 @@ func TestRecordsAndMarks(t *testing.T) {
 	}
 	// The marks cover every key family, and report each record's blob.
 	keys := map[string][]byte{
-		string(upstream.DocKey("r", "pkg")):         docVal,
-		string(upstream.FileKey("r", "a/b.jar")):    fileVal,
+		string(upstream.DocKey("r", "pkg")):        docVal,
+		string(upstream.FileKey("r", "a/b.jar")):   fileVal,
 		upstream.NSPulled + "file\x00r\x00a/b.jar": upstream.EncodePulled(5),
 	}
 	v := &testView{vals: keys}

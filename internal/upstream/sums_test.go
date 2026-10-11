@@ -210,3 +210,23 @@ func TestFetchPathBadExpect(t *testing.T) {
 		fe.Release()
 	}
 }
+
+func TestSumWriter(t *testing.T) {
+	w, err := upstream.NewSumWriter(upstream.SHA1, upstream.MD5, upstream.SHA512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(w, "hosted ")
+	io.WriteString(w, "upload")
+	data := []byte("hosted upload")
+	s1, m5, s512 := sha1.Sum(data), md5.Sum(data), sha512.Sum512(data)
+	got := w.Sums()
+	if !bytes.Equal(got[upstream.SHA1], s1[:]) || !bytes.Equal(got[upstream.MD5], m5[:]) || !bytes.Equal(got[upstream.SHA512], s512[:]) {
+		t.Errorf("Sums = %x", got)
+	}
+	for _, algs := range [][]string{{upstream.GitSHA1}, {"crc32"}} {
+		if _, err := upstream.NewSumWriter(algs...); err == nil {
+			t.Errorf("NewSumWriter(%q) accepted", algs)
+		}
+	}
+}

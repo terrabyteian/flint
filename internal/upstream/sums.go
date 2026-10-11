@@ -137,6 +137,31 @@ func (h *hashers) verify(e *Expect, label string) (Sums, error) {
 	return got, nil
 }
 
+// SumWriter computes digests of the content written to it, for hosted
+// uploads that serve other digests than the blob store's sha256: tee the
+// upload through it, so every digest comes from the same pass, never from
+// reading the blob again.
+type SumWriter struct{ h *hashers }
+
+// NewSumWriter returns a SumWriter computing the digests of algorithms
+// algs (SHA1, SHA512, MD5); GitSHA1 needs the size in advance and is not
+// supported here.
+func NewSumWriter(algs ...string) (*SumWriter, error) {
+	if slices.Contains(algs, GitSHA1) {
+		return nil, errors.New("upstream: a git blob hash needs the content's size in advance")
+	}
+	h, err := newHashers(&Expect{Size: -1, Compute: algs})
+	if err != nil {
+		return nil, err
+	}
+	return &SumWriter{h}, nil
+}
+
+func (w *SumWriter) Write(p []byte) (int, error) { return w.h.Write(p) }
+
+// Sums returns the digests of the content written so far.
+func (w *SumWriter) Sums() Sums { return w.h.sums() }
+
 // ParseIntegrity parses a Subresource Integrity value, as npm's
 // dist.integrity holds: one or more "<alg>-<base64>" entries separated
 // by spaces. It returns the strongest digest it knows, sha512 before
