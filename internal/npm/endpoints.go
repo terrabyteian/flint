@@ -344,8 +344,9 @@ func searchName(obj json.RawMessage) string {
 }
 
 // virtualSearch searches virtual repository rp's members: the hosted
-// ones' matches first, then the proxy ones' answers, each package once,
-// from a member that may serve it. A member that fails is skipped.
+// ones' matches first, then the proxy ones' answers, each in member
+// order, each package once, from the first of them that may serve it. A
+// member that fails is skipped.
 func (h *Handler) virtualSearch(r *http.Request, rp *repository, q url.Values, from, size int) (*searchResult, error) {
 	ctx := r.Context()
 	// Each member is asked for the results up to the end of the page.
@@ -355,7 +356,15 @@ func (h *Handler) virtualSearch(r *http.Request, rp *repository, q url.Values, f
 	}
 	mq.Set("from", "0")
 	mq.Set("size", strconv.Itoa(from+size))
-	answers, err := repo.Consult(ctx, rp.virtual, rp.virtual.Members, q.Get("text"),
+	var members []repo.Member
+	for _, hosted := range []bool{true, false} {
+		for _, m := range rp.virtual.Members {
+			if m.Hosted == hosted {
+				members = append(members, m)
+			}
+		}
+	}
+	answers, err := repo.Consult(ctx, rp.virtual, members, q.Get("text"),
 		func(ctx context.Context, m repo.Member) (*searchResult, error) {
 			mr := h.repos[m.Name]
 			if m.Hosted {

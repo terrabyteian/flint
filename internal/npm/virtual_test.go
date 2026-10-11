@@ -267,6 +267,17 @@ func TestVirtualSearchKeysAttestations(t *testing.T) {
 	if len(res.Objects) != 1 || res.Objects[0].Package["name"] != "left-pad" {
 		t.Errorf("search page %v", res.Objects)
 	}
+	// Hosted matches come first even when a proxy member is listed first.
+	e.publish("local", newPkg("pad-internal", "2.0.0"), http.StatusOK)
+	res = jsonOf[result](t, e.expect("GET", "/npm/capped/-/v1/search?text=pad", nil, http.StatusOK))
+	if len(res.Objects) < 3 || res.Objects[0].Package["name"] != "pad-internal" || res.Objects[0].Package["version"] != "2.0.0" {
+		t.Errorf("search through a proxy-first virtual repository %v: want the hosted pad-internal first", res.Objects)
+	}
+	for _, o := range res.Objects[1:] {
+		if o.Package["name"] == "pad-internal" {
+			t.Error("pad-internal is listed twice")
+		}
+	}
 
 	keys := jsonOf[map[string][]map[string]any](t, e.expect("GET", "/npm/all/-/npm/v1/keys", nil, http.StatusOK))
 	if len(keys["keys"]) != 1 {
