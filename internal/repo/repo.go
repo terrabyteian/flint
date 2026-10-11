@@ -22,7 +22,7 @@
 //     reached with nothing cached, is skipped, logged, and counted; the
 //     view is built from the others.
 //   - An optional publishTo member receives what clients publish to the
-//     virtual repository.
+//     virtual repository, if its filters admit the package's name.
 //
 // Names are compared after the format's normalization, which the format
 // supplies with VirtualOptions.Normalize, and so are filters.
@@ -133,10 +133,6 @@ func (v *Virtual) has(name string) bool {
 	return false
 }
 
-// Normalize returns name in the form the virtual repository compares
-// names in.
-func (v *Virtual) Normalize(name string) string { return v.normalize(name) }
-
 // Hosted returns the names of the hosted members, in order.
 func (v *Virtual) Hosted() []string {
 	var out []string
@@ -157,6 +153,32 @@ func (v *Virtual) Admits(m Member, name string) bool {
 		return false
 	}
 	return !matchAny(m.exclude, name)
+}
+
+// CheckPublish returns an error naming the filter that refuses the
+// package called name if the publishTo member's filters do not admit it,
+// and nil otherwise or if there is no publishTo. A publish through the
+// virtual repository must be refused then, or the virtual repository
+// would not serve what was published to it, but whatever another member
+// has under the name.
+func (v *Virtual) CheckPublish(name string) error {
+	for _, m := range v.Members {
+		if m.Name != v.PublishTo {
+			continue
+		}
+		n := v.normalize(name)
+		if len(m.include) > 0 && !matchAny(m.include, n) {
+			return fmt.Errorf("virtual repository %s publishes to %s, whose include filter %q does not admit %s",
+				v.Name, m.Name, m.include, name)
+		}
+		for _, p := range m.exclude {
+			if Match(p, n) {
+				return fmt.Errorf("virtual repository %s publishes to %s, whose exclude filter %q refuses %s",
+					v.Name, m.Name, p, name)
+			}
+		}
+	}
+	return nil
 }
 
 // Sources returns the members that may serve the package called name, in

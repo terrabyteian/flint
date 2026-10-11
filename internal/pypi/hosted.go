@@ -18,6 +18,7 @@ import (
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/repo"
 )
 
 // hostedProject returns the live files of a hosted project, or nil if it
@@ -113,10 +114,12 @@ type upload struct {
 // "content" part and its metadata in the other fields.
 //
 // An upload to a virtual repository with publishTo goes to that hosted
-// member, and needs the permissions an upload to it directly needs.
+// member, and needs the permissions an upload to it directly needs; it is
+// refused if the member's filters do not admit the project.
 func (h *Handler) serveUpload(w http.ResponseWriter, r *http.Request, rp *repository) {
+	var via *repo.Virtual
 	if rp.typ == config.TypeVirtual && rp.virtual.PublishTo != "" {
-		rp = h.repos[rp.virtual.PublishTo]
+		via, rp = rp.virtual, h.repos[rp.virtual.PublishTo]
 	}
 	actions := []string{ActionPull}
 	if rp.typ == config.TypeHosted {
@@ -141,7 +144,7 @@ func (h *Handler) serveUpload(w http.ResponseWriter, r *http.Request, rp *reposi
 		h.fail(w, r, err)
 		return
 	}
-	created, err := h.storeUpload(r, rp, u)
+	created, err := h.storeUpload(r, rp, via, u)
 	if u.up != nil {
 		u.up.Cancel() // a no-op once committed
 	}
@@ -319,12 +322,18 @@ func (u *upload) check() (*checkedUpload, error) {
 
 // storeUpload validates an upload, commits its file and metadata to the
 // blob store, and records the file. It reports false if the same file was
-// already uploaded, which is not an error.
-func (h *Handler) storeUpload(r *http.Request, rp *repository, u *upload) (bool, error) {
+// already uploaded, which is not an error. via is the virtual repository
+// the upload was sent to, or nil if it was sent to rp.
+func (h *Handler) storeUpload(r *http.Request, rp *repository, via *repo.Virtual, u *upload) (bool, error) {
 	ctx := r.Context()
 	c, err := u.check()
 	if err != nil {
 		return false, err
+	}
+	if via != nil {
+		if err := via.CheckPublish(c.name); err != nil {
+			return false, errorf(http.StatusForbidden, "%v", err)
+		}
 	}
 	fk, nk := fileKey(rp.name, u.filename), nameKey(rp.name, c.normal)
 	// A name that is taken refuses the upload before the file is committed.

@@ -662,6 +662,29 @@ func TestVirtualPublishTo(t *testing.T) {
 	}
 }
 
+// TestVirtualPublishToFilters checks that an upload through a virtual
+// repository is refused, storing nothing, when the publishTo member's
+// filters do not admit the project, since the virtual repository would
+// then serve another member's package under the name instead.
+func TestVirtualPublishToFilters(t *testing.T) {
+	e := newEnv(t)
+	d := wheel("corp-tool", "1.0", nil)
+	w := e.upload("scoped", d, d.form(), false)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "local") || !strings.Contains(w.Body.String(), "acme-*") {
+		t.Errorf("upload of a name local does not admit: %d %s", w.Code, w.Body)
+	}
+	if e.has(projectKey("local", "corp-tool")) || e.has(fileKey("local", d.filename)) {
+		t.Error("the refused upload was stored")
+	}
+	ok := wheel("acme-tool", "1.0", nil)
+	if w := e.upload("scoped", ok, ok.form(), false); w.Code != http.StatusOK {
+		t.Fatalf("upload of a name local admits: %d %s", w.Code, w.Body)
+	}
+	if got := e.page("local", "acme-tool").filenames(); !slices.Equal(got, []string{ok.filename}) {
+		t.Errorf("local after the upload: %q", got)
+	}
+}
+
 // TestVirtualSkipCounted checks that a member skipped because it failed
 // is counted.
 func TestVirtualSkipCounted(t *testing.T) {

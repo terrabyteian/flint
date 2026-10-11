@@ -210,7 +210,7 @@ A virtual repository serves one index over an ordered list of hosted and proxy m
 - A member that fails, such as a proxy whose upstream is unreachable and has the project uncached, is left out with a warning in the log, counted in `flint_virtual_member_skips_total`, so one unreachable upstream does not take the whole index down. The request fails only if no member could answer.
 - The JSON API merges the members the same way.
 - The root index lists the projects of every member that its filters admit.
-- **Uploads** go to the hosted member that `virtual.publishTo` names, so one URL serves both pip and twine; they need the permissions an upload to that member needs. Without `publishTo`, uploads are refused with `405`, naming the hosted members to publish to instead.
+- **Uploads** go to the hosted member that `virtual.publishTo` names, so one URL serves both pip and twine; they need the permissions an upload to that member needs. An upload of a project whose name that member's filters do not admit is refused with `403`, naming the member and the filter, and nothing is stored. Without `publishTo`, uploads are refused with `405`, naming the hosted members to publish to instead.
 
 Pulling through a virtual repository needs the `read` role on the virtual repository, or its `anonymousPull`; the members' own permissions are not consulted.
 

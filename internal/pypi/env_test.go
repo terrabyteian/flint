@@ -124,6 +124,8 @@ func (e *env) restart() {
 		{Name: "filtered", Format: config.FormatPyPI, Type: config.TypeVirtual, Virtual: &config.Virtual{PublishTo: "team",
 			Members: []config.VirtualMember{{Name: "local", Include: []string{"Acme_*"}}, {Name: "team"},
 				{Name: "remote", Exclude: []string{"acme-*"}}}}},
+		{Name: "scoped", Format: config.FormatPyPI, Type: config.TypeVirtual, Virtual: &config.Virtual{PublishTo: "local",
+			Members: []config.VirtualMember{{Name: "local", Include: []string{"acme-*"}}, {Name: "remote"}}}},
 		{Name: "oci", Format: config.FormatOCI, Type: config.TypeHosted},
 	}
 	space := upstream.NewSpace(upstream.SpaceOptions{

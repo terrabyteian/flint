@@ -154,6 +154,43 @@ func TestNewVirtual(t *testing.T) {
 	}
 }
 
+// TestCheckPublish checks that a publish through the virtual repository
+// is refused, naming the filter, when the publishTo member's filters do
+// not admit the name.
+func TestCheckPublish(t *testing.T) {
+	all := repos(nil)
+	all[3].Virtual.Members = []config.VirtualMember{
+		{Name: "pypi"}, {Name: "local", Include: []string{"Acme-*"}, Exclude: []string{"acme-secret"}}, {Name: "team"},
+	}
+	all[3].Virtual.PublishTo = "local"
+	v, err := NewVirtual(all[3], all, VirtualOptions{Normalize: lower})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.CheckPublish("ACME-Tool"); err != nil {
+		t.Errorf("CheckPublish(ACME-Tool) = %v", err)
+	}
+	for name, filter := range map[string]string{"corp-tool": "acme-*", "acme-secret": "acme-secret"} {
+		if err := v.CheckPublish(name); err == nil || !strings.Contains(err.Error(), "local") || !strings.Contains(err.Error(), filter) {
+			t.Errorf("CheckPublish(%s) = %v, want a refusal naming local and %s", name, err, filter)
+		}
+	}
+	all[3].Virtual.PublishTo = "team"
+	if v, err = NewVirtual(all[3], all, VirtualOptions{Normalize: lower}); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.CheckPublish("corp-tool"); err != nil {
+		t.Errorf("CheckPublish through an unfiltered member = %v", err)
+	}
+	all[3].Virtual.PublishTo = ""
+	if v, err = NewVirtual(all[3], all, VirtualOptions{Normalize: lower}); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.CheckPublish("corp-tool"); err != nil {
+		t.Errorf("CheckPublish without publishTo = %v", err)
+	}
+}
+
 var errDown = errors.New("upstream unreachable")
 
 // TestConsult checks that a member that fails is skipped, logged, and
