@@ -46,7 +46,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 12 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 13 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -69,6 +69,9 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if v := c.Repositories[11].Virtual; v == nil || v.PublishTo != "cargo-local" || len(v.Members) != 2 || c.Repositories[11].AnonymousPull {
 		t.Errorf("unexpected Cargo virtual repository: %+v", c.Repositories[11])
+	}
+	if r := c.Repositories[12]; r.Format != FormatNPM || r.Type != TypeHosted {
+		t.Errorf("unexpected npm repository: %+v", r)
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)

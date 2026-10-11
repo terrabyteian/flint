@@ -615,3 +615,87 @@ jobs:
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"
+
+  npm:
+    name: npm end to end with npm ${{ matrix.npm }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        npm: ["10.9.9", "11.20.0"]
+    env:
+      PNPM_VERSION: "12.8.2"
+      YARN_VERSION: "1.22.22"
+      YARN_BERRY_VERSION: "4.18.1"
+      BUN_VERSION: "1.4.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      # CI-only tools: they never ship in flint, so the zero-dependency rule
+      # does not apply.
+      - name: Install npm, pnpm, Yarn classic, Yarn Berry, and Bun
+        run: |
+          npm install --global "npm@${{ matrix.npm }}"
+          npm install --prefix "$RUNNER_TEMP/clients" --no-audit --no-fund "pnpm@$PNPM_VERSION" "yarn@$YARN_VERSION" \
+            "@yarnpkg/cli-dist@$YARN_BERRY_VERSION" "bun@$BUN_VERSION"
+          # Yarn classic and Berry both install a yarn command; Berry runs
+          # as yarn-berry.
+          modules=$RUNNER_TEMP/clients/node_modules
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$modules/yarn/bin/yarn.js" "$RUNNER_TEMP/bin/yarn"
+          ln -s "$modules/.bin/pnpm" "$RUNNER_TEMP/bin/pnpm"
+          ln -s "$modules/.bin/bun" "$RUNNER_TEMP/bin/bun"
+          printf '#!/bin/sh\nexec node %s "$@"\n' "$modules/@yarnpkg/cli-dist/bin/yarn.js" >"$RUNNER_TEMP/bin/yarn-berry"
+          chmod +x "$RUNNER_TEMP/bin/yarn-berry"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "npm-local", "format": "npm", "type": "hosted"}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [{"repositories": ["npm-local"], "role": "delete", "groups": ["ci"]}]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Create a CI user and API token
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          echo "BOT_PASSWORD=$bot_password" >>"$GITHUB_ENV"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          token=$(curl -fsS -u "ci-bot:$bot_password" http://127.0.0.1:5000/api/v1/tokens \
+            -d '{"name": "e2e", "expiresIn": "2h"}' | jq -r .token)
+          echo "::add-mask::$token"
+          echo "E2E_TOKEN=$token" >>"$GITHUB_ENV"
+      - name: Publish and install with npm, pnpm, Yarn, and Bun
+        env:
+          E2E_USERNAME: ci-bot
+          E2E_CLIENTS: pnpm yarn yarn-berry bun
+        run: E2E_PASSWORD="$BOT_PASSWORD" scripts/e2e-npm.sh 127.0.0.1:5000 npm-local
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"

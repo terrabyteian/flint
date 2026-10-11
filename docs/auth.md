@@ -50,11 +50,12 @@ Pulling through a [virtual repository](configuration.md#virtual-repository-setti
 
 For PyPI repositories, installing is pulling and publishing is pushing; yanking and deleting files need `delete`.
 For Cargo repositories, building is pulling, and publishing and yanking are pushing, which need `write`; deleting a version needs `delete`.
+For npm repositories, installing is pulling; publishing, changing dist-tags, and deprecating are pushing; unpublishing needs `delete`.
 
 For generic files repositories, downloading and listing are pulling, uploading a file is pushing, and deleting one needs `delete`; in a repository with `generic.allowOverwrite`, replacing a file with different content needs only `write`.
 
-Permissions apply to flint repositories: the first component of an image path, or the repository of a PyPI, generic files, or Cargo URL.
-A grant on `docker-local` covers `host/docker-local/team/app`, one on `pypi-local` covers `host/pypi/pypi-local/...`, one on `files` covers `host/generic/files/...`, and one on `cargo-local` covers `host/cargo/cargo-local/...`.
+Permissions apply to flint repositories: the first component of an image path, or the repository of a PyPI, generic files, Cargo, or npm URL.
+A grant on `docker-local` covers `host/docker-local/team/app`, one on `pypi-local` covers `host/pypi/pypi-local/...`, one on `files` covers `host/generic/files/...`, one on `cargo-local` covers `host/cargo/cargo-local/...`, and one on `npm-local` covers `host/npm/npm-local/...`.
 
 ## API tokens
 
@@ -91,7 +92,7 @@ For those, flint verifies the password and answers with a new API token, which:
 - is listed and revoked like any other token.
 
 An API token is not accepted in place of the password there, so a token cannot mint another.
-Each package format's documentation says whether its clients log in this way.
+Each package format's documentation says whether its clients log in this way; [npm's](npm.md#logging-in-with-npm-login) do.
 
 ## PyPI clients
 
@@ -109,6 +110,14 @@ A repository's `config.json` says `"auth-required": true` unless it has `anonymo
 `cargo login` only stores a token Cargo is given, so create one with the [admin API](#tokens) first.
 Crates have no owners in flint: `cargo owner` fails, and who may publish, yank, and delete is decided by permission grants.
 [Cargo](cargo.md#configuring-cargo) shows how to configure it.
+
+## npm clients
+
+npm, pnpm, Yarn Berry, and Bun send an API token from their configuration as `Authorization: Bearer <token>`; `_auth` in `.npmrc` and Yarn's `npmAuthIdent` send HTTP basic credentials, which work too.
+A request without valid credentials that needs them gets `401` without a `WWW-Authenticate` header, with the reason as a JSON error, after which npm tells the user to log in; one whose credentials lack the permission gets `403`.
+`npm login` sends a user name and password and gets a newly minted [login token](#tokens-from-client-login-commands), which it stores in `.npmrc`, and `npm whoami` names the token's owner.
+Tokens from the Docker token endpoint are not accepted.
+[npm](npm.md#configuring-clients) shows how to configure each client.
 
 ## Docker clients
 

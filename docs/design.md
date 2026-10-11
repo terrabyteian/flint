@@ -46,7 +46,7 @@ The Go standard library makes this cost acceptable: it ships a production HTTP/1
 Correctness of the hand-written protocol code is checked against real clients and official conformance suites in CI.
 
 Test harnesses are exempt because they never ship in the binary.
-CI may run real clients (docker, crane, oras, pip, uv, twine) and the official OCI distribution conformance suite against a running flint.
+CI may run real clients (docker, crane, oras, pip, uv, twine, npm, pnpm, Yarn, Bun) and the official OCI distribution conformance suite against a running flint.
 
 ### Why Go over Rust
 
@@ -180,6 +180,8 @@ Illustrative v1 key space:
 | `generic\0file\0<repo>\0<path>` | hosted file record (blob digest, size, content type, upload time); kept as a tombstone, without a digest, after delete in an immutable repository | `internal/generic` |
 | `cargo\0crate\0<repo>\0<normalized name>` | hosted crate (name as first published); kept forever, so the repository keeps owning the name and its spelling, and rewritten by every change to the crate, so its version is the index file's ETag | `internal/cargo` |
 | `cargo\0version\0<repo>\0<normalized name>\0<version>` | hosted crate version (index line with its yank state, `.crate` digest and size, publish time, description), by the version without build metadata; kept as a tombstone after delete | `internal/cargo` |
+| `npm\0pkg\0<repo>\0<name>` | hosted package: dist-tags, created and modified times, the readme published last; kept forever, so the repository keeps owning the name. Its version in the store is the package's `_rev` | `internal/npm` |
+| `npm\0version\0<repo>\0<name>\0<version>` | hosted version: manifest blob, tarball digest and size, sha512 and sha1, publish time, deprecation message, provenance bundle; kept as a tombstone after unpublish | `internal/npm` |
 | `cache\0doc\0<repo>\0<key>` | document a proxy repository cached, such as a PyPI project page, a generic file that is revalidated, or a Cargo index file (`<key>` is the format's name for it): blob digest of the upstream's bytes, upstream ETag and Last-Modified, content type, URL, fetch time | `internal/upstream` |
 | `cache\0file\0<repo>\0<path>` | immutable file a path-addressed proxy repository cached, such as a generic file with `generic.immutable` or a Cargo `.crate` file: blob digest, size, content type, the other digests verified or computed | `internal/upstream` |
 | `cache\0pulled\0file\0<repo>\0<path>` | last pull of a file cached by a size-limited path-addressed proxy repository | `internal/upstream` |
@@ -467,7 +469,7 @@ type Marker map[string]MarkFunc
 func Guard(v meta.View, b *meta.Batch, ds ...blob.Digest) error
 ```
 
-- **Registration.** `flint serve` gives the collector the `Marker` of every package that writes metadata (`oci.GCMarker`, `pypi.GCMarker`, `generic.GCMarker`, `cargo.GCMarker`, `upstream.Marks` for the proxy cache the formats share, `auth.GCMarker`; later formats add theirs). No prefix may start with another. The collector knows no format's encodings: it only calls the functions.
+- **Registration.** `flint serve` gives the collector the `Marker` of every package that writes metadata (`oci.GCMarker`, `pypi.GCMarker`, `generic.GCMarker`, `cargo.GCMarker`, `npm.GCMarker`, `upstream.Marks` for the proxy cache the formats share, `auth.GCMarker`; later formats add theirs). No prefix may start with another. The collector knows no format's encodings: it only calls the functions.
 - **Unknown records stop deletion.** Marking scans the keys under the registered prefixes, and also the keys between them. A live key under no registered prefix, or a record its function cannot read, makes the run refuse to delete anything and report the key family (the key up to its second separator, such as `pypi\0file\0`), so a format that forgot to register can never lose data.
 - **Proof in tests.** A format's tests write every kind of record the format can, then call `gctest.CheckMarked` or `gctest.CheckStored`, which fail on any key or record the format's marker does not cover.
 - **Links.** A batch that makes a blob visible calls `Guard` with a view it read before its blob-existence check, and fails with a retryable error on `ErrDoomed`. A record that references a blob without linking it, such as a manifest listing its layers, instead requires, at the version it read, a record that references the blob and was written under the same rules, such as the layer's link.
@@ -489,6 +491,7 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/pypi` | PyPI simple API, JSON API, uploads: hosted, proxy, and virtual repositories. |
 | `internal/generic` | Generic files by path, with uploads, downloads, deletes, and listings: hosted, proxy, and virtual repositories. |
 | `internal/cargo` | Cargo sparse index and registry web API: hosted, proxy, and virtual repositories. |
+| `internal/npm` | npm registry API: packuments, tarballs, publish, dist-tags, deprecate, unpublish, legacy login; hosted repositories. |
 | `internal/upstream` | Shared upstream client and caching-proxy pieces: credentials, retries, offline fallback, the fetch policy and concurrency cap, revalidation windows, the shared fetcher with its verifier hook, the document cache, the path-cache engine, the negative cache, free-space watcher, size limits, and proxy metrics. |
 | `internal/hostpattern` | The `proxy.allowHosts` host patterns, parsed alike by configuration validation and the upstream fetch policy. |
 | `internal/metrics` | Prometheus text exposition. |
@@ -504,8 +507,8 @@ Everything is under `internal/` until a stable public Go API is a deliberate dec
 
 ## Repository types
 
-OCI, PyPI, generic files, and Cargo have hosted and caching-proxy repositories, and PyPI, generic files, and Cargo virtual repositories; the formats that follow build on the same [repository model](#repository-model).
-Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, a per-repository index URL for PyPI and Cargo, and a per-repository base URL for generic files.
+OCI, PyPI, generic files, and Cargo have hosted and caching-proxy repositories, PyPI, generic files, and Cargo virtual repositories, and npm hosted repositories; the formats that follow build on the same [repository model](#repository-model).
+Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, a per-repository index URL for PyPI and Cargo, a per-repository registry URL for npm, and a per-repository base URL for generic files.
 For OCI, the first path component of a repository name is the configured repository and the rest, at least one component, is an image name below it: `docker-local/team/app` is image `team/app` in repository `docker-local`, served at `/v2/docker-local/team/app/...`.
 Repository names are unique across formats, so permissions and metrics name a repository unambiguously.
 
@@ -521,7 +524,7 @@ For PyPI, each repository is served under `/pypi/<repo>/`, following the layout 
 | `/pypi/<repo>/pypi/<project>/json`, `/pypi/<repo>/pypi/<project>/<version>/json` | JSON API |
 
 Pages link files relatively (`../../files/<project>/<filename>`), so they do not depend on the host name a client used and can be cached as they are; only the JSON API, whose URLs are absolute as on PyPI, uses `publicURL`, or else the request's scheme and host (see [Repository model](#repository-model)).
-Every format lives under its own path prefix (`/v2/`, `/pypi/`), so the formats that follow PyPI (npm, Maven, Go modules, Cargo) get their own prefixes on the same server; [Repository model](#repository-model) states the rule.
+Every format lives under its own path prefix (`/v2/`, `/pypi/`, `/npm/`), so the formats that follow (Maven, Go modules, Cargo) get their own prefixes on the same server; [Repository model](#repository-model) states the rule.
 The admin API's PyPI endpoints, which yank, unyank, and delete, are under `/api/v1/pypi/<repo>/`.
 
 Generic files repositories serve arbitrary files by path for curl, wget, and scripts, each under `/generic/<repo>/`:
@@ -549,6 +552,22 @@ For Cargo, each repository is a sparse registry at `/cargo/<repo>/`, its index U
 `config.json`'s URLs use `publicURL`, or else the request's scheme and host; index lines carry no URLs.
 The admin API deletes versions at `/api/v1/cargo/<repo>/crates/<name>/<version>`.
 
+For npm, each repository's registry URL is `/npm/<repo>/`, the URL npm, pnpm, Yarn, and Bun are configured with; the paths below it are the npm registry API's:
+
+| URL | Serves |
+| --- | --- |
+| `/npm/<repo>/<name>` | packument: the full document, or the abbreviated one for `Accept: application/vnd.npm.install-v1+json`; `PUT` publishes, deprecates, or unpublishes |
+| `/npm/<repo>/<name>/<version or dist-tag>` | one version's manifest |
+| `/npm/<repo>/<name>/-/<file>.tgz` | tarball |
+| `/npm/<repo>/<name>/-rev/<rev>` | `PUT` edits the packument at that revision (unpublishing versions); `DELETE` unpublishes the package |
+| `/npm/<repo>/-/package/<name>/dist-tags[/<tag>]` | dist-tags: list, set, remove |
+| `/npm/<repo>/-/user/org.couchdb.user:<user>`, `-/whoami`, `-/ping` | legacy login, whoami, ping |
+| `/npm/<repo>/-/v1/search`, `-/npm/v1/security/advisories/bulk`, `-/npm/v1/keys`, `-/npm/v1/attestations/<name>@<version>` | search, audit, registry signing keys, provenance |
+
+A scoped name is accepted encoded (`@scope%2fname`, as npm sends it) and plain (`@scope/name`).
+Tarballs are below the registry URL, so npm sends the registry's credentials with tarball requests, since it matches credentials to URLs by path prefix.
+Tarball URLs in packuments are absolute, as npm records them in lockfiles, and built from `publicURL` (see [Repository model](#repository-model)).
+
 ### Hosted
 
 Clients push and pull first-party artifacts.
@@ -566,6 +585,18 @@ Yanking changes only the line's `yanked` field.
 A dependency on crates.io keeps naming crates.io's index in a hosted repository.
 Every change to a crate rewrites its crate record, whose version is the index file's ETag, so `If-None-Match` answers `304` until the crate changes.
 Deletes are admin-only, hide the artifact immediately, and leave space reclamation to garbage collection.
+
+npm versions are immutable, and a name@version is never published twice:
+
+- **Publish.** `npm publish` sends the version's manifest with its tarball base64-encoded in the JSON body. flint parses the body as a stream and decodes the tarball straight into a blob store upload, computing its sha512 (`dist.integrity`) and sha1 (`dist.shasum`) in the same pass; a publish whose declared digests or length disagree with the tarball is refused with `400`. The non-tarball JSON of a body is bounded (32 MiB). Package names follow npm's rules for new packages (lowercase, URL-safe, at most 214 characters, an optional scope) and versions are SemVer 2.0.0 without build metadata. The version's manifest is stored as its own blob, without the fields flint sets when it serves it (`dist`, `deprecated`) and without the readme, which is kept with the package; `_npmUser` names the publishing user.
+- **Duplicates and tombstones.** Publishing a version that is published, or was unpublished, is refused with `409`: the batch requires the version record absent, so of concurrent publishes of one version exactly one wins. Unpublishing leaves a tombstone that keeps only the publish and unpublish times, so garbage collection reclaims the tarball and manifest.
+- **Ownership.** A hosted repository owns a package from its first publish; the `npm\0pkg` record is kept forever, also after every version is unpublished, and new versions can be published again later.
+- **Dist-tags.** Publishing points the given tag (default `latest`) at the version, and `latest` too if the package has none, so a package has `latest` exactly when it has a live version. `npm dist-tag add` and `rm` need `write`; `latest` cannot be removed, only moved. Unpublishing a version removes the tags pointing at it, and moves `latest` to the highest version left, preferring releases to pre-releases.
+- **Deprecate.** `npm deprecate` sends the packument it read, edited; it is accepted when it differs from what is stored only in deprecation messages, and any other difference in a version is refused with `400`. It needs `write`; an empty message undeprecates.
+- **Unpublish.** `npm unpublish <name>@<version>` sends the packument without the version to its revision and then deletes the tarball; `npm unpublish <name> --force` deletes the package at its revision. Both need `delete`, and hide the versions at once. There is no time window: the `delete` role decides.
+- **Revisions.** A packument's `_rev` is derived from the package record's version in the metadata store, and every change to a package rewrites that record. An edit or delete of a revision that is no longer current is refused with `409`, as CouchDB-shaped clients expect; an edit that leaves versions out must name its revision, so a version published after the client read the package is never taken for one it left out.
+- **Serving.** Packuments are assembled from the records when served, and the rendered documents are cached in memory (64 MiB) by repository, package, record version, base URL, and form, so a cached rendering never goes stale. Packuments carry an `ETag` and `max-age=0, must-revalidate`; tarballs never change and may be cached for a year, `public` only in repositories with anonymous pull.
+- **Provenance.** A Sigstore bundle published with `npm publish --provenance` is stored with the version and served at the URL `dist.attestations` names; flint reads the attestation's predicate type from it but does not verify it, which `npm audit signatures` does.
 
 Hosted repositories **never auto-delete untagged manifests.**
 Deployments that pin images by digest (`image@sha256:...`) reference manifests no tag points at; deleting them would break running workloads on their next pull.
@@ -664,9 +695,9 @@ For Cargo:
 
 ## Repository model
 
-- **URL layout.** Every format but OCI serves a repository at `/<format>/<repo>/`, such as `/pypi/<repo>/` and later `/npm/<repo>/`, `/maven/<repo>/`, `/go/<repo>/`, `/cargo/<repo>/`, and `/generic/<repo>/`. OCI stays at `/v2/<repo>/...`, which its protocol fixes. A request whose format segment does not match the repository's format is a `404`. The format segment keeps repository names from colliding with flint's own paths (`/v2/`, `/api/`, `/auth/`, `/metrics`, `/healthz`, `/readyz`, `/.well-known/`, the UI) and lets the server dispatch without a lookup. Repository names stay one namespace across formats, so a permission grant addresses one name.
+- **URL layout.** Every format but OCI serves a repository at `/<format>/<repo>/`, such as `/pypi/<repo>/` and `/npm/<repo>/`, and later `/maven/<repo>/`, `/go/<repo>/`, `/cargo/<repo>/`, and `/generic/<repo>/`. OCI stays at `/v2/<repo>/...`, which its protocol fixes. A request whose format segment does not match the repository's format is a `404`. The format segment keeps repository names from colliding with flint's own paths (`/v2/`, `/api/`, `/auth/`, `/metrics`, `/healthz`, `/readyz`, `/.well-known/`, the UI) and lets the server dispatch without a lookup. Repository names stay one namespace across formats, so a permission grant addresses one name.
 - **Formats and settings.** The configuration accepts a format once flint serves it, with the repository types that format supports. A format with settings of its own has a settings object named after it, such as `"maven": {...}`, allowed only on repositories of that format and validated as strictly as the rest of the file.
-- **Public URL.** An optional top-level `publicURL` is the base of every absolute URL flint writes into the metadata it serves (the PyPI JSON API and Cargo's `config.json` today; npm tarball URLs and NuGet's service index later), so clients that store those URLs, as in lockfiles, see one stable URL however they reached flint. Without it, absolute URLs are built from the request's scheme and host as seen through trusted proxies. Where a protocol allows relative URLs (PyPI pages, Helm indexes), flint writes relative ones. Upstream bytes are stored verbatim and rewritten when served, so changing `publicURL` needs no cache flush.
+- **Public URL.** An optional top-level `publicURL` is the base of every absolute URL flint writes into the metadata it serves (the PyPI JSON API, Cargo's `config.json`, and npm tarball URLs today; NuGet's service index later), so clients that store those URLs, as in lockfiles, see one stable URL however they reached flint. Without it, absolute URLs are built from the request's scheme and host as seen through trusted proxies. Where a protocol allows relative URLs (PyPI pages, Helm indexes), flint writes relative ones. Upstream bytes are stored verbatim and rewritten when served, so changing `publicURL` needs no cache flush.
 - **Immutable names.** A published version or file never changes. Path-shaped formats (Maven, generic files) accept an upload of identical content to a published name again without a change, because build tools retry individual file uploads, and refuse different content with `409`. Publish-shaped formats (npm, Cargo, PyPI, NuGet) refuse a duplicate version, as their public registries do (PyPI accepts the very same file again, as PyPI does). Deleting an immutable name leaves a tombstone, and the name is never usable again, not even with identical content; this is PyPI's rule for file names, applied to every format.
 
 ## Spec coverage
@@ -706,12 +737,23 @@ For Cargo:
 - Cargo's `Authorization` token and its `login_url` challenge.
 - Not supported: the git index protocol, crate owners (`cargo owner` gets an error naming flint's permission grants), asymmetric tokens, and the `/me` login page until the UI exists.
 
+### npm
+
+- The npm registry API as npm, pnpm, Yarn (classic and Berry), and Bun use it: full and abbreviated (`application/vnd.npm.install-v1+json`) packuments, tarballs, and one version's manifest by version or dist-tag.
+- `npm publish`, with provenance bundles stored and served as attestations; `npm dist-tag`; `npm deprecate`; `npm unpublish` of versions and of whole packages.
+- The legacy `npm login` (`PUT /-/user/org.couchdb.user:<name>`), which mints an API token; `npm whoami`; `npm ping`.
+- `npm search` (`/-/v1/search`): a match of package names containing every word of the query, names starting with the first word first.
+- `npm audit`'s bulk advisories endpoint, answered with no advisories for hosted packages, and `/-/npm/v1/keys`, answered with no keys: flint does not sign packuments.
+- Gzip-compressed request bodies, which npm sends for audits.
+- Not supported: the web login (`/-/v1/login` is not found, so `npm login` falls back to the legacy login), two-factor authentication (the `npm-otp` header is ignored), `npm access`, `owner`, `team`, `org`, `token`, `star`, and `hook` (tokens are managed through flint's API), staged publishing, the CouchDB replication endpoints (`/-/all`, `_changes`), and trusted publishing over OIDC, which arrives with flint's trusted publishing.
+
 ## Auth and permissions
 
 - **Identities.** Local users with passwords and groups, and OIDC login, in v1. LDAP is deferred. Passwords are hashed with PBKDF2-HMAC-SHA256 (`crypto/pbkdf2`) at a high iteration count, since bcrypt and Argon2 live outside the standard library.
 - **API tokens.** Random, high-entropy secrets, shown once and stored only as a SHA-256 hash. Tokens can be given an expiry and carry a subset of their owner's permissions, never more: on each use the owner's current role is capped by the token's scopes.
 - **Docker clients.** A built-in bearer-token service implements the Docker token authentication flow, issuing short-lived JWTs scoped to repositories and actions (pull, push, delete). The JWTs are hand-written and signed with an Ed25519 key generated on first start and kept in the data directory. Each registry request also checks the subject's current permissions, so deleting a user or revoking a token takes effect before the JWT expires.
 - **PyPI clients.** HTTP basic auth with the `__token__` username convention and an API token as the password, or a user name and its password or token. `internal/pypi` consumes it through `Permit(r, repo, actions...)`, which `internal/auth` implements: it answers as an HTTP status, and the PyPI handler writes the response with a `Basic` challenge.
+- **npm clients.** npm, pnpm, Yarn Berry, and Bun send an API token from `.npmrc` (or `.yarnrc.yml`) as `Authorization: Bearer`; `_auth` and Yarn's `npmAuthIdent` send basic credentials, which work too. npm routes answer a request without valid credentials with a plain `401` and a JSON error, after which npm tells the user to log in. npm's legacy login sends a user name and password and gets a newly minted API token. `npm whoami` names the token's owner.
 - **Other package clients.** An API token is also accepted as `Authorization: Bearer <token>` (told apart from the token service's JWTs by its `flint_` prefix), as `Authorization: <token>` with no scheme, and in `X-NuGet-ApiKey`. Each route family challenges in its clients' style: Docker `Bearer` for `/v2/`, `Basic realm="flint"`, Cargo's `login_url`, or a plain `401`. A client's login command can mint an owned, named API token that expires after `auth.loginTokenTTL`. Clients that send no credentials for downloads get signed URLs: an HMAC-SHA256 over the path, an expiry, and the requesting principal, valid until the expiry and only while that principal may still read the repository. Reading through a virtual repository needs `read` on it only; publishing through it needs `write` on its `publishTo` member.
 - **Permissions.** Per-repository roles (`read` < `write` < `delete` < `admin`) are granted to users or groups. Grants can target a pattern such as `team-a-*`. One global `admin` role administers everything. Anonymous pull is a per-repository setting, off by default.
 - **First administrator.** Created at startup from a password file named in the configuration when no administrator exists, so Kubernetes can mount it from a Secret.
@@ -746,7 +788,7 @@ For Cargo:
 - **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup takes and pins its metadata view with the garbage collector in one step and holds it until it finishes copying, so the sweep's deletion check covers it and every blob its snapshot references is still present when it is copied. [backup.md](backup.md) is the operator's guide; the decisions behind it:
   - **It runs in the server.** Only the live process can pin a view with the garbage collector, so a backup is started through the admin API (`POST /api/v1/backup`, global admin), which `flint backup` drives and waits on. The target is `backup.directory` from the configuration, never a path in the request, so an admin token cannot make the server write elsewhere. One backup runs at a time, and a `LOCK` file in the target keeps out another process.
   - **The target is a content-addressed blob store** (`internal/blob`'s filesystem layout) shared by every backup in it, plus `backups/<id>/` holding the metadata snapshot (`meta.WriteSnapshot` of the pinned view), the list of blobs the backup needs, and `backup.json`. Copies go through blob store uploads, so each is verified against its digest and fsynced before it counts. `backup.json` records the digests of the other two files and is renamed into place, then its directory fsynced, only after everything else is durable, so an interrupted backup never looks complete. Nothing is deleted from the target, not even incomplete backups.
-  - **It copies every blob in the data directory**, not only those it can tell are referenced, so a backup never depends on every format package reporting its references correctly: every blob the view references was committed before the view was taken, so the blob walk finds it, and a blob that disappears during the walk was unreferenced. Each format package also reports the blobs its records reference (`oci.References`, `pypi.References`, `generic.References`, `cargo.References`), and the backup fails if one is missing.
+  - **It copies every blob in the data directory**, not only those it can tell are referenced, so a backup never depends on every format package reporting its references correctly: every blob the view references was committed before the view was taken, so the blob walk finds it, and a blob that disappears during the walk was unreferenced. Each format package also reports the blobs its records reference (`oci.References`, `pypi.References`, `generic.References`, `cargo.References`, `npm.References`), and the backup fails if one is missing.
   - **Restore** (`flint restore`) writes a backup into a new, empty data directory with `meta.Restore`, re-verifying every blob as it copies it, behind a `RESTORE-INCOMPLETE` marker that `flint serve` refuses. The restored store keeps every record's version and continues the log after the backup's sequence number. `flint backup verify` checks a backup the same way without restoring it.
   - **Secrets.** A backup holds the metadata, including password and API token hashes, but not the signing keys: a restored server generates new ones, which only invalidates bearer tokens and signed URLs that live minutes anyway, so backups never contain private key material. The configuration file and the files it names (TLS keys, the bootstrap password, upstream credentials) belong to the deployment and are not backed up either.
 

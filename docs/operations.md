@@ -48,6 +48,9 @@ Actions:
 | `cargo.yank`, `cargo.unyank`, `cargo.delete` | A crate version yanked, unyanked, or deleted. |
 | `cargo.proxy.cache` | A Cargo proxy repository cached an index file, its upstream's `config.json`, or a `.crate` file for the client that fetched it. |
 | `cargo.proxy.pulled`, `cargo.proxy.evict` | `(system)`: a size-limited Cargo proxy repository saved its pull times or evicted `.crate` files. |
+| `npm.publish` | A version published to a hosted [npm repository](npm.md). |
+| `npm.dist-tag` | An npm dist-tag set or removed. |
+| `npm.deprecate`, `npm.unpublish` | npm versions deprecated or undeprecated, or versions or a whole package unpublished. |
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |
