@@ -72,6 +72,9 @@ type Report struct {
 	// kept after all, because they were linked again while it ran or a
 	// pinned view, such as a running backup's, references them.
 	Kept Count `json:"kept"`
+	// Pruned counts the expired records the run removed, such as blob
+	// links no manifest references, or for a dry run, would have removed.
+	Pruned int64 `json:"pruned"`
 	// Deleted counts the blobs the run deleted, or for a dry run, would
 	// have deleted.
 	Deleted Count `json:"deleted"`

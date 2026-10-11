@@ -16,8 +16,9 @@ import (
 //	                  one is running; the optional body {"dryRun": true}
 //	                  asks for a dry run
 const (
-	StatusPattern = "GET /api/v1/gc"
-	StartPattern  = "POST /api/v1/gc"
+	APIPath       = "/api/v1/gc"
+	StatusPattern = "GET " + APIPath
+	StartPattern  = "POST " + APIPath
 )
 
 // apiError is the admin API's error body.

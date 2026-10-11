@@ -11,7 +11,7 @@ It runs while flint keeps serving pulls and pushes; there is no read-only mode.
 
 A blob is **referenced**, and kept, while any of these records points at it, in any repository:
 
-- a blob link: the blob was pushed to, mounted into, or cached by the repository name, and its link was not deleted;
+- a blob link: the blob was pushed to, mounted into, or cached by the repository name, and its link was not deleted and has not expired (see below);
 - a manifest record, which references the manifest's own bytes and every config, layer, and child manifest it lists;
 - a tag, which references its manifest;
 - a referrers entry, which references the referring manifest (a signature, an SBOM), but not its subject.
@@ -20,14 +20,22 @@ Everything else in the blob store is **unreferenced**.
 Garbage collection deletes an unreferenced blob once its grace period is over: by default 24 hours after the blob was stored.
 The grace period keeps a blob that a push stored a moment ago, but has not linked yet, out of reach.
 
+A blob link **expires** once it is older than the grace period, counted from when it was linked, and no manifest stored in its repository name is that blob or lists it, as a config, a layer, or a child manifest.
+Each run first removes the expired links, and logs each; the blobs only they referenced are then unreferenced.
+So deleting an image's manifest, as every client does, reclaims its config and layers too, unless another manifest in the repository name, or anything in another repository, still uses them.
+The grace period keeps the links of a push whose manifest has not arrived yet.
+A link a manifest is pushed against while the run removes it either stays, or the push fails as if the blob had not been pushed, and succeeds once the client pushes it again.
+
 What a delete reclaims follows from these rules:
 
 | You delete | Garbage collection reclaims |
 | --- | --- |
-| A manifest by digest (`DELETE /v2/<name>/manifests/<digest>`, `crane delete`, `regctl image delete`) | The manifest's bytes. Its tags and referrers entry go with it. Its config and layers stay linked in the repository name, and stay, until their links are deleted too. |
+| A manifest by digest (`DELETE /v2/<name>/manifests/<digest>`, `crane delete`, `regctl image delete`) | The manifest's bytes. Its tags and referrers entry go with it. Its config and layers, once their links in the repository name expire, unless other manifests or repositories use them. |
 | A tag | Nothing by itself: the manifest stays, by digest, for deployments that pin it. |
 | A blob link (`DELETE /v2/<name>/blobs/<digest>`) | The blob, once no other link or manifest in any repository references it. |
 | Content a size-limited proxy repository evicts | The evicted blobs and manifests that nothing else references. |
+
+Proxy repositories follow the same rules: a cached blob that no cached manifest in its repository name lists is fetched again, or linked again after the upstream confirms it, at the next pull after its link expires.
 
 Hosted repositories never delete untagged manifests on their own; see [the design](design.md#hosted).
 
@@ -41,21 +49,19 @@ One run happens at a time.
 
 ```sh
 # What would a run delete? Changes nothing.
-flint gc run -dry-run -url https://registry.example -user admin -password-file -
+flint gc run -dry-run -url https://registry.example -user admin -password-file admin-password
 
 # Delete, and wait for the report.
-flint gc run -url https://registry.example -user admin -password-file -
+flint gc run -url https://registry.example -user admin -password-file admin-password
 
 # The run in progress, the last run, and the schedule.
-flint gc status -url https://registry.example -user admin -password-file -
+flint gc status -url https://registry.example -user admin -password-file admin-password
 ```
 
-`-password-file -` reads the password, or an API token, from standard input; with a token, leave out `-user`, which then defaults to `__token__`, or give the token's owner.
-`FLINT_URL`, `FLINT_USER`, and `FLINT_PASSWORD` set the same from the environment, for scripts.
+`flint gc` takes the same flags as [`flint backup`](backup.md): `-url` is the server, by default `$FLINT_URL` if set, else `http://127.0.0.1:5000`; `-password-file` holds the password or an API token of an administrator, and is required; with a token, leave out `-user`, which then defaults to `__token__`, or give the token's owner.
+For an `https` URL, `flint gc` verifies the server's certificate against the system's certificate authorities and those in `-ca-file`.
 `-json` prints the report as JSON, and `run -detach` starts a run without waiting for it; `flint gc status` shows it.
 Interrupting `flint gc run` stops the waiting, not the run.
-
-`flint gc` needs `-url` or `FLINT_URL`, and verifies the server's TLS certificate as any HTTPS client does.
 
 `flint gc run` exits 0 when the run succeeded, and 1 otherwise.
 
@@ -71,6 +77,7 @@ Interrupting `flint gc run` stops the waiting, not the run.
   unreferenced:    2811 blobs, 96.2 GiB
   in grace period: 37 blobs, 1.1 GiB
   kept:            2 blobs, 310.0 MiB
+  pruned:          5108 expired records
   deleted:         2772 blobs, 94.8 GiB
 ```
 
@@ -81,6 +88,7 @@ Interrupting `flint gc run` stops the waiting, not the run.
 | `unreferenced` | Stored blobs nothing references. |
 | `in grace period` | Unreferenced blobs stored within the grace period, which the run keeps. |
 | `kept` | Unreferenced blobs past the grace period that the run kept after all: a push linked them again while it ran, or a pinned view, such as a running backup's, references them. |
+| `pruned` | Expired records the run removed, such as blob links no manifest references. A dry run says `would prune`. |
 | `deleted` | Blobs the run deleted. A dry run says `would delete` and lists them, up to 1000. |
 
 A run ends in one of these states:

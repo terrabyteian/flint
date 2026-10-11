@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/terrabyteian/flint/internal/auth"
 	"github.com/terrabyteian/flint/internal/backup"
@@ -27,6 +28,10 @@ import (
 
 // defaultConfigPath is where serve looks for its configuration without -config.
 const defaultConfigPath = "/etc/flint/config.json"
+
+// now is the clock of the blob store, the registry, and the garbage
+// collector. Only a binary built for end-to-end tests changes it.
+var now = time.Now
 
 // serve runs the server until ctx is done, then shuts it down gracefully.
 // It returns the process exit code.
@@ -88,7 +93,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 			err = fmt.Errorf("closing the metadata store: %w", cerr)
 		}
 	}()
-	blobs, err := blob.NewFS(cfg.DataDir, blob.Options{})
+	blobs, err := blob.NewFS(cfg.DataDir, blob.Options{Now: now})
 	if err != nil {
 		return err
 	}
@@ -214,6 +219,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Metrics:      reg,
 		Upstream:     upstream.Options{UserAgent: "flint/" + version},
 		Space:        space,
+		Now:          now,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -241,10 +247,12 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Meta:        store,
 		Blobs:       blobs,
 		Markers:     []gc.Marker{oci.GCMarker(), auth.GCMarker()},
+		Pruners:     []gc.Pruner{registry.GCPruner()},
 		GracePeriod: cfg.GC.GracePeriod.Duration,
 		Interval:    cfg.GC.Interval.Duration,
 		Logger:      logger,
 		Metrics:     reg,
+		Now:         now,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, err

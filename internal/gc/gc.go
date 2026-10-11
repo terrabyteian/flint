@@ -14,6 +14,15 @@
 // anything and report why: nothing says which blobs such a record keeps
 // alive, so a format that forgot to register can never lose data.
 //
+// A package may also register a Pruner for records that keep blobs alive
+// only for a while, such as blob links no manifest references once they
+// are older than the grace period. Marking skips the records the pruners
+// find expired in its view; unless the run refuses, it then removes them,
+// each only if it is still at the version marking read. A removal only
+// takes a reference away, so it needs no other precondition: the blobs
+// it leaves unreferenced are swept below like any other, and a record
+// written meanwhile, such as a link a manifest push rewrites, stays.
+//
 // # Sweeping
 //
 // A run marks a view M, then walks the blob store. A blob M does not
@@ -138,6 +147,7 @@ type Step string
 const (
 	StepMarked   Step = "marked"   // the metadata view is marked
 	StepScanned  Step = "scanned"  // the blob store is walked; candidates are known
+	StepPruned   Step = "pruned"   // the expired records are removed; the rounds are next
 	StepDoomed   Step = "doomed"   // a round's start batch is committed
 	StepViewed   Step = "viewed"   // a round took its view; it reads the pinned views next
 	StepVerified Step = "verified" // a round's views are checked; deletions are next
@@ -152,6 +162,8 @@ type Options struct {
 	// Markers are the markers of every package that writes metadata,
 	// except the gc package's own.
 	Markers []Marker
+	// Pruners are the pruners of the packages whose records expire.
+	Pruners []Pruner
 	// GracePeriod is how long an unreferenced blob is kept after its
 	// commit. Zero means DefaultGracePeriod; less than MinGracePeriod is
 	// an error.
@@ -189,6 +201,7 @@ type Collector struct {
 	meta      meta.Store
 	blobs     blob.Store
 	reg       *registry
+	pruners   []Pruner
 	grace     time.Duration
 	interval  time.Duration
 	roundSize int
@@ -247,6 +260,7 @@ func New(opts Options) (*Collector, error) {
 		meta:      opts.Meta,
 		blobs:     opts.Blobs,
 		reg:       marks,
+		pruners:   opts.Pruners,
 		grace:     opts.GracePeriod,
 		interval:  max(opts.Interval, 0),
 		roundSize: opts.RoundSize,
@@ -520,7 +534,7 @@ func (c *Collector) run(ctx context.Context, r *Report) *Report {
 		"duration", final.Finished.Sub(final.Started).String(), "referenced", final.Referenced,
 		"stored_blobs", final.Stored.Blobs, "stored_bytes", final.Stored.Bytes,
 		"unreferenced_blobs", final.Unreferenced.Blobs, "in_grace_period_blobs", final.InGracePeriod.Blobs,
-		"kept_blobs", final.Kept.Blobs, "deleted_blobs", final.Deleted.Blobs, "deleted_bytes", final.Deleted.Bytes,
+		"kept_blobs", final.Kept.Blobs, "pruned_records", final.Pruned, "deleted_blobs", final.Deleted.Blobs, "deleted_bytes", final.Deleted.Bytes,
 		"failed_blobs", final.Failed.Blobs}
 	switch final.State {
 	case StateSucceeded:
@@ -562,9 +576,11 @@ func (c *Collector) collect(ctx context.Context, r *Report) error {
 		return fmt.Errorf("clearing a doomed set left behind: %w", err)
 	}
 
+	cutoff := c.now().Add(-c.grace)
 	v := c.meta.View()
+	stale, skip := c.findExpired(v, cutoff)
 	marked := map[blob.Digest]struct{}{}
-	s, err := c.reg.scan(ctx, v, func(d blob.Digest) { marked[d] = struct{}{} })
+	s, err := c.reg.scan(ctx, v, skip, func(d blob.Digest) { marked[d] = struct{}{} })
 	v.Release()
 	if err != nil {
 		return err
@@ -576,7 +592,6 @@ func (c *Collector) collect(ctx context.Context, r *Report) error {
 	})
 	c.hook(StepMarked)
 
-	cutoff := c.now().Add(-c.grace)
 	var stored, unreferenced, inGrace Count
 	var cands []blob.Info
 	err = c.blobs.Walk(ctx, func(b blob.Info) error {
@@ -607,8 +622,13 @@ func (c *Collector) collect(ctx context.Context, r *Report) error {
 	}
 
 	if r.DryRun {
-		return c.dryRun(ctx, r, cands)
+		c.update(r, func(r *Report) { r.Pruned = int64(len(stale)) })
+		return c.dryRun(ctx, r, cands, skip)
 	}
+	if err := c.prune(ctx, r, stale); err != nil {
+		return err
+	}
+	c.hook(StepPruned)
 	for len(cands) > 0 {
 		round := cands[:min(len(cands), c.roundSize)]
 		cands = cands[len(round):]
@@ -619,9 +639,10 @@ func (c *Collector) collect(ctx context.Context, r *Report) error {
 	return nil
 }
 
-// dryRun records which candidates a sweep would delete now.
-func (c *Collector) dryRun(ctx context.Context, r *Report, cands []blob.Info) error {
-	keep, pins, err := c.verify(ctx, r, digestSet(cands))
+// dryRun records which candidates a sweep would delete now, after
+// removing the expired records in skip.
+func (c *Collector) dryRun(ctx context.Context, r *Report, cands []blob.Info, skip map[string]meta.Seq) error {
+	keep, pins, err := c.verify(ctx, r, digestSet(cands), skip)
 	if err != nil {
 		return err
 	}
@@ -668,7 +689,7 @@ func (c *Collector) sweep(ctx context.Context, r *Report, round []blob.Info) (er
 		return err
 	}
 	c.hook(StepDoomed)
-	keep, pins, err := c.verify(ctx, r, digestSet(round))
+	keep, pins, err := c.verify(ctx, r, digestSet(round), nil)
 	if err != nil {
 		return err
 	}
@@ -736,8 +757,9 @@ func (c *Collector) doom(ctx context.Context, r *Report, round []blob.Info) erro
 // the pinned views, and returns which of the doomed digests they
 // reference, and how many pinned views there were. The order matters: a
 // view pinned after PinnedViews returns follows the first view, so it
-// references no doomed digest the first view does not.
-func (c *Collector) verify(ctx context.Context, r *Report, doomed map[blob.Digest]bool) (map[blob.Digest]bool, int, error) {
+// references no doomed digest the first view does not. A dry run, which
+// removes nothing, passes the expired records to skip in the first view.
+func (c *Collector) verify(ctx context.Context, r *Report, doomed map[blob.Digest]bool, skip map[string]meta.Seq) (map[blob.Digest]bool, int, error) {
 	views := []meta.View{c.meta.View()}
 	c.hook(StepViewed)
 	views = append(views, c.meta.PinnedViews()...)
@@ -753,12 +775,18 @@ func (c *Collector) verify(ctx context.Context, r *Report, doomed map[blob.Diges
 		}
 	}
 	seen := map[meta.Seq]bool{}
-	for _, v := range views {
-		if seen[v.Seq()] {
-			continue // the same state; its references are known
+	for i, v := range views {
+		var vskip map[string]meta.Seq
+		if i == 0 {
+			vskip = skip
 		}
-		seen[v.Seq()] = true
-		s, err := c.reg.scan(ctx, v, mark)
+		if vskip == nil {
+			if seen[v.Seq()] {
+				continue // the same state; its references are known
+			}
+			seen[v.Seq()] = true
+		}
+		s, err := c.reg.scan(ctx, v, vskip, mark)
 		if err != nil {
 			return nil, 0, err
 		}

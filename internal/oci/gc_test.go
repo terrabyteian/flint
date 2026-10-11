@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,14 +72,15 @@ func newGCEnv(t *testing.T) *gcEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ge.gc = newCollector(t, ms, bs, ge.clock.now, ge.callHook)
+	ge.gc = newCollector(t, ge.h, ge.clock.now, ge.callHook)
 	return ge
 }
 
-// newCollector returns a garbage collector with the OCI marker.
-func newCollector(t *testing.T, ms meta.Store, bs blob.Store, now func() time.Time, hook func(gc.Step)) *gc.Collector {
+// newCollector returns a garbage collector with h's marker and pruner.
+func newCollector(t *testing.T, h *Handler, now func() time.Time, hook func(gc.Step)) *gc.Collector {
 	t.Helper()
-	c, err := gc.New(gc.Options{Meta: ms, Blobs: bs, Markers: []gc.Marker{GCMarker()}, Logger: quiet, Now: now, Hook: hook})
+	c, err := gc.New(gc.Options{Meta: h.meta, Blobs: h.blobs, Markers: []gc.Marker{GCMarker()}, Pruners: []gc.Pruner{h.GCPruner()},
+		Logger: quiet, Now: now, Hook: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +189,7 @@ func TestGCMarkerCoversEveryRecord(t *testing.T) {
 	if len(distinct) != 9 {
 		t.Errorf("%d distinct blobs referenced, want 9", len(distinct))
 	}
-	c := newCollector(t, e.meta, e.blobs, pe.now, nil)
+	c := newCollector(t, e.h, pe.now, nil)
 	if r, err := c.Run(context.Background(), gc.RunOptions{DryRun: true}); err != nil || r.State != gc.StateSucceeded ||
 		r.Referenced != 9 || r.Unreferenced.Blobs != 0 {
 		t.Fatalf("dry run = %+v, %v", r, err)
@@ -207,11 +209,11 @@ func TestGCMarkerRefs(t *testing.T) {
 		k, v []byte
 		want []blob.Digest
 	}{
-		"blob link":       {keyDigestRefs, blobKey(rn, d1), encodeBlobLink(3), []blob.Digest{d1}},
+		"blob link":       {keyDigestRefs, blobKey(rn, d1), encodeBlobLink(3, time.Time{}), []blob.Digest{d1}},
 		"manifest":        {manifestRefs, manifestKey(rn, d1), m.encode(), []blob.Digest{d1, d2, d3}},
 		"tag":             {tagRefs, tagKey(rn, "v1"), encodeTag(d2), []blob.Digest{d2}},
 		"referrer":        {keyDigestRefs, referrerKey(rn, d3, d1), newEnc(), []blob.Digest{d1}},
-		"no digest":       {keyDigestRefs, []byte(nsBlob + "hosted\x00app\x00sha256:zz"), encodeBlobLink(3), nil},
+		"no digest":       {keyDigestRefs, []byte(nsBlob + "hosted\x00app\x00sha256:zz"), encodeBlobLink(3, time.Time{}), nil},
 		"bad manifest":    {manifestRefs, manifestKey(rn, d1), []byte{9}, nil},
 		"bad tag":         {tagRefs, tagKey(rn, "v1"), []byte{recordFormat, 1}, nil},
 		"manifest no key": {manifestRefs, []byte(nsManifest + "x"), m.encode(), nil},
@@ -262,13 +264,10 @@ func TestGCEndToEnd(t *testing.T) {
 	want(t, ge.pushImage("hosted/app", sig.digest.String(), sig), http.StatusCreated, "")
 	orphan := ge.pushBlob("hosted/app", []byte("pushed, never used"))
 
-	// Delete image a, and its blobs' links; delete the orphan's link;
-	// delete shared in hosted/app only.
+	// Delete image a, as clients do, by its manifest only; delete shared
+	// in hosted/app only. The links of their blobs, and the orphan's,
+	// expire.
 	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+a.digest.String(), nil), http.StatusAccepted, "")
-	for _, c := range [][]byte{a.config, a.layer} {
-		want(t, ge.do("DELETE", "/v2/hosted/app/blobs/"+blob.FromBytes(c).String(), nil), http.StatusAccepted, "")
-	}
-	want(t, ge.do("DELETE", "/v2/hosted/app/blobs/"+orphan.String(), nil), http.StatusAccepted, "")
 	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+shared.digest.String(), nil), http.StatusAccepted, "")
 
 	ge.clock.advance(past)
@@ -282,11 +281,13 @@ func TestGCEndToEnd(t *testing.T) {
 			t.Errorf("blob %s survived", d)
 		}
 	}
-	if r.Deleted.Blobs != int64(len(gone)) || r.InGracePeriod.Blobs != 1 || !stored(t, ge.blobs, young) {
+	// a's config and layer, the orphan, and shared's config and layer in
+	// hosted/app.
+	if r.Deleted.Blobs != int64(len(gone)) || r.Pruned != 5 || r.InGracePeriod.Blobs != 1 || !stored(t, ge.blobs, young) {
 		t.Errorf("report = %+v", r)
 	}
 	// Everything still referenced pulls: b, its signature, and shared in
-	// the other name; shared's blobs also stay linked in hosted/app.
+	// the other name.
 	ge.pullImage("hosted/app", "b", b)
 	ge.pullImage("hosted/app", sig.digest.String(), sig)
 	ge.pullImage("other/copy", "shared", shared)
@@ -301,9 +302,6 @@ func TestGCEndToEnd(t *testing.T) {
 	// Deleting b leaves its signature, whose subject need not exist; the
 	// signature keeps its own blobs, not b's.
 	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+b.digest.String(), nil), http.StatusAccepted, "")
-	for _, c := range [][]byte{b.config, b.layer} {
-		want(t, ge.do("DELETE", "/v2/hosted/app/blobs/"+blob.FromBytes(c).String(), nil), http.StatusAccepted, "")
-	}
 	collect(t, ge.gc)
 	for _, d := range []blob.Digest{b.digest, blob.FromBytes(b.config), blob.FromBytes(b.layer)} {
 		if stored(t, ge.blobs, d) {
@@ -316,6 +314,123 @@ func TestGCEndToEnd(t *testing.T) {
 	// A deleted manifest's bytes come back with a push of it.
 	want(t, ge.pushImage("hosted/app", "a", a), http.StatusCreated, "")
 	ge.pullImage("hosted/app", "a", a)
+}
+
+// TestGCExpiredLinks deletes images by their manifests only, as clients
+// do, and checks that garbage collection removes the links that expired,
+// those older than the grace period that no manifest in their repository
+// name references, and keeps the rest: links of layers that other
+// manifests share, in the same name or through an index, and a link
+// younger than the grace period to a blob stored long before. A dry run
+// reports the same and changes nothing.
+func TestGCExpiredLinks(t *testing.T) {
+	ge := newGCEnv(t)
+	layerType := "application/vnd.oci.image.layer.v1.tar+gzip"
+	x := newImage("x", nil)
+	y := newImage("y", map[string]any{"layers": []any{desc(layerType, x.layer)}})
+	y.layer = x.layer
+	z := newImage("z", nil)
+	index := mustJSON(map[string]any{"schemaVersion": 2, "mediaType": mtOCIIndex,
+		"manifests": []any{desc(mtOCIManifest, z.manifest)}})
+	want(t, ge.pushImage("hosted/app", "x", x), http.StatusCreated, "")
+	want(t, ge.pushImage("hosted/app", "y", y), http.StatusCreated, "")
+	want(t, ge.pushImage("other/copy", "y", y), http.StatusCreated, "")
+	want(t, ge.pushImage("hosted/app", z.digest.String(), z), http.StatusCreated, "")
+	want(t, ge.do("PUT", "/v2/hosted/app/manifests/multi", index, "Content-Type", mtOCIIndex), http.StatusCreated, "")
+	early := ge.pushBlob("hosted/src", []byte("stored long ago"))
+	ge.clock.advance(past)
+	// Linked now, as a push does before its manifest arrives.
+	want(t, ge.do("POST", "/v2/hosted/dst/blobs/uploads/?mount="+early.String()+"&from=hosted/src", nil), http.StatusCreated, "")
+	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+x.digest.String(), nil), http.StatusAccepted, "")
+
+	xConfig := blob.FromBytes(x.config)
+	dry, err := ge.gc.Run(context.Background(), gc.RunOptions{DryRun: true})
+	if err != nil || dry.State != gc.StateSucceeded || dry.Pruned != 2 || dry.Deleted.Blobs != 2 {
+		t.Fatalf("dry run = %+v, %v", dry, err)
+	}
+	want(t, ge.do("GET", "/v2/hosted/app/blobs/"+xConfig.String(), nil), http.StatusOK, "")
+
+	// x's config link and the source link of the mounted blob expired;
+	// x's manifest and config are reclaimed.
+	r := collect(t, ge.gc)
+	if r.Pruned != 2 || r.Deleted.Blobs != 2 || stored(t, ge.blobs, x.digest) || stored(t, ge.blobs, xConfig) {
+		t.Fatalf("report = %+v", r)
+	}
+	want(t, ge.do("GET", "/v2/hosted/app/blobs/"+xConfig.String(), nil), http.StatusNotFound, codeBlobUnknown)
+	want(t, ge.do("GET", "/v2/hosted/src/blobs/"+early.String(), nil), http.StatusNotFound, codeBlobUnknown)
+	want(t, ge.do("GET", "/v2/hosted/dst/blobs/"+early.String(), nil), http.StatusOK, "")
+	ge.pullImage("hosted/app", "y", y)
+	ge.pullImage("hosted/app", z.digest.String(), z)
+	want(t, ge.do("GET", "/v2/hosted/app/manifests/multi", nil), http.StatusOK, "")
+	checkReferencedStored(t, ge.meta, ge.blobs)
+
+	// Deleting y in hosted/app expires its links there; other/copy keeps
+	// its blobs.
+	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+y.digest.String(), nil), http.StatusAccepted, "")
+	r = collect(t, ge.gc)
+	if r.Pruned != 2 || r.Deleted.Blobs != 0 {
+		t.Fatalf("report = %+v", r)
+	}
+	want(t, ge.do("GET", "/v2/hosted/app/blobs/"+blob.FromBytes(y.layer).String(), nil), http.StatusNotFound, codeBlobUnknown)
+	ge.pullImage("other/copy", "y", y)
+	checkReferencedStored(t, ge.meta, ge.blobs)
+}
+
+// TestGCLinkPruneRace interleaves a push of a manifest that references
+// expired links with their removal; exactly one of them wins. A push that
+// commits after the run found the links expired rewrites them, so the
+// run keeps them; a push that read the links before the run removed them
+// fails, as if the blobs had not been pushed, and succeeds once they are.
+func TestGCLinkPruneRace(t *testing.T) {
+	ge := newGCEnv(t)
+	img := newImage("raced", nil)
+	push := func() int {
+		return ge.do("PUT", "/v2/hosted/app/manifests/v1", img.manifest, "Content-Type", mtOCIManifest).Code
+	}
+	want(t, ge.pushImage("hosted/app", "v1", img), http.StatusCreated, "")
+	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+img.digest.String(), nil), http.StatusAccepted, "")
+	ge.clock.advance(past)
+
+	// The push commits between the run's view and its removal.
+	ge.setHook(func(s gc.Step) {
+		if s == gc.StepMarked {
+			if code := push(); code != http.StatusCreated {
+				t.Errorf("manifest push after the run's view = %d, want 201", code)
+			}
+		}
+	})
+	r := collect(t, ge.gc)
+	if r.Pruned != 0 || r.Deleted.Blobs != 0 || r.Kept.Blobs != 3 {
+		t.Fatalf("report = %+v", r)
+	}
+	ge.pullImage("hosted/app", "v1", img)
+	checkReferencedStored(t, ge.meta, ge.blobs)
+
+	// The push reads its view before the removal and commits after it.
+	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+img.digest.String(), nil), http.StatusAccepted, "")
+	ge.clock.advance(past)
+	viewed, release := ge.pauseLink(img.digest)
+	resp := make(chan *httptest.ResponseRecorder, 1)
+	ge.setHook(func(s gc.Step) {
+		switch s {
+		case gc.StepMarked:
+			go func() {
+				resp <- ge.do("PUT", "/v2/hosted/app/manifests/v1", img.manifest, "Content-Type", mtOCIManifest)
+			}()
+			<-viewed
+		case gc.StepPruned:
+			close(release)
+			want(t, <-resp, http.StatusBadRequest, codeManifestBlobUnknown)
+		}
+	})
+	r = collect(t, ge.gc)
+	if r.Pruned != 2 || r.Deleted.Blobs != 3 {
+		t.Fatalf("report = %+v", r)
+	}
+	checkReferencedStored(t, ge.meta, ge.blobs)
+	ge.h.linkHook = nil
+	want(t, ge.pushImage("hosted/app", "v1", img), http.StatusCreated, "")
+	ge.pullImage("hosted/app", "v1", img)
 }
 
 // garbage stores content as an unreferenced blob past the grace period:
@@ -447,7 +562,8 @@ func TestGCMountRace(t *testing.T) {
 }
 
 // TestGCManifestRace pushes a deleted manifest again while a sweep dooms
-// its bytes: the push fails with a retryable error and succeeds after.
+// its bytes: the push fails with a retryable error and succeeds after,
+// once its blobs, whose expired links the run removed, are pushed again.
 func TestGCManifestRace(t *testing.T) {
 	ge := newGCEnv(t)
 	img := newImage("m", nil)
@@ -465,12 +581,10 @@ func TestGCManifestRace(t *testing.T) {
 		}
 	})
 	r := collect(t, ge.gc)
-	if r.Deleted.Blobs != 1 || stored(t, ge.blobs, img.digest) {
+	if r.Deleted.Blobs != 3 || r.Pruned != 2 || stored(t, ge.blobs, img.digest) {
 		t.Fatalf("report = %+v", r)
 	}
-	if code := put(); code != http.StatusCreated {
-		t.Fatalf("manifest push after the sweep = %d", code)
-	}
+	want(t, ge.pushImage("hosted/app", "v1", img), http.StatusCreated, "")
 	ge.pullImage("hosted/app", "v1", img)
 }
 
@@ -490,7 +604,7 @@ func TestGCProxyRace(t *testing.T) {
 
 	var mu sync.Mutex
 	var hook func(gc.Step)
-	c := newCollector(t, pe.meta, pe.blobs, pe.now, func(s gc.Step) {
+	c := newCollector(t, pe.h, pe.now, func(s gc.Step) {
 		mu.Lock()
 		h := hook
 		mu.Unlock()
@@ -550,7 +664,9 @@ func TestGCProxyRace(t *testing.T) {
 }
 
 // TestGCProxyEviction reclaims the bytes of content a size-limited proxy
-// repository evicted, and only those.
+// repository evicted, and of blobs whose links no cached manifest
+// references once those links expire, which the repository then stops
+// counting in its size.
 func TestGCProxyEviction(t *testing.T) {
 	pe := newProxyEnv(t, 2500)
 	var layers []blob.Digest
@@ -569,11 +685,13 @@ func TestGCProxyEviction(t *testing.T) {
 		t.Fatal(err)
 	}
 	pe.advance(past)
-	c := newCollector(t, pe.meta, pe.blobs, pe.now, nil)
+	c := newCollector(t, pe.h, pe.now, nil)
 	r := collect(t, c)
-	if r.Deleted != (gc.Count{Blobs: 1, Bytes: 1000}) || stored(t, pe.blobs, layers[0]) ||
-		!stored(t, pe.blobs, layers[1]) || !stored(t, pe.blobs, layers[2]) {
+	if r.Deleted != (gc.Count{Blobs: 3, Bytes: 3000}) || r.Pruned != 2 {
 		t.Fatalf("report = %+v", r)
+	}
+	if cache := pe.h.repos["small"].proxy.cache; cache.size() != 0 {
+		t.Errorf("the repository still counts %d bytes", cache.size())
 	}
 	checkReferencedStored(t, pe.meta, pe.blobs)
 	// Evicted content is fetched again.
@@ -631,7 +749,9 @@ func TestGCStress(t *testing.T) {
 				switch rng.IntN(4) {
 				case 0, 1:
 					// Push, as clients do: blobs (or a mount), then the
-					// manifest; a 503 means retry later.
+					// manifest; a 503 means retry later, and so does a
+					// manifest push that found a blob's link removed
+					// because it expired since the HEAD saw it.
 					if rng.IntN(2) == 0 {
 						src := fmt.Sprintf("hosted/w%d", rng.IntN(workers))
 						ge.do("POST", "/v2/"+name+"/blobs/uploads/?mount="+blob.FromBytes(img.layer).String()+"&from="+src, nil)
@@ -653,23 +773,22 @@ func TestGCStress(t *testing.T) {
 					if !ok {
 						continue
 					}
-					code := ge.do("PUT", "/v2/"+name+"/manifests/v"+fmt.Sprint(i), img.manifest, "Content-Type", mtOCIManifest).Code
-					switch code {
-					case http.StatusCreated:
+					w := ge.do("PUT", "/v2/"+name+"/manifests/v"+fmt.Sprint(i), img.manifest, "Content-Type", mtOCIManifest)
+					switch {
+					case w.Code == http.StatusCreated:
 						pushed[i] = true
-					case http.StatusServiceUnavailable:
+					case w.Code == http.StatusServiceUnavailable,
+						w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), codeManifestBlobUnknown):
 						retries.Add(1)
 					default:
-						t.Errorf("manifest push = %d", code)
+						t.Errorf("manifest push = %d %s", w.Code, w.Body)
 					}
 				case 2:
-					// Delete the image and its blob links.
+					// Delete the image as clients do, by its manifest; its
+					// blob links expire.
 					code := ge.do("DELETE", "/v2/"+name+"/manifests/"+img.digest.String(), nil).Code
 					if code == http.StatusAccepted || code == http.StatusNotFound {
 						delete(pushed, i)
-					}
-					for _, b := range [][]byte{img.config, img.layer} {
-						ge.do("DELETE", "/v2/"+name+"/blobs/"+blob.FromBytes(b).String(), nil)
 					}
 				case 3:
 					for j := range pushed {

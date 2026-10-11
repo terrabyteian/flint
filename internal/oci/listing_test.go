@@ -190,8 +190,13 @@ func TestRecords(t *testing.T) {
 	if d, err := decodeTag(encodeTag(d2)); err != nil || d != d2 {
 		t.Errorf("tag round trip = %v, %v", d, err)
 	}
-	if n, err := decodeBlobLink(encodeBlobLink(1 << 40)); err != nil || n != 1<<40 {
-		t.Errorf("blob link round trip = %d, %v", n, err)
+	linked := time.Unix(1700000000, 7)
+	if n, at, err := decodeBlobLink(encodeBlobLink(1<<40, linked)); err != nil || n != 1<<40 || !at.Equal(linked) {
+		t.Errorf("blob link round trip = %d, %v, %v", n, at, err)
+	}
+	// A link written before link times were recorded has the zero time.
+	if n, at, err := decodeBlobLink(newEnc().uvarint(5)); err != nil || n != 5 || !at.IsZero() {
+		t.Errorf("blob link without a link time = %d, %v, %v", n, at, err)
 	}
 	u := uploadRecord{Name: "hosted/app", Started: time.Unix(1700000000, 5)}
 	if got, err := decodeUpload(u.encode()); err != nil || got.Name != u.Name || !got.Started.Equal(u.Started) {
@@ -214,8 +219,10 @@ func TestRecords(t *testing.T) {
 			t.Errorf("decodeTag(%s) succeeded", name)
 		}
 	}
-	if _, err := decodeBlobLink([]byte{1, 0xff}); err == nil {
-		t.Error("decodeBlobLink accepted a truncated varint")
+	for _, b := range [][]byte{{1, 0xff}, {linkFormat, 5}, append(encodeBlobLink(5, linked), 0), {9, 5}} {
+		if _, _, err := decodeBlobLink(b); err == nil {
+			t.Errorf("decodeBlobLink accepted %x", b)
+		}
 	}
 	if _, err := decodeUpload([]byte{1}); err == nil {
 		t.Error("decodeUpload accepted a truncated record")

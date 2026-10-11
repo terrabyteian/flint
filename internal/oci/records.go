@@ -16,7 +16,7 @@ import (
 // separated by 0x00, which cannot occur in a repository name, tag, or
 // digest, so a prefix scan never matches a longer name:
 //
-//	oci\0blob\0<repo>\0<name>\0<digest>                     blob link
+//	oci\0blob\0<repo>\0<name>\0<digest>                     blob link: size, link time
 //	oci\0manifest\0<repo>\0<name>\0<digest>                 manifest record
 //	oci\0tag\0<repo>\0<name>\0<tag>                         tag: manifest digest
 //	oci\0referrer\0<repo>\0<name>\0<subject>\0<digest>      referrer index entry
@@ -167,13 +167,27 @@ func (d *dec) done() error {
 }
 
 // A blob link makes a committed blob visible in one repository name. Its
-// value records the blob's size, so HEAD needs no filesystem access.
-func encodeBlobLink(size int64) []byte { return newEnc().uvarint(uint64(size)) }
+// value records the blob's size, so HEAD needs no filesystem access, and
+// when it was linked, so garbage collection can tell a link a push is
+// about to reference from one nothing references any more. Its schema
+// version is linkFormat; a link of recordFormat, written before link
+// times were recorded, holds the size only and has the zero link time.
+const linkFormat = 2
 
-func decodeBlobLink(b []byte) (size int64, err error) {
+func encodeBlobLink(size int64, linked time.Time) []byte {
+	return enc{linkFormat}.uvarint(uint64(size)).varint(linked.UnixNano())
+}
+
+func decodeBlobLink(b []byte) (size int64, linked time.Time, err error) {
+	if len(b) > 0 && b[0] == linkFormat {
+		d := &dec{b: b[1:]}
+		size = int64(d.uvarint())
+		linked = time.Unix(0, d.varint())
+		return size, linked, d.done()
+	}
 	d := newDec(b)
 	size = int64(d.uvarint())
-	return size, d.done()
+	return size, time.Time{}, d.done()
 }
 
 // A tag record holds the digest of the manifest the tag points to.

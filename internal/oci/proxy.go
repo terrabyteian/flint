@@ -297,7 +297,7 @@ func setBlobHeaders(w http.ResponseWriter, d blob.Digest, size int64) {
 // linkProxyBlob links stored blob d, size bytes, in rn.
 func (h *Handler) linkProxyBlob(ctx context.Context, actor string, rn *repoName, d blob.Digest, size int64) error {
 	err := h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) error {
-		b.Put(blobKey(rn, d), encodeBlobLink(size))
+		b.Put(blobKey(rn, d), encodeBlobLink(size, h.now()))
 		b.SetOrigin(proxyOrigin(actor, rn.full+"@"+d.String()))
 		return nil
 	}, h.statExists(ctx, d))

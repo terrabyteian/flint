@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,9 +10,9 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/terrabyteian/flint/internal/auth"
 	"github.com/terrabyteian/flint/internal/gc"
 )
 
@@ -32,31 +32,44 @@ flags:
 var gcPollInterval = time.Second
 
 // gcCmd runs the gc subcommands and returns the process exit code.
-func gcCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) == 0 || (args[0] != "run" && args[0] != "status") {
-		fmt.Fprint(stderr, gcUsage)
-		newGCFlags(stderr).fs.PrintDefaults()
-		return 2
+func gcCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	cmd := ""
+	if len(args) > 0 {
+		cmd = args[0]
 	}
-	cmd := args[0]
-	f := newGCFlags(stderr)
-	f.fs.Usage = func() {
+	fs := flag.NewFlagSet("flint gc "+cmd, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
 		fmt.Fprint(stderr, gcUsage)
-		f.fs.PrintDefaults()
+		fs.PrintDefaults()
 	}
+	server := fs.String("url", cmp.Or(os.Getenv("FLINT_URL"), "http://127.0.0.1:5000"), "base `URL` of the flint server; the default is $FLINT_URL if set")
+	user := fs.String("user", auth.TokenUser, "user `name` to authenticate as; the default takes an API token as the password")
+	passwordFile := fs.String("password-file", "", "`file` holding the password or API token of an administrator (required)")
+	caFile := fs.String("ca-file", "", "PEM `file` of certificate authorities to trust for an https URL, besides the system's")
+	jsonOut := fs.Bool("json", false, "print JSON")
 	var dryRun, detach bool
 	if cmd == "run" {
-		f.fs.BoolVar(&dryRun, "dry-run", false, "report what the run would delete, without deleting anything")
-		f.fs.BoolVar(&detach, "detach", false, "start the run and return without waiting for it")
+		fs.BoolVar(&dryRun, "dry-run", false, "report what the run would delete, without deleting anything")
+		fs.BoolVar(&detach, "detach", false, "start the run and return without waiting for it")
 	}
-	if err := f.fs.Parse(args[1:]); err != nil {
+	if cmd != "run" && cmd != "status" {
+		fs.Usage()
 		return 2
 	}
-	if f.fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "flint gc %s: unexpected arguments %q\n", cmd, f.fs.Args())
+	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	c, err := newGCClient(f, stdin)
+	if fs.NArg() > 0 || *passwordFile == "" {
+		if fs.NArg() > 0 {
+			fmt.Fprintf(stderr, "flint gc %s: unexpected arguments %q\n", cmd, fs.Args())
+		} else {
+			fmt.Fprintf(stderr, "flint gc %s: -password-file is required\n", cmd)
+		}
+		fs.Usage()
+		return 2
+	}
+	c, err := newAdminClient(*server, gc.APIPath, *user, *passwordFile, *caFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "flint gc: %v\n", err)
 		return 1
@@ -64,11 +77,11 @@ func gcCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr i
 
 	if cmd == "status" {
 		var st gc.Status
-		if err := c.call(ctx, http.MethodGet, nil, &st); err != nil {
+		if err := c.do(ctx, http.MethodGet, nil, http.StatusOK, &st); err != nil {
 			fmt.Fprintf(stderr, "flint gc: %v\n", err)
 			return 1
 		}
-		if f.json {
+		if *jsonOut {
 			printJSON(stdout, st)
 		} else {
 			printStatus(stdout, &st)
@@ -77,24 +90,24 @@ func gcCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr i
 	}
 
 	var started gc.Report
-	if err := c.call(ctx, http.MethodPost, gc.StartRequest{DryRun: dryRun}, &started); err != nil {
+	if err := c.do(ctx, http.MethodPost, gc.StartRequest{DryRun: dryRun}, http.StatusAccepted, &started); err != nil {
 		fmt.Fprintf(stderr, "flint gc: %v\n", err)
 		return 1
 	}
 	if detach {
-		if f.json {
+		if *jsonOut {
 			printJSON(stdout, started)
 		} else {
 			fmt.Fprintf(stdout, "garbage collection started at %s; see flint gc status\n", started.Started.Format(time.RFC3339))
 		}
 		return 0
 	}
-	rep, err := c.wait(ctx, started.Started)
+	rep, err := waitGC(ctx, c, started.Started)
 	if err != nil {
 		fmt.Fprintf(stderr, "flint gc: %v\n", err)
 		return 1
 	}
-	if f.json {
+	if *jsonOut {
 		printJSON(stdout, rep)
 	} else {
 		printReport(stdout, rep)
@@ -105,119 +118,12 @@ func gcCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr i
 	return 0
 }
 
-// gcFlags are the flags every gc command takes.
-type gcFlags struct {
-	fs                      *flag.FlagSet
-	url, user, passwordFile string
-	json                    bool
-}
-
-func newGCFlags(stderr io.Writer) *gcFlags {
-	f := &gcFlags{fs: flag.NewFlagSet("flint gc", flag.ContinueOnError)}
-	f.fs.SetOutput(stderr)
-	f.fs.StringVar(&f.url, "url", "", "the server's base `URL`; default $FLINT_URL")
-	f.fs.StringVar(&f.user, "user", "", "user `name`; default $FLINT_USER, else __token__, to authenticate with an API token")
-	f.fs.StringVar(&f.passwordFile, "password-file", "", "`file` holding the password or API token, - for standard input; default $FLINT_PASSWORD")
-	f.fs.BoolVar(&f.json, "json", false, "print JSON")
-	return f
-}
-
-// gcClient calls the garbage-collection admin API.
-type gcClient struct {
-	url, user, password string
-	client              *http.Client
-}
-
-func newGCClient(f *gcFlags, stdin io.Reader) (*gcClient, error) {
-	c := &gcClient{client: &http.Client{Timeout: time.Minute}}
-	base := firstSet(f.url, os.Getenv("FLINT_URL"))
-	if base == "" {
-		return nil, errors.New("no server: give -url or set FLINT_URL")
-	}
-	c.url = strings.TrimSuffix(base, "/") + "/api/v1/gc"
-
-	c.user = firstSet(f.user, os.Getenv("FLINT_USER"), "__token__")
-	c.password = os.Getenv("FLINT_PASSWORD")
-	switch f.passwordFile {
-	case "":
-	case "-":
-		b, err := io.ReadAll(io.LimitReader(stdin, 64<<10))
-		if err != nil {
-			return nil, fmt.Errorf("reading the password from standard input: %w", err)
-		}
-		c.password = trimNewline(string(b))
-	default:
-		b, err := os.ReadFile(f.passwordFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading the password: %w", err)
-		}
-		c.password = trimNewline(string(b))
-	}
-	if c.password == "" {
-		return nil, errors.New("no password or API token: give -password-file or set FLINT_PASSWORD")
-	}
-	return c, nil
-}
-
-// firstSet returns the first of ss that is not empty.
-func firstSet(ss ...string) string {
-	for _, s := range ss {
-		if s != "" {
-			return s
-		}
-	}
-	return ""
-}
-
-// trimNewline removes one trailing newline, as flint does for password files.
-func trimNewline(s string) string {
-	s = strings.TrimSuffix(s, "\n")
-	return strings.TrimSuffix(s, "\r")
-}
-
-// call makes an admin API request and decodes its JSON response into out.
-func (c *gcClient) call(ctx context.Context, method string, body, out any) error {
-	var rd io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		rd = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.url, rd)
-	if err != nil {
-		return err
-	}
-	req.SetBasicAuth(c.user, c.password)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode >= 300 {
-		var e struct{ Error string }
-		if json.Unmarshal(b, &e) == nil && e.Error != "" {
-			return fmt.Errorf("the server answered %d: %s", resp.StatusCode, e.Error)
-		}
-		return fmt.Errorf("the server answered %s", resp.Status)
-	}
-	if err := json.Unmarshal(b, out); err != nil {
-		return fmt.Errorf("decoding the server's answer: %w", err)
-	}
-	return nil
-}
-
-// wait waits for the run that started at started to finish and returns
+// waitGC waits for the run that started at started to finish and returns
 // its report.
-func (c *gcClient) wait(ctx context.Context, started time.Time) (*gc.Report, error) {
+func waitGC(ctx context.Context, c *adminClient, started time.Time) (*gc.Report, error) {
 	for {
 		var st gc.Status
-		if err := c.call(ctx, http.MethodGet, nil, &st); err != nil {
+		if err := c.do(ctx, http.MethodGet, nil, http.StatusOK, &st); err != nil {
 			return nil, err
 		}
 		if st.Running == nil || !st.Running.Started.Equal(started) {
@@ -282,6 +188,11 @@ func printReport(w io.Writer, r *gc.Report) {
 	line("unreferenced", "%s", count(r.Unreferenced))
 	line("in grace period", "%s", count(r.InGracePeriod))
 	line("kept", "%s", count(r.Kept))
+	if r.DryRun {
+		line("would prune", "%d expired records", r.Pruned)
+	} else {
+		line("pruned", "%d expired records", r.Pruned)
+	}
 	if r.DryRun {
 		line("would delete", "%s", count(r.Deleted))
 	} else {

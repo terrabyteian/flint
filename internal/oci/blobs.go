@@ -91,7 +91,7 @@ func (h *Handler) lookupBlob(rn *repoName, d blob.Digest) (int64, bool, error) {
 	if !ok {
 		return 0, false, nil
 	}
-	size, err := decodeBlobLink(rec.Value)
+	size, _, err := decodeBlobLink(rec.Value)
 	return size, true, err
 }
 

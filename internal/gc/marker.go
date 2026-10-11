@@ -110,9 +110,10 @@ const scanEvery = 1 << 16
 
 // scan marks view v: it scans the keys under each registered prefix,
 // calling mark for each blob their records reference, and the keys
-// between the prefixes, which no marker claims. It returns ctx's error if
-// ctx ends first.
-func (r *registry) scan(ctx context.Context, v meta.View, mark func(blob.Digest)) (*scanned, error) {
+// between the prefixes, which no marker claims. A record in skip at the
+// version skip gives is not marked. It returns ctx's error if ctx ends
+// first.
+func (r *registry) scan(ctx context.Context, v meta.View, skip map[string]meta.Seq, mark func(blob.Digest)) (*scanned, error) {
 	s := &scanned{unclaimed: map[string]int64{}}
 	var err error
 	tick := func() bool {
@@ -143,6 +144,9 @@ func (r *registry) scan(ctx context.Context, v meta.View, mark func(blob.Digest)
 		}
 		v.Scan([]byte(p.p), nil, func(k []byte, rec meta.Record) bool {
 			after = k
+			if ver, ok := skip[string(k)]; ok && ver == rec.Version {
+				return tick()
+			}
 			if p.mark != nil {
 				ds, merr := p.mark(k, rec.Value)
 				if merr != nil {
@@ -178,7 +182,7 @@ func CheckMarker(v meta.View, markers ...Marker) (refs []blob.Digest, problems [
 	if err != nil {
 		return nil, nil, err
 	}
-	s, err := reg.scan(context.Background(), v, func(d blob.Digest) { refs = append(refs, d) })
+	s, err := reg.scan(context.Background(), v, nil, func(d blob.Digest) { refs = append(refs, d) })
 	if err != nil {
 		return nil, nil, err
 	}

@@ -346,7 +346,7 @@ func TestRounds(t *testing.T) {
 			t.Errorf("blob %s survived", d)
 		}
 	}
-	wantSteps := []Step{StepMarked, StepScanned}
+	wantSteps := []Step{StepMarked, StepScanned, StepPruned}
 	for range 3 {
 		wantSteps = append(wantSteps, StepDoomed, StepViewed, StepVerified, StepDeleted)
 	}

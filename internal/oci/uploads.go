@@ -128,11 +128,11 @@ func (h *Handler) mount(w http.ResponseWriter, r *http.Request, rn *repoName, mo
 		if !ok {
 			return errNoSource
 		}
-		size, err := decodeBlobLink(rec.Value)
+		size, _, err := decodeBlobLink(rec.Value)
 		if err != nil {
 			return err
 		}
-		b.Put(blobKey(rn, d), encodeBlobLink(size))
+		b.Put(blobKey(rn, d), encodeBlobLink(size, h.now()))
 		b.SetOrigin(h.origin(r, "oci.blob.mount", src.full+"@"+d.String()+" -> "+rn.full))
 		return nil
 	}, h.statExists(r.Context(), d))
@@ -374,7 +374,7 @@ func (h *Handler) commitUpload(r *http.Request, rn *repoName, up blob.Upload, d 
 	size := up.Size()
 	closed := false
 	err := h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) error {
-		b.Put(blobKey(rn, d), encodeBlobLink(size))
+		b.Put(blobKey(rn, d), encodeBlobLink(size, h.now()))
 		if id != "" {
 			b.Delete(uploadKey(id))
 		}

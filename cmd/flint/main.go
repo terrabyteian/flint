@@ -56,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "gc":
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
-		return gcCmd(ctx, args[1:], os.Stdin, stdout, stderr)
+		return gcCmd(ctx, args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "flint %s\n", version)
 		return 0

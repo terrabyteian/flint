@@ -149,15 +149,15 @@ func TestGCEndToEnd(t *testing.T) {
 	call("DELETE", "/v2/docker-local/app/blobs/"+sha(young), nil, "")
 	garbage := []string{sha(drop.manifest), sha(drop.blobs[0]), sha(drop.blobs[2])}
 
-	gcRun := func(stdin string, args ...string) (int, string, string) {
+	gcRun := func(args ...string) (int, string, string) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		code := gcCmd(context.Background(), args, strings.NewReader(stdin), &stdout, &stderr)
+		code := gcCmd(context.Background(), args, &stdout, &stderr)
 		return code, stdout.String(), stderr.String()
 	}
-	auth := []string{"-url", base, "-user", user, "-password-file", "-"}
+	auth := []string{"-url", base, "-user", user, "-password-file", pwFile}
 
-	code, out, errOut := gcRun(pass+"\n", append([]string{"run", "-dry-run"}, auth...)...)
+	code, out, errOut := gcRun(append([]string{"run", "-dry-run"}, auth...)...)
 	if code != 0 || !strings.Contains(out, "would delete:    3 blobs") || !strings.Contains(out, "succeeded (dry run)") {
 		t.Fatalf("flint gc run -dry-run = %d\n%s%s", code, out, errOut)
 	}
@@ -170,7 +170,7 @@ func TestGCEndToEnd(t *testing.T) {
 		}
 	}
 
-	code, out, errOut = gcRun(pass, append([]string{"run", "-json"}, auth...)...)
+	code, out, errOut = gcRun(append([]string{"run", "-json"}, auth...)...)
 	var rep gc.Report
 	if err := json.Unmarshal([]byte(out), &rep); code != 0 || err != nil {
 		t.Fatalf("flint gc run -json = %d %v\n%s%s", code, err, out, errOut)
@@ -205,13 +205,13 @@ func TestGCEndToEnd(t *testing.T) {
 	}
 
 	// A run that is started and left, then the status.
-	code, out, errOut = gcRun(pass, append([]string{"run", "-detach"}, auth...)...)
+	code, out, errOut = gcRun(append([]string{"run", "-detach"}, auth...)...)
 	if code != 0 || !strings.Contains(out, "garbage collection started") {
 		t.Fatalf("flint gc run -detach = %d\n%s%s", code, out, errOut)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		code, out, errOut = gcRun(pass, append([]string{"status"}, auth...)...)
+		code, out, errOut = gcRun(append([]string{"status"}, auth...)...)
 		if code != 0 {
 			t.Fatalf("flint gc status = %d\n%s%s", code, out, errOut)
 		}
@@ -226,18 +226,20 @@ func TestGCEndToEnd(t *testing.T) {
 	}
 
 	// Failures: wrong credentials, and none.
-	if code, _, errOut := gcRun("wrong", append([]string{"status"}, auth...)...); code != 1 || !strings.Contains(errOut, "401") {
+	wrongFile := filepath.Join(dir, "wrong-password")
+	if err := os.WriteFile(wrongFile, []byte("wrong\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := gcRun("status", "-url", base, "-user", user, "-password-file", wrongFile); code != 1 || !strings.Contains(errOut, "401") {
 		t.Errorf("flint gc status with a wrong password = %d %s", code, errOut)
 	}
-	t.Setenv("FLINT_PASSWORD", "")
-	if code, _, errOut := gcRun("", "status", "-url", base); code != 1 || !strings.Contains(errOut, "no password") {
+	if code, _, errOut := gcRun("status", "-url", base); code != 2 || !strings.Contains(errOut, "-password-file is required") {
 		t.Errorf("flint gc status without credentials = %d %s", code, errOut)
 	}
 	t.Setenv("FLINT_URL", base)
-	t.Setenv("FLINT_USER", user)
-	t.Setenv("FLINT_PASSWORD", pass)
-	if code, out, errOut := gcRun("", "status", "-json"); code != 0 || !strings.Contains(out, `"gracePeriod": "2h0m0s"`) {
-		t.Errorf("flint gc status from the environment = %d\n%s%s", code, out, errOut)
+	if code, out, errOut := gcRun("status", "-json", "-user", user, "-password-file", pwFile); code != 0 ||
+		!strings.Contains(out, `"gracePeriod": "2h0m0s"`) {
+		t.Errorf("flint gc status with FLINT_URL = %d\n%s%s", code, out, errOut)
 	}
 
 	// The report survives a restart.
@@ -247,7 +249,7 @@ func TestGCEndToEnd(t *testing.T) {
 	}
 	p = startFlint(t, "serve", "-config", cfgPath)
 	t.Setenv("FLINT_URL", "http://"+p.addr)
-	if code, out, errOut := gcRun("", "status"); code != 0 || !strings.Contains(out, "last run:") {
+	if code, out, errOut := gcRun("status", "-user", user, "-password-file", pwFile); code != 0 || !strings.Contains(out, "last run:") {
 		t.Errorf("flint gc status after a restart = %d\n%s%s", code, out, errOut)
 	}
 }
@@ -255,7 +257,7 @@ func TestGCEndToEnd(t *testing.T) {
 func TestGCUsage(t *testing.T) {
 	for _, args := range [][]string{nil, {"sweep"}, {"run", "extra"}, {"status", "-dry-run"}, {"run", "-nope"}} {
 		var stdout, stderr bytes.Buffer
-		if code := gcCmd(context.Background(), args, strings.NewReader(""), &stdout, &stderr); code != 2 ||
+		if code := gcCmd(context.Background(), args, &stdout, &stderr); code != 2 ||
 			!strings.Contains(stderr.String(), "usage: flint gc") && !strings.Contains(stderr.String(), "unexpected arguments") {
 			t.Errorf("flint gc %q = %d\n%s", args, code, stderr.String())
 		}
@@ -263,11 +265,6 @@ func TestGCUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"gc"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "-password-file") {
 		t.Errorf("flint gc = %d\n%s", code, stderr.String())
-	}
-	t.Setenv("FLINT_URL", "")
-	if code := gcCmd(context.Background(), []string{"status"},
-		strings.NewReader(""), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "give -url or set FLINT_URL") {
-		t.Errorf("flint gc status without a server = %d\n%s", code, stderr.String())
 	}
 }
 

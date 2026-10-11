@@ -431,7 +431,7 @@ func TestLinkEpochPrecondition(t *testing.T) {
 		}
 	}
 	build := func(v meta.View, b *meta.Batch) error {
-		b.Put(blobKey(rn, d), encodeBlobLink(5))
+		b.Put(blobKey(rn, d), encodeBlobLink(5, time.Now()))
 		return nil
 	}
 
