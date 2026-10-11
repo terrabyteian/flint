@@ -16,7 +16,8 @@ fullnameOverride: ""
 # flint's configuration file, written as YAML and rendered to the JSON file
 # flint serve reads. The fields are those of docs/configuration.md, except
 # listen, dataDir, and tls, which the chart sets from containerPort, the data
-# volume, and the tls values below. flint rejects unknown fields and invalid
+# volume, and the tls values below, and backup.directory, which the backup
+# values below set. flint rejects unknown fields and invalid
 # values at startup; check a rendered configuration with flint config check.
 config:
   log:
@@ -70,6 +71,20 @@ bootstrapAdmin:
   # The Secret holding the password, such as one made with
   #   kubectl create secret generic flint-admin --from-literal=password=...
   existingSecret: ""
+
+# A volume for backups (docs/backup.md), mounted at /var/backups/flint, which
+# the chart sets as config.backup.directory. Start backups through the admin
+# API, for example from a CronJob that runs flint backup.
+backup:
+  enabled: false
+  # An existing PersistentVolumeClaim to back up to, ideally on other
+  # storage than the data volume.
+  existingClaim: ""
+  # Or any other volume source, used when existingClaim is empty, such as
+  #   nfs:
+  #     server: nas.example.internal
+  #     path: /backups/flint
+  volume: {}
 
 # The port flint listens on in the container.
 containerPort: 5000

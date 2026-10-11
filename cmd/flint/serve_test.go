@@ -325,7 +325,7 @@ func TestPoisonedStoreStaysReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, _, err := newServer(context.Background(), cfg, slog.New(slog.DiscardHandler), m, store, blobs)
+	srv, _, _, err := newServer(context.Background(), cfg, slog.New(slog.DiscardHandler), m, store, blobs)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -118,7 +118,14 @@ func (s *store) readSnapshot(path string, seq Seq) (tree, error) {
 		return tree{}, err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, 1<<20)
+	t, _, err := decodeSnapshot(f, path, seq, true)
+	return t, err
+}
+
+// decodeSnapshot reads and validates a snapshot from r, naming path in
+// its errors. With check set, the snapshot must be for seq.
+func decodeSnapshot(rd io.Reader, path string, seq Seq, check bool) (tree, Seq, error) {
+	r := bufio.NewReaderSize(rd, 1<<20)
 	var off int64
 	var ioErr error
 	bad := func(reason string) error {
@@ -136,17 +143,18 @@ func (s *store) readSnapshot(path string, seq Seq) (tree, error) {
 	}
 	hdr := make([]byte, snapHeaderSize)
 	if err := readFull(hdr); err != nil {
-		return tree{}, bad("short snapshot header")
+		return tree{}, 0, bad("short snapshot header")
 	}
+	got := Seq(binary.LittleEndian.Uint64(hdr[16:]))
 	switch {
 	case string(hdr[:8]) != snapMagic:
-		return tree{}, bad("bad snapshot magic")
+		return tree{}, 0, bad("bad snapshot magic")
 	case crc32.Checksum(hdr[:24], castagnoli) != binary.LittleEndian.Uint32(hdr[24:]):
-		return tree{}, bad("snapshot header checksum mismatch")
+		return tree{}, 0, bad("snapshot header checksum mismatch")
 	case binary.LittleEndian.Uint32(hdr[8:]) != snapFormat:
-		return tree{}, bad("unsupported snapshot format")
-	case Seq(binary.LittleEndian.Uint64(hdr[16:])) != seq:
-		return tree{}, bad(fmt.Sprintf("snapshot header says seq %d", binary.LittleEndian.Uint64(hdr[16:])))
+		return tree{}, 0, bad("unsupported snapshot format")
+	case check && got != seq:
+		return tree{}, 0, bad(fmt.Sprintf("snapshot header says seq %d", got))
 	}
 	off = snapHeaderSize
 	b := newBuilder()
@@ -154,21 +162,21 @@ func (s *store) readSnapshot(path string, seq Seq) (tree, error) {
 	for {
 		var frame [frameSize]byte
 		if err := readFull(frame[:]); err != nil {
-			return tree{}, bad("truncated snapshot block")
+			return tree{}, 0, bad("truncated snapshot block")
 		}
 		n := int(binary.LittleEndian.Uint32(frame[:]))
 		if n > maxSnapBlock {
-			return tree{}, bad("bad snapshot block length")
+			return tree{}, 0, bad("bad snapshot block length")
 		}
 		if cap(buf) < n {
 			buf = make([]byte, n)
 		}
 		buf = buf[:n]
 		if err := readFull(buf); err != nil {
-			return tree{}, bad("truncated snapshot block")
+			return tree{}, 0, bad("truncated snapshot block")
 		}
 		if crc32.Checksum(buf, castagnoli) != binary.LittleEndian.Uint32(frame[4:]) {
-			return tree{}, bad("snapshot block checksum mismatch")
+			return tree{}, 0, bad("snapshot block checksum mismatch")
 		}
 		if n == 0 {
 			break
@@ -176,7 +184,7 @@ func (s *store) readSnapshot(path string, seq Seq) (tree, error) {
 		for p := buf; len(p) > 0; {
 			l, w := binary.Uvarint(p)
 			if w <= 0 || l > uint64(len(p)-w) || !b.addEntry(p[w:w+int(l)]) {
-				return tree{}, bad("bad snapshot entry")
+				return tree{}, 0, bad("bad snapshot entry")
 			}
 			p = p[w+int(l):]
 		}
@@ -185,18 +193,18 @@ func (s *store) readSnapshot(path string, seq Seq) (tree, error) {
 	off += frameSize
 	tr := make([]byte, 12)
 	if err := readFull(tr); err != nil {
-		return tree{}, bad("truncated snapshot trailer")
+		return tree{}, 0, bad("truncated snapshot trailer")
 	}
 	if crc32.Checksum(tr[:8], castagnoli) != binary.LittleEndian.Uint32(tr[8:]) || binary.LittleEndian.Uint64(tr) != uint64(b.count) {
-		return tree{}, bad("snapshot trailer mismatch")
+		return tree{}, 0, bad("snapshot trailer mismatch")
 	}
 	if _, err := r.ReadByte(); err != io.EOF {
 		if err != nil {
-			return tree{}, err
+			return tree{}, 0, err
 		}
-		return tree{}, bad("trailing bytes after snapshot")
+		return tree{}, 0, bad("trailing bytes after snapshot")
 	}
-	return b.finish(), nil
+	return b.finish(), got, nil
 }
 
 type snapFile struct {

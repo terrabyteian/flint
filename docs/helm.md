@@ -49,6 +49,7 @@ The chart sets these fields itself and refuses to render if you set them:
 | `dataDir` | always `/var/lib/flint`, the data volume |
 | `tls` | `tls.enabled`: the certificate is mounted at `/etc/flint/tls` |
 | `auth.bootstrapAdmin` | `bootstrapAdmin`: the password is mounted at `/etc/flint/admin/password` |
+| `backup.directory` | `backup.enabled`: the backup volume is mounted at `/var/backups/flint` |
 
 flint validates everything else when it starts, and does not start with an invalid configuration.
 To check a configuration before deploying it, render it to a file and pass that to `flint config check`:
@@ -85,6 +86,7 @@ The main ones:
 | `persistence.enabled` | `true` | Keep data on a volume; disabled, it is an `emptyDir` lost with the pod. |
 | `persistence.size`, `persistence.storageClass` | `10Gi`, cluster default | The claim template. Kubernetes does not let a StatefulSet's claim template change after install: to grow the volume, resize the claim directly if its storage class allows it. |
 | `persistence.existingClaim` | none | Use this claim instead of the claim template. |
+| `backup.enabled`, `backup.existingClaim`, `backup.volume` | `false`, none, none | Mount a volume for [backups](backup.md); see below. |
 | `lifecycle.preStopSleepSeconds` | `5` | The wait before shutdown; 0 disables it. |
 | `networkPolicy.enabled`, `networkPolicy.from` | `false`, any source | Admit traffic only to flint's port, from the listed peers. |
 | `resources`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | none | Pod scheduling and resources. |
@@ -146,6 +148,24 @@ upstreamSecrets:
 
 flint reads the file whenever it authenticates, so rotating the Secret takes effect without a restart once the kubelet updates the mount.
 The Secret must exist before the pod starts.
+
+### Backups
+
+flint writes [backups](backup.md) to a directory it can reach, normally a volume on other storage than its data.
+`backup.enabled` mounts one at `/var/backups/flint` and sets `config.backup.directory` to it: an existing claim, or any other volume source, such as NFS:
+
+```yaml
+backup:
+  enabled: true
+  existingClaim: flint-backups
+  # or, instead of existingClaim:
+  # volume:
+  #   nfs:
+  #     server: nas.example.internal
+  #     path: /backups/flint
+```
+
+The chart does not schedule backups: [backups](backup.md#scheduling) shows a CronJob that starts one through the admin API.
 
 ## Upgrades and uninstalling
 

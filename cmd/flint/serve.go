@@ -12,8 +12,10 @@ import (
 	"sync"
 
 	"github.com/terrabyteian/flint/internal/auth"
+	"github.com/terrabyteian/flint/internal/backup"
 	"github.com/terrabyteian/flint/internal/blob"
 	"github.com/terrabyteian/flint/internal/config"
+	"github.com/terrabyteian/flint/internal/flock"
 	"github.com/terrabyteian/flint/internal/fsys"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
@@ -71,6 +73,10 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		return err
 	}
 	defer unlock()
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, backup.RestoreMarker)); err == nil {
+		return fmt.Errorf("the data directory %s holds a restore that did not finish (%s exists); "+
+			"remove the directory and run flint restore again", cfg.DataDir, backup.RestoreMarker)
+	}
 
 	store, err := meta.Open(filepath.Join(cfg.DataDir, "meta"), meta.Options{Logger: logger})
 	if err != nil {
@@ -86,9 +92,13 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		return err
 	}
 
-	srv, registry, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
+	srv, registry, backups, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
 	if err != nil {
 		return err
+	}
+	if backups != nil {
+		// Cancel a running backup before the stores close.
+		defer backups.Close()
 	}
 	// Expire abandoned uploads, and run the proxy repositories' upkeep,
 	// in the background until the stores close.
@@ -130,8 +140,9 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 // newServer builds the HTTP server and its metrics over open stores. The
 // format and auth packages register their routes, middleware, and
 // readiness checks on it here, using store and blobs. fsy is the data
-// directory's filesystem.
-func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, error) {
+// directory's filesystem. The backup manager is nil unless backups are
+// configured; the caller closes it before the stores.
+func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, *backup.Manager, error) {
 	reg := metrics.NewRegistry()
 	metrics.RegisterRuntime(reg, version)
 	registerStoreMetrics(reg, store)
@@ -150,7 +161,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	// the fault shows in flint_meta_store_poisoned and the logs.
 	srv, err := server.New(opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	authz, err := auth.New(auth.Options{
@@ -162,14 +173,14 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Metrics: reg,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if b := cfg.Auth.BootstrapAdmin; b != nil {
 		if _, err := authz.Bootstrap(ctx, b.Username, b.PasswordFile); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	} else if ok, err := authz.HasAdmin(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	} else if !ok {
 		logger.Warn("no administrator exists; set auth.bootstrapAdmin in the configuration to create one")
 	}
@@ -198,11 +209,32 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Space:        space,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	registry.Register(srv)
-	return srv, registry, nil
+
+	var backups *backup.Manager
+	if cfg.Backup.Directory != "" {
+		backups, err = backup.New(backup.Options{
+			Meta:       store,
+			Blobs:      blobs,
+			Dir:        cfg.Backup.Directory,
+			References: blobReferences,
+			Version:    version,
+			Logger:     logger,
+			Metrics:    reg,
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	backup.Register(srv, backups, authz.AdminHandler, authz.Actor)
+	return srv, registry, backups, nil
 }
+
+// blobReferences report the blobs every format package's records
+// reference, for backups to check that they hold them all.
+var blobReferences = []backup.References{oci.References}
 
 // registerStoreMetrics exposes the metadata store's counters and health.
 func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {
@@ -255,5 +287,13 @@ func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {
 	}
 }
 
-// errLocked means another process holds the data directory.
-var errLocked = errors.New("the data directory is in use by another flint process")
+// lockDataDir takes the exclusive lock on <dir>/LOCK that marks the data
+// directory as in use, so a second flint process on the same directory
+// refuses to start.
+func lockDataDir(dir string) (unlock func(), err error) {
+	unlock, err = flock.Lock(filepath.Join(dir, "LOCK"))
+	if errors.Is(err, flock.ErrLocked) {
+		return nil, fmt.Errorf("the data directory is in use by another flint process: %w", err)
+	}
+	return unlock, err
+}

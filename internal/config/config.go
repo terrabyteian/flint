@@ -64,6 +64,16 @@ type Config struct {
 	Auth Auth `json:"auth"`
 	// ProxyCache configures how proxy repositories cache content.
 	ProxyCache ProxyCache `json:"proxyCache"`
+	// Backup configures backups.
+	Backup Backup `json:"backup"`
+}
+
+// Backup configures where the admin API writes backups.
+type Backup struct {
+	// Directory is the backup directory: an absolute path outside the
+	// data directory, normally on another disk or a mounted volume.
+	// Without it, backups are disabled.
+	Directory string `json:"directory,omitempty"`
 }
 
 // ProxyCache configures the cache that proxy repositories share.
@@ -446,6 +456,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if d := c.Backup.Directory; d != "" {
+		switch {
+		case !filepath.IsAbs(d):
+			v.addf("backup.directory", "%q must be an absolute path", d)
+		case c.DataDir != "" && (within(d, c.DataDir) || within(c.DataDir, d)):
+			v.addf("backup.directory", "%q must be outside the data directory, and must not contain it", d)
+		}
+	}
+
 	if b := c.Auth.BootstrapAdmin; b != nil {
 		if !ValidUserName(b.Username) {
 			v.addf("auth.bootstrapAdmin.username", "%q %s", b.Username, nameRule)
@@ -455,6 +474,12 @@ func (c *Config) Validate() error {
 		}
 	}
 	return v.err()
+}
+
+// within reports whether path is dir or inside it.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
 // validateProxy checks a proxy repository's upstream settings.
