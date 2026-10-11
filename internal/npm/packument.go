@@ -317,7 +317,8 @@ func (h *Handler) packumentBody(ctx context.Context, actor string, rp *repositor
 // packument if the client asks for it, else the full one. A request with
 // ?write=true, which npm sends before it edits a package, always gets
 // the full packument, uncached; through a virtual repository, that of
-// its publishTo member, which the edit is sent to.
+// its publishTo member, which the edit is sent to, if that member's
+// filters admit the package.
 func (h *Handler) servePackument(w http.ResponseWriter, r *http.Request, rp *repository, name string) {
 	ctx := r.Context()
 	write := r.URL.Query().Get("write") == "true"
@@ -325,7 +326,7 @@ func (h *Handler) servePackument(w http.ResponseWriter, r *http.Request, rp *rep
 	base := tarballBase(r, rp)
 	var body *docBody
 	var err error
-	if pt := h.repos[publishTo(rp)]; write && pt != nil {
+	if pt := h.repos[publishTo(rp)]; write && pt != nil && rp.virtual.CheckPublish(name) == nil {
 		body, err = h.hostedBody(ctx, pt, name, false, base)
 	} else {
 		body, err = h.packumentBody(ctx, h.actor(r), rp, name, abbreviated, base)

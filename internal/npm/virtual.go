@@ -67,7 +67,9 @@ func (h *Handler) virtualBody(ctx context.Context, actor string, rp *repository,
 	for i, a := range answers {
 		ids[i] = a.Value.id
 	}
-	key := strings.Join(append([]string{"virtual", rp.name, name, base, boolString(abbreviated)}, ids...), "\x00")
+	// Hosted renderings are cached under keys that start with a
+	// repository name, which is never empty.
+	key := strings.Join(append([]string{"", rp.name, name, base, boolString(abbreviated)}, ids...), "\x00")
 	if b, etag, ok := h.renders.get(key); ok {
 		for _, a := range answers {
 			a.Value.close()

@@ -191,6 +191,14 @@ func TestVirtualPublish(t *testing.T) {
 		t.Errorf("filtered: %s", errorOf(t, w))
 	}
 	e.publish("acme", newPkg("@acme/app", "1.0.0"), http.StatusOK)
+	// A read for an edit shows the publishTo member's package only if its
+	// filters admit it, as any other read through the virtual repository.
+	e.publish("local", newPkg("app2", "1.0.0"), http.StatusOK)
+	e.expect("GET", "/npm/acme/app2?write=true", nil, http.StatusNotFound)
+	e.expect("GET", "/npm/acme/app2", nil, http.StatusNotFound)
+	if raw := e.rawPackument("acme", "@acme/app"); raw["_rev"] == nil {
+		t.Errorf("write packument through acme %v", raw)
+	}
 	e.auth.setDeny(ActionPush)
 	e.publish("all", newPkg("app3", "1.0.0"), http.StatusForbidden)
 	e.auth.setDeny()
