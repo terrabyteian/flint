@@ -4,14 +4,17 @@
 # deleted content. It runs twice, around a move of flint's clock past the
 # garbage collector's grace period:
 #
-#   delete   pushes an image and deletes it as clients do, by its
-#            manifest only.
+#   delete   pushes two images and deletes them as clients do, by their
+#            manifests only.
 #   collect  checks that a dry run deletes nothing, that a run deletes
-#            what the dry run reported, including the deleted image's
-#            manifest, config, and layer, whose links expired, and that
-#            every image and artifact left in <namespace> still pulls,
-#            byte for byte, with crane and oras. A second run must find
-#            nothing more to delete.
+#            what the dry run reported, including the first deleted
+#            image's manifest, config, and layer, whose links expired, and
+#            that every image and artifact left in <namespace> still pulls,
+#            byte for byte, with crane and oras. Before the runs, it checks
+#            the second image's config and base layer with HEAD, as a
+#            rebuild that shares them does; the runs must keep them, and
+#            the rebuild's push must succeed after them. A second run must
+#            find nothing more to delete.
 #
 # Usage: E2E_STATE_DIR=<dir> E2E_USERNAME=<admin> E2E_PASSWORD_FILE=<file> \
 #          scripts/e2e-gc.sh delete|collect <flint binary> <data dir> <host:port> <namespace>
@@ -60,6 +63,19 @@ if [ "$mode" = delete ]; then
 	digest=$(crane digest "$reg/$ns/gc-garbage:v1")
 	crane manifest "$reg/$ns/gc-garbage:v1" | jq -r --arg m "$digest" '$m, .config.digest, .layers[].digest' >"$state/garbage"
 	crane delete "$reg/$ns/gc-garbage@$digest"
+
+	step "push an image whose rebuild will share its config and base layer, and delete it"
+	head -c 4096 /dev/urandom >"$work/base.bin"
+	tar -C "$work" -cf "$work/base.tar" base.bin
+	head -c 4096 /dev/urandom >"$work/top.bin"
+	tar -C "$work" -cf "$work/top.tar" top.bin
+	crane append --oci-empty-base -f "$work/base.tar" -t "$reg/$ns/gc-rebuild:base" >/dev/null
+	crane append -b "$reg/$ns/gc-rebuild:base" -f "$work/top.tar" -t "$reg/$ns/gc-rebuild:v1" >/dev/null
+	crane manifest "$reg/$ns/gc-rebuild:v1" >"$state/rebuild.json"
+	crane blob "$reg/$ns/gc-rebuild@$(jq -r '.layers[-1].digest' "$state/rebuild.json")" >"$state/rebuild-top"
+	for tag in base v1; do
+		crane delete "$reg/$ns/gc-rebuild@$(crane digest "$reg/$ns/gc-rebuild:$tag")"
+	done
 	echo "e2e-gc delete: ok"
 	exit 0
 fi
@@ -67,6 +83,19 @@ fi
 garbage=$(cat "$state/garbage")
 for d in $garbage; do
 	[ -f "$(blobfile "$d")" ] || fail "the deleted image's blob $d is not stored before the run"
+done
+
+step "a rebuild checks the deleted image's config and base layer"
+# A rebuild that shares them finds their links with HEAD and skips their
+# upload; garbage collection must keep the links it read within the
+# grace period. The rebuild's own layer and the old manifest go.
+rebuild=$(cat "$state/rebuild.json")
+rebuilt="sha256:$(printf '%s' "$rebuild" | sha256)"
+reused=$(jq -r '.config.digest, .layers[0].digest' <<<"$rebuild")
+replaced="$rebuilt $(jq -r '.layers[-1].digest' <<<"$rebuild")"
+for d in $reused; do
+	[ "$(curl -sS -o /dev/null -w '%{http_code}' -I -u "$E2E_USERNAME:$password" "http://$reg/v2/$ns/gc-rebuild/blobs/$d")" = 200 ] ||
+		fail "HEAD of the deleted image's blob $d in $ns/gc-rebuild"
 done
 before=$(stored)
 
@@ -88,8 +117,11 @@ deleted=$(jq .deleted.blobs <<<"$report")
 [ "$deleted" = "$would" ] || fail "the run deleted $deleted blobs, the dry run reported $would"
 [ "$(jq .pruned <<<"$report")" = "$(jq .pruned <<<"$dry")" ] || fail "the run pruned other links than the dry run: $report"
 [ "$(stored)" = $((before - deleted)) ] || fail "$before blobs stored before, $(stored) after deleting $deleted"
-for d in $garbage; do
+for d in $garbage $replaced; do
 	[ ! -f "$(blobfile "$d")" ] || fail "the deleted image's blob $d survived"
+done
+for d in $reused; do
+	[ -f "$(blobfile "$d")" ] || fail "the run deleted blob $d, which a rebuild read within the grace period"
 done
 echo "deleted $deleted of $before blobs, after removing $(jq .pruned <<<"$report") expired links"
 
@@ -120,6 +152,16 @@ sig=$(oras discover --plain-http "$reg/$ns/artifact:v1" --format json | jq -r '(
 check "$ns/artifact" "$sig"
 oras pull --plain-http "$reg/$ns/artifact@$sig" -o sig >/dev/null
 echo "checked $checked tags and the artifact's signature"
+
+step "the rebuild pushes its own layer and its manifest"
+top=$(jq -r '.layers[-1].digest' <<<"$rebuild")
+curl -fsS -o /dev/null -u "$E2E_USERNAME:$password" -H 'Content-Type: application/octet-stream' \
+	--data-binary @"$state/rebuild-top" "http://$reg/v2/$ns/gc-rebuild/blobs/uploads/?digest=$top" ||
+	fail "pushing the rebuild's layer $top"
+printf '%s' "$rebuild" | curl -fsS -o /dev/null -u "$E2E_USERNAME:$password" -X PUT \
+	-H "Content-Type: $(jq -r .mediaType <<<"$rebuild")" --data-binary @- "http://$reg/v2/$ns/gc-rebuild/manifests/v2" ||
+	fail "pushing the rebuild's manifest, which references the blobs it read before the run"
+check "$ns/gc-rebuild" "$(crane digest "$reg/$ns/gc-rebuild:v2")"
 
 step "a second run finds nothing more"
 again=$(gc run)

@@ -274,6 +274,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Metrics:        reg,
 		Upstream:       upOpts,
 		Space:          space,
+		Now:            now,
 		Fetcher:        fetcher,
 		ProxyMetrics:   proxyMetrics,
 	})
