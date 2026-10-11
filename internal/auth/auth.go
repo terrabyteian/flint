@@ -619,24 +619,11 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request, scope, errCo
 }
 
 // realm returns the token endpoint's URL as the client addresses this
-// server, honoring trusted proxies.
+// server, honoring trusted proxies. It ignores the public URL: a client
+// that reached flint by another name, such as an internal service name,
+// must get its token from the host it is already talking to.
 func (s *Service) realm(r *http.Request) string {
-	return baseURL(r) + TokenPath
-}
-
-// baseURL returns the scheme and host the client addresses this server
-// by, honoring trusted proxies, as in "https://registry.example".
-func baseURL(r *http.Request) string {
-	info := server.Info(r.Context())
-	scheme, host := info.Scheme, info.Host
-	if scheme == "" {
-		scheme = "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		host = r.Host
-	}
-	return scheme + "://" + host
+	return server.Origin(r) + TokenPath
 }
 
 // writeRegistryError writes an OCI distribution error response.

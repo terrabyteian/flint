@@ -54,7 +54,11 @@ func (h *Handler) projectNames(v meta.View, rp *repository) []string {
 	case config.TypeVirtual:
 		for _, m := range rp.virtual.Members {
 			if mr := h.repos[m.Name]; mr != nil {
-				out = append(out, h.projectNames(v, mr)...)
+				for _, project := range h.projectNames(v, mr) {
+					if rp.virtual.Admits(m, project) {
+						out = append(out, project)
+					}
+				}
 			}
 		}
 	}

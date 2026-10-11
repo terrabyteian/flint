@@ -92,6 +92,9 @@ type Options struct {
 	// Docs caches project pages, shared with other formats' proxy
 	// repositories; nil means a new one, which RunProxy prunes.
 	Docs *upstream.DocCache
+	// VirtualMetrics are the virtual repository metrics shared with other
+	// formats; nil registers them on Metrics.
+	VirtualMetrics *repo.Metrics
 	// Logger receives failures; nil means slog.Default().
 	Logger *slog.Logger
 	// Metrics, if set, receives the PyPI metrics.
@@ -176,6 +179,14 @@ func New(opts Options) (*Handler, error) {
 	if upOpts.Now == nil {
 		upOpts.Now = h.now
 	}
+	reg := opts.Metrics
+	if reg == nil {
+		reg = metrics.NewRegistry() // unexposed; keeps the counters usable
+	}
+	vm := opts.VirtualMetrics
+	if vm == nil {
+		vm = repo.NewMetrics(reg)
+	}
 	for _, rc := range opts.Repositories {
 		if rc.Format != config.FormatPyPI {
 			continue
@@ -194,7 +205,7 @@ func New(opts Options) (*Handler, error) {
 			r.proxy = p
 			h.hasProxy = true
 		case config.TypeVirtual:
-			v, err := repo.NewVirtual(rc, opts.Repositories)
+			v, err := repo.NewVirtual(rc, opts.Repositories, repo.VirtualOptions{Normalize: Normalize, Logger: h.log, Metrics: vm})
 			if err != nil {
 				return nil, err
 			}
@@ -203,10 +214,6 @@ func New(opts Options) (*Handler, error) {
 			return nil, fmt.Errorf("pypi: repository %s has unsupported type %q", rc.Name, rc.Type)
 		}
 		h.repos[rc.Name] = r
-	}
-	reg := opts.Metrics
-	if reg == nil {
-		reg = metrics.NewRegistry() // unexposed; keeps the counters usable
 	}
 	h.uploads = reg.Counter("flint_pypi_uploads_total",
 		"Distribution files uploaded to hosted PyPI repositories, by repository.", "repository")
@@ -239,23 +246,23 @@ func New(opts Options) (*Handler, error) {
 // Register mounts the handler at /pypi/ on a server, and adds the admin
 // API's PyPI endpoints.
 func (h *Handler) Register(s interface{ Handle(string, http.Handler) }) {
-	s.Handle("/pypi/", h)
+	s.Handle(repo.Prefix(config.FormatPyPI), h)
 	h.registerAdmin(s)
 }
 
 // ServeHTTP routes a /pypi/ request.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	rest := strings.TrimPrefix(r.URL.Path, "/pypi/")
-	name, sub, slash := strings.Cut(rest, "/")
+	name, sub, slash, _ := repo.Split(config.FormatPyPI, r.URL.Path)
 	rp := h.repos[name]
 	if rp == nil {
+		// Repositories of other formats are not found here either.
 		server.SetRoute(ctx, "pypi.unknown")
 		writeError(w, http.StatusNotFound, "%q is not a PyPI repository on this server", abbrev(name))
 		return
 	}
 	server.LogAttrs(ctx, slog.String("repository", name))
-	base := "/pypi/" + name + "/"
+	base := repo.Path(config.FormatPyPI, name)
 	switch {
 	case !slash || sub == "" || sub == "simple":
 		server.SetRoute(ctx, "pypi.index")

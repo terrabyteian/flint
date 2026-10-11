@@ -28,7 +28,7 @@ Each repository is served under `/pypi/<repository>/`:
 | `/pypi/<repository>/simple/<project>/` | A project's page: its files, with their hashes and metadata. |
 | `/pypi/<repository>/files/<project>/<filename>` | A distribution file. |
 | `/pypi/<repository>/files/<project>/<filename>.metadata` | A file's core metadata (PEP 658), where available. |
-| `/pypi/<repository>/legacy/` | The upload URL, for twine and uv publish. Hosted repositories only. |
+| `/pypi/<repository>/legacy/` | The upload URL, for twine and uv publish. Hosted repositories, and virtual repositories with `publishTo`. |
 | `/pypi/<repository>/pypi/<project>/json` | The JSON API: the project and its releases. |
 | `/pypi/<repository>/pypi/<project>/<version>/json` | The JSON API for one release. |
 
@@ -205,11 +205,12 @@ A proxy repository caches one upstream index, given by the simple index URL you 
 A virtual repository serves one index over an ordered list of hosted and proxy members:
 
 - A project page lists the files of every member that has the project. Where members have a file of the same name, the first member's is served, and a file's link leads to the member that holds it.
+- **Filters.** A member with `include` or `exclude` patterns is consulted only for the project names they admit, compared after PEP 503 normalization, so `Acme_*` and `acme-*` are the same filter. Exclude your internal prefixes from the pypi.org member, as in `{"name": "pypi", "exclude": ["acme-*"]}`: dependency-confusion protection covers a name only once a hosted member owns it, and the filter also covers internal names you have not published yet.
 - **Dependency-confusion protection**, on by default: once a hosted member owns a project name, that name's upstream versions are never served through the virtual repository, not even versions the hosted member lacks, and the proxy members are not even asked about it. A hosted repository owns a name from the first upload of a file of it, and keeps it after every file is deleted. So a package someone publishes on pypi.org under the name of a first-party package can never be installed in its place. Set `virtual.dependencyConfusionProtection` to `false` to merge every member for every name.
-- A member that fails, such as a proxy whose upstream is unreachable and has the project uncached, is left out with a warning in the log, so one unreachable upstream does not take the whole index down. The request fails only if no member could answer.
+- A member that fails, such as a proxy whose upstream is unreachable and has the project uncached, is left out with a warning in the log, counted in `flint_virtual_member_skips_total`, so one unreachable upstream does not take the whole index down. The request fails only if no member could answer.
 - The JSON API merges the members the same way.
-- The root index lists the projects of every member.
-- Uploads are refused with `405`, naming the hosted members to publish to instead.
+- The root index lists the projects of every member that its filters admit.
+- **Uploads** go to the hosted member that `virtual.publishTo` names, so one URL serves both pip and twine; they need the permissions an upload to that member needs. An upload of a project whose name that member's filters do not admit is refused with `403`, naming the member and the filter, and nothing is stored. Without `publishTo`, uploads are refused with `405`, naming the hosted members to publish to instead.
 
 Pulling through a virtual repository needs the `read` role on the virtual repository, or its `anonymousPull`; the members' own permissions are not consulted.
 
@@ -221,7 +222,7 @@ The latest release is the highest final release that is not yanked, falling back
 
 `info` comes from the core metadata of the release's files, a wheel's first: the stored metadata of a hosted file, or a proxy file's core-metadata file, fetched and cached when the upstream offers one.
 For a release without any, it holds only the name, the version, and `requires_python`.
-File URLs are absolute, built from the scheme and host the client used, through [trusted proxies](configuration.md#trusted-proxies) as configured; each file has its `sha256` digest, and for hosted files also `md5` and `blake2b_256`.
+File URLs are absolute, built from [`publicURL`](configuration.md#public-url) when it is set, and otherwise from the scheme and host the client used, through [trusted proxies](configuration.md#trusted-proxies) as configured; each file has its `sha256` digest, and for hosted files also `md5` and `blake2b_256`.
 `last_serial` is the metadata store's sequence number of the project's latest change in the repository, which changes whenever the project does.
 Download counts are `-1`, and `vulnerabilities` is empty.
 

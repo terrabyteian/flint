@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -217,6 +218,34 @@ func TestValidation(t *testing.T) {
 				`repositories[2].virtual.members[5]: "w" is a virtual repository; members must be hosted or proxy repositories`,
 				"repositories[3].virtual.members: must name at least one",
 				`repositories[4].virtual: is required for type "virtual"`}},
+		{"virtual filters and publishTo", `{"dataDir": "/d", "repositories": [
+			{"name": "h", "format": "pypi", "type": "hosted"},
+			{"name": "p", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple/"}},
+			{"name": "v", "format": "pypi", "type": "virtual", "virtual": {"publishTo": "h", "members": [
+				{"name": "h", "include": ["acme-*", "tool"]}, {"name": "p", "exclude": ["acme-*", "@scope/*", "com.acme:*"]}]}}]}`, nil},
+		{"virtual member problems", `{"dataDir": "/d", "repositories": [
+			{"name": "h", "format": "pypi", "type": "hosted"},
+			{"name": "p", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple/"}},
+			{"name": "v", "format": "pypi", "type": "virtual", "virtual": {"publishTo": "p", "members": [
+				{"name": "h", "include": ["", "a b", "ok"], "exclude": ["é"]}, {"name": "p", "inclde": ["x"]},
+				{"include": ["x"]}, 7, {"name": "h", "exclude": "x"}, "p"]}},
+			{"name": "w", "format": "pypi", "type": "virtual", "virtual": {"publishTo": "x", "members": ["h"]}}]}`,
+			[]string{`repositories[2].virtual.members[0].include[0]: "" is not a package name or pattern`,
+				`repositories[2].virtual.members[0].include[1]: "a b" is not a package name or pattern`,
+				`repositories[2].virtual.members[0].exclude[0]: "é" is not a package name or pattern`,
+				`repositories[2].virtual.members[1]: unknown field "inclde"`,
+				"repositories[2].virtual.members[2].name: is required",
+				"repositories[2].virtual.members[3]: want a repository name or an object with a name and filters, got 7",
+				"repositories[2].virtual.members[4]: exclude: want an array, got string",
+				`repositories[2].virtual.publishTo: "p" is a proxy repository; publishTo must name a hosted member`,
+				`repositories[3].virtual.publishTo: "x" is not a member of the virtual repository`}},
+		{"public URL", `{"dataDir": "/d", "publicURL": "https://flint.example.com/registry/"}`, nil},
+		{"public URL problems", `{"dataDir": "/d", "publicURL": "flint.example.com"}`,
+			[]string{`publicURL: "flint.example.com" must be an http or https URL`}},
+		{"public URL query", `{"dataDir": "/d", "publicURL": "https://flint.example.com/?a=b"}`,
+			[]string{`publicURL: "https://flint.example.com/?a=b" must not have a query or fragment`}},
+		{"public URL credentials", `{"dataDir": "/d", "publicURL": "https://u:p@flint.example.com"}`,
+			[]string{`publicURL: "https://u:p@flint.example.com" must not contain credentials`}},
 		{"pypi proxy url", `{"dataDir": "/d", "repositories": [
 			{"name": "a", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple?x=1"}},
 			{"name": "b", "format": "pypi", "type": "proxy", "proxy": {"url": "pypi.org"}}]}`,
@@ -461,6 +490,74 @@ func TestPyPIIndexURL(t *testing.T) {
 	} {
 		if got := PyPIIndexURL(in); got != want {
 			t.Errorf("PyPIIndexURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestPublicBase(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                              "",
+		"https://flint.example.com":     "https://flint.example.com",
+		"https://flint.example.com/":    "https://flint.example.com",
+		"https://example.com/registry/": "https://example.com/registry",
+	} {
+		if got := (&Config{PublicURL: in}).PublicBase(); got != want {
+			t.Errorf("PublicBase with %q = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestVirtualMemberJSON checks that a member decodes from a name or an
+// object, and encodes back to a name when it has no filters.
+func TestVirtualMemberJSON(t *testing.T) {
+	var v Virtual
+	in := `{"members": ["a", {"name": "b", "include": ["x-*"], "exclude": ["x-y"]}, {"name": "c"}]}`
+	if err := json.Unmarshal([]byte(in), &v); err != nil {
+		t.Fatal(err)
+	}
+	want := []VirtualMember{{Name: "a"}, {Name: "b", Include: []string{"x-*"}, Exclude: []string{"x-y"}}, {Name: "c"}}
+	if !reflect.DeepEqual(v.Members, want) {
+		t.Errorf("members %+v, want %+v", v.Members, want)
+	}
+	out, err := json.Marshal(v.Members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(out); got != `["a",{"name":"b","include":["x-*"],"exclude":["x-y"]},"c"]` {
+		t.Errorf("encoded members %s", got)
+	}
+}
+
+// TestFormatSettings checks the rule for per-format settings objects: a
+// repository may carry only its own format's, which that format checks.
+func TestFormatSettings(t *testing.T) {
+	saved := formats
+	defer func() { formats = saved }()
+	// The test format's settings object stands in on the proxy field.
+	formats = append(slices.Clone(saved), formatSpec{name: "test", types: []string{TypeHosted},
+		settings: func(r *Repository) any {
+			if r.Proxy == nil {
+				return nil
+			}
+			return r.Proxy
+		},
+		check: func(v *validator, path string, r *Repository) {
+			if r.Proxy == nil {
+				v.addf(path, "is required")
+			}
+		}})
+	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "test"}) {
+		t.Errorf("Formats() = %q", got)
+	}
+	_, err := Parse([]byte(`{"dataDir": "/d", "repositories": [
+		{"name": "a", "format": "test", "type": "hosted"},
+		{"name": "b", "format": "test", "type": "proxy"},
+		{"name": "c", "format": "oci", "type": "proxy", "proxy": {"url": "https://ghcr.io"}}]}`))
+	for _, w := range []string{"repositories[0].test: is required",
+		`repositories[1].type: "proxy" is not supported for format test; supported types: hosted`,
+		"repositories[2].test: is only allowed for a repository of format test"} {
+		if err == nil || !strings.Contains(err.Error(), w) {
+			t.Errorf("error %v does not contain %q", err, w)
 		}
 	}
 }

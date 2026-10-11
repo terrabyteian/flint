@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/terrabyteian/flint/internal/config"
+	"github.com/terrabyteian/flint/internal/repo"
 )
 
 // Role is a repository role. Roles are ordered, and each includes every
@@ -79,10 +80,11 @@ type Scope struct {
 	Role         Role
 }
 
-// matches reports whether the scope covers repository repo.
-func (s Scope) matches(repo string) bool {
+// matches reports whether the scope covers repository name, matching
+// patterns as repo.Match does.
+func (s Scope) matches(name string) bool {
 	for _, p := range s.Repositories {
-		if matchPattern(p, repo) {
+		if repo.Match(p, name) {
 			return true
 		}
 	}
@@ -98,35 +100,6 @@ func scopesRole(scopes []Scope, repo string) Role {
 		}
 	}
 	return r
-}
-
-// matchPattern reports whether name matches pattern, in which "*" matches
-// any run of characters, including none, and every other byte matches
-// itself.
-func matchPattern(pattern, name string) bool {
-	// Greedy matching with backtracking to the most recent star, which is
-	// linear in practice and never exponential.
-	p, n := 0, 0
-	star, retry := -1, 0
-	for n < len(name) {
-		switch {
-		case p < len(pattern) && pattern[p] == '*':
-			star, retry = p, n
-			p++
-		case p < len(pattern) && pattern[p] == name[n]:
-			p++
-			n++
-		case star >= 0:
-			retry++
-			p, n = star+1, retry
-		default:
-			return false
-		}
-	}
-	for p < len(pattern) && pattern[p] == '*' {
-		p++
-	}
-	return p == len(pattern)
 }
 
 // repoOf returns the flint repository a repository path names: its first

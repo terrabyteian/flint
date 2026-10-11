@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/terrabyteian/flint/internal/server"
 )
 
 // ChallengeStyle is how a family of routes asks clients for credentials
@@ -34,8 +36,8 @@ type Challenge struct {
 	// Style is the challenge written with 401 responses.
 	Style ChallengeStyle
 	// LoginURL returns, for ChallengeCargo, the URL of the page where a
-	// user obtains a token. Nil means the root of the server, as the
-	// client addresses it.
+	// user obtains a token. Nil means the root of the server: its public
+	// URL, or else as the client addresses it (see server.BaseURL).
 	LoginURL func(r *http.Request) string
 	// WriteError writes a refusal's status, 401, 403, or 500, and its
 	// body, after any WWW-Authenticate header is set. Nil writes a plain
@@ -218,7 +220,7 @@ func (a *Authorizer) unauthorized(w http.ResponseWriter, r *http.Request, scope,
 	case ChallengeBasic:
 		w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
 	case ChallengeCargo:
-		u := baseURL(r) + "/"
+		u := server.BaseURL(r) + "/"
 		if a.c.LoginURL != nil {
 			u = a.c.LoginURL(r)
 		}

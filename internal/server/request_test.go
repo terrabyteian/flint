@@ -2,6 +2,9 @@ package server
 
 import (
 	"crypto/tls"
+	"io"
+	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"testing"
@@ -157,5 +160,46 @@ func TestResolveNoProxies(t *testing.T) {
 	r.Header.Set("X-Forwarded-For", "198.51.100.1")
 	if got := resolve(r, nil); got.ClientIP != netip.MustParseAddr("10.1.1.1") {
 		t.Errorf("ClientIP = %v, want the peer when no proxy is trusted", got.ClientIP)
+	}
+}
+
+// TestBaseURL checks that the configured public URL is the base of
+// absolute URLs, and that without one the base is the scheme and host the
+// client addressed, honoring trusted proxies, which Origin always is.
+func TestBaseURL(t *testing.T) {
+	for _, tt := range []struct {
+		name, public, want, origin string
+		forwarded                  bool
+	}{
+		{"request host", "", "http://flint.lan:5000", "http://flint.lan:5000", false},
+		{"forwarded by a trusted proxy", "", "https://flint.example.com", "https://flint.example.com", true},
+		{"public URL", "https://registry.example.org/", "https://registry.example.org", "https://flint.example.com", true},
+		{"public URL with a path", "https://example.org/flint", "https://example.org/flint", "http://flint.lan:5000", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := New(Options{TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, PublicURL: tt.public,
+				Logger: slog.New(slog.DiscardHandler)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.HandleFunc("GET /x", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, BaseURL(r)+" "+Origin(r)) })
+			r := httptest.NewRequest("GET", "http://flint.lan:5000/x", nil)
+			r.RemoteAddr = "10.0.0.1:1234"
+			if tt.forwarded {
+				r.Header.Set("X-Forwarded-Proto", "https")
+				r.Header.Set("X-Forwarded-Host", "flint.example.com")
+			}
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, r)
+			if got, want := w.Body.String(), tt.want+" "+tt.origin; got != want {
+				t.Errorf("BaseURL and Origin = %q, want %q", got, want)
+			}
+		})
+	}
+	// Outside a Server, as in a format's unit tests, the request decides.
+	r := httptest.NewRequest("GET", "https://flint.lan/x", nil)
+	r.TLS = &tls.ConnectionState{}
+	if got := BaseURL(r); got != "https://flint.lan" {
+		t.Errorf("BaseURL outside a server = %q", got)
 	}
 }
