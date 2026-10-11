@@ -27,6 +27,14 @@ const (
 	DefaultListen          = ":5000"
 	DefaultLogLevel        = "info"
 	DefaultShutdownTimeout = 25 * time.Second
+	DefaultTokenTTL        = 5 * time.Minute
+	DefaultBootstrapAdmin  = "admin"
+)
+
+// Bounds of auth.tokenTTL.
+const (
+	MinTokenTTL = 30 * time.Second
+	MaxTokenTTL = time.Hour
 )
 
 // Config is the configuration file.
@@ -104,6 +112,21 @@ const (
 type Auth struct {
 	// Permissions grants repository roles to users and groups.
 	Permissions []Permission `json:"permissions,omitempty"`
+	// BootstrapAdmin, if set, creates the first administrator when no
+	// administrator exists yet.
+	BootstrapAdmin *BootstrapAdmin `json:"bootstrapAdmin,omitempty"`
+	// TokenTTL is the lifetime of the bearer tokens the Docker token
+	// service issues. Default 5m; from 30s to 1h.
+	TokenTTL Duration `json:"tokenTTL,omitzero"`
+}
+
+// BootstrapAdmin names the first administrator and the file holding its
+// password, such as a mounted Kubernetes Secret.
+type BootstrapAdmin struct {
+	// Username is the administrator's name. Default "admin".
+	Username string `json:"username,omitempty"`
+	// PasswordFile holds the password; one trailing newline is ignored.
+	PasswordFile string `json:"passwordFile"`
 }
 
 // Permission grants one role on matching repositories to users and groups.
@@ -166,6 +189,7 @@ func Load(path string) (*Config, error) {
 // in defaults.
 func Parse(b []byte) (*Config, error) {
 	c := Config{ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout}}
+	c.Auth.TokenTTL = Duration{Duration: DefaultTokenTTL}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
@@ -187,6 +211,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.Log.Level == "" {
 		c.Log.Level = DefaultLogLevel
+	}
+	if b := c.Auth.BootstrapAdmin; b != nil && b.Username == "" {
+		b.Username = DefaultBootstrapAdmin
 	}
 }
 
@@ -336,7 +363,7 @@ func (c *Config) Validate() error {
 			v.addf(path+".repositories", "must name at least one repository or pattern")
 		}
 		for j, pat := range p.Repositories {
-			if !validRepoPattern(pat) {
+			if !ValidRepoPattern(pat) {
 				v.addf(fmt.Sprintf("%s.repositories[%d]", path, j),
 					"%q is not a repository name or a pattern of name characters and \"*\"", pat)
 			}
@@ -350,15 +377,29 @@ func (c *Config) Validate() error {
 			v.addf(path, "must name at least one user or group")
 		}
 		for j, u := range p.Users {
-			if strings.TrimSpace(u) == "" {
-				v.addf(fmt.Sprintf("%s.users[%d]", path, j), "is empty")
+			if !ValidUserName(u) {
+				v.addf(fmt.Sprintf("%s.users[%d]", path, j), "%q %s", u, nameRule)
 			}
 		}
 		for j, g := range p.Groups {
-			if strings.TrimSpace(g) == "" {
-				v.addf(fmt.Sprintf("%s.groups[%d]", path, j), "is empty")
+			if !ValidUserName(g) {
+				v.addf(fmt.Sprintf("%s.groups[%d]", path, j), "%q %s", g, nameRule)
 			}
 		}
+	}
+
+	if b := c.Auth.BootstrapAdmin; b != nil {
+		if !ValidUserName(b.Username) {
+			v.addf("auth.bootstrapAdmin.username", "%q %s", b.Username, nameRule)
+		}
+		if b.PasswordFile == "" {
+			v.addf("auth.bootstrapAdmin.passwordFile", "is required when auth.bootstrapAdmin is set")
+		}
+	}
+	if c.Auth.TokenTTL.invalid != "" {
+		v.addf("auth.tokenTTL", "%s", c.Auth.TokenTTL.invalid)
+	} else if d := c.Auth.TokenTTL.Duration; d < MinTokenTTL || d > MaxTokenTTL {
+		v.addf("auth.tokenTTL", "%s is outside the allowed range of %s to %s", d, MinTokenTTL, MaxTokenTTL)
 	}
 	return v.err()
 }
@@ -424,15 +465,36 @@ func validRepoName(s string) bool {
 	return !sep
 }
 
-// validRepoPattern reports whether s is a repository name in which any
-// characters may be replaced by "*".
-func validRepoPattern(s string) bool {
+// ValidRepoPattern reports whether s is a repository name in which any
+// characters may be replaced by "*", as permission grants use.
+func ValidRepoPattern(s string) bool {
 	if s == "" || len(s) > 64 {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' || c == '*') {
+			return false
+		}
+	}
+	return true
+}
+
+// nameRule describes the user and group name syntax in errors.
+const nameRule = "is not a valid name: use 1 to 64 lowercase letters, digits, \".\", \"_\", \"-\", or \"@\", starting with a letter or digit"
+
+// ValidUserName reports whether s is a valid user or group name: 1 to 64
+// lowercase letters, digits, ".", "_", "-", or "@", starting with a letter
+// or digit. The rule keeps names unambiguous in HTTP basic credentials,
+// which split at ":", and keeps the reserved "__token__" out.
+func ValidUserName(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		alnum := c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+		if !alnum && (i == 0 || c != '.' && c != '_' && c != '-' && c != '@') {
 			return false
 		}
 	}

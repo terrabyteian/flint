@@ -9,7 +9,7 @@ Every problem found is reported at startup, each with its JSON path, for example
 flint does not start with an invalid configuration.
 `flint config check <file>` checks a file the same way without starting the server, and prints `<file>: ok` or the problems it found.
 
-Users and API tokens are runtime data kept in the metadata store, not configuration.
+Users and API tokens are runtime data kept in the metadata store, not configuration; see [authentication](auth.md).
 Repositories and permission grants declared here are read-only through the API.
 
 ## Example
@@ -44,6 +44,11 @@ Repositories and permission grants declared here are read-only through the API.
     }
   ],
   "auth": {
+    "bootstrapAdmin": {
+      "username": "admin",
+      "passwordFile": "/etc/flint/admin/password"
+    },
+    "tokenTTL": "5m",
     "permissions": [
       {
         "repositories": ["docker-local", "releases"],
@@ -76,6 +81,8 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `log.level` | string | `"info"` | Minimum log level: `debug`, `info`, `warn`, or `error`. |
 | `repositories` | array | `[]` | Repositories declared in configuration; see below. |
 | `auth.permissions` | array | `[]` | Permission grants; see below. |
+| `auth.bootstrapAdmin` | object | none | Create the first administrator at startup if none exists; see below. |
+| `auth.tokenTTL` | duration string | `"5m"` | Lifetime of the bearer tokens the Docker token endpoint issues, from `30s` to `1h`. |
 
 Durations are Go duration strings: a number and a unit, such as `"30s"`, `"2m"`, or `"1m30s"`.
 
@@ -115,7 +122,17 @@ Each grant gives one role on matching repositories to users and groups.
 | `users` | array of strings | `[]` | Users who receive the role. |
 | `groups` | array of strings | `[]` | Groups whose members receive the role. At least one user or group is required. |
 
-Grants are validated now and enforced once authentication lands in milestone M1.
+User and group names are 1 to 64 lowercase letters, digits, `.`, `_`, `-`, or `@`, starting with a letter or digit.
+A user's role on a repository is the highest one any matching grant gives; [authentication](auth.md#permissions) describes what each role allows.
+
+### Bootstrap administrator
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `username` | string | `"admin"` | Name of the first administrator. |
+| `passwordFile` | string | required | File holding the administrator's password, such as a mounted Kubernetes Secret. One trailing newline is ignored. |
+
+The file is read only while no administrator exists, so it can be removed after the first start, and changing it later does not reset the password.
 
 ## Endpoints
 
@@ -145,6 +162,13 @@ These endpoints are always served, without authentication:
 | `GET /readyz` | Readiness: 200 when ready; 503 while shutting down or when a readiness check fails. A metadata store that rejects writes after a failed fsync stays ready, because it still serves reads; the fault shows in `flint_meta_store_poisoned` and the logs. |
 | `GET /metrics` | Prometheus metrics in the text exposition format. |
 
+These authenticate themselves, as [authentication](auth.md) describes:
+
+| Endpoint | Meaning |
+| --- | --- |
+| `GET, POST /auth/token` | The Docker token endpoint: issues short-lived bearer tokens for registry requests. |
+| `/api/v1/...` | The admin API: users, groups, and API tokens. |
+
 ## Signals and shutdown
 
 On `SIGTERM` or `SIGINT`, flint fails readiness, stops accepting connections, and waits up to `shutdownTimeout` for in-flight requests, then closes the metadata store and exits 0.
@@ -154,7 +178,7 @@ In Kubernetes, keep `terminationGracePeriodSeconds` longer than `shutdownTimeout
 ## Logs
 
 flint writes structured JSON logs to standard error.
-Each request produces one line with the request ID (also returned in the `X-Request-Id` response header), method, path without the query string, route, status, response bytes, duration, client address, protocol, and user agent.
+Each request produces one line with the request ID (also returned in the `X-Request-Id` response header), method, path without the query string, route, status, response bytes, duration, client address, protocol, user agent, and, for an authenticated client, the user and any API token ID.
 Requests to `/healthz`, `/readyz`, and `/metrics` log at `debug` level, so probes and scrapes do not flood the log.
 Requests to the OCI API carry the repository name in a `repository` attribute, and their route is one of `oci.base`, `oci.catalog`, `oci.blob`, `oci.upload`, `oci.manifest`, `oci.tags`, `oci.referrers`, or `oci.unknown`.
 
