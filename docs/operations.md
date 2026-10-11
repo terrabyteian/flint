@@ -108,11 +108,11 @@ The audit log is kept forever unless `audit.retention` in the [configuration](co
 ```
 
 Records are deleted a whole file at a time, oldest first.
-The audit log writes to a file until it reaches 64 MiB or holds a day of changes, or, if `maxSize` or `maxAge` is smaller, a quarter of it (at least 64 KiB and a minute), and then starts a new one.
+The audit log writes to a file until it reaches 64 MiB or holds a day of changes, or, if a quarter of `maxSize` or `maxAge` is smaller, that quarter (at least 64 KiB and a minute), and then starts a new one.
 Retention runs whenever a new file starts, and every hour or every quarter of `maxAge`, whichever is shorter.
 
 With `maxAge`, a file is deleted once its newest record is older than `maxAge`, so a record is deleted at most about half of `maxAge` after it passes `maxAge`.
-The file being written is never deleted, but once its records span a quarter of `maxAge`, retention closes it and starts a new one even if no change comes, so a quiet registry's records are deleted too.
+The file being written is never deleted, but once its records span the file's time limit, retention closes it and starts a new one even if no change comes, so a quiet registry's records are deleted too.
 
 With `maxSize`, the oldest files are deleted while the audit log is larger, so it stays within about a quarter of `maxSize` of the limit.
 
