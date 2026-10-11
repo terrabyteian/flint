@@ -167,7 +167,7 @@ A bare IP address means that one address; IPv4-mapped IPv6 addresses match IPv4 
 | `type` | string | required | Repository type: `hosted`, which clients publish to; `proxy`, a read-only cache of an upstream registry or index; or, for `pypi`, `virtual`, one index merged from other repositories. |
 | `immutableTags` | bool | `false` | Hosted OCI repositories only. Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
-| `helmIndex` | bool | `false` | Hosted repositories only. Also serve the Helm charts pushed to the repository as a classic Helm chart repository at `/helm/<name>/`; see [Helm chart repositories](#helm-chart-repositories). |
+| `helmIndex` | bool | `false` | Hosted OCI repositories only. Also serve the Helm charts pushed to the repository as a classic Helm chart repository at `/helm/<name>/`; see [Helm chart repositories](#helm-chart-repositories). |
 | `proxy` | object | required for `proxy` | The upstream of a proxy repository; see below. Not allowed for other types. |
 | `virtual` | object | required for `virtual` | The members of a virtual repository; see below. Not allowed for other types. |
 
