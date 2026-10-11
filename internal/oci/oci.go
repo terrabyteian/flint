@@ -198,8 +198,9 @@ type Handler struct {
 	limits        *upstream.Limits
 
 	// Virtual repositories: the member that last served each image
-	// name's manifest.
+	// name's manifest, and the proxy members' recent not-found answers.
 	suppliers suppliers
+	misses    *upstream.NegativeCache
 
 	// The Helm view.
 	helmMu     sync.Mutex
@@ -255,6 +256,7 @@ func New(opts Options) (*Handler, error) {
 		h.actor = clientActor
 	}
 	h.validated = upstream.NewFreshness(h.now)
+	h.misses = upstream.NewNegativeCache(h.now)
 	upOpts := opts.Upstream
 	if upOpts.Logger == nil {
 		upOpts.Logger = h.log

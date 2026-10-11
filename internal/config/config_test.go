@@ -48,7 +48,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 16 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 17 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -78,6 +78,9 @@ func TestExampleConfig(t *testing.T) {
 	if g := c.Repositories[14].Go; c.Repositories[13].Format != FormatGo || g == nil || len(g.NoSumCheck) != 1 ||
 		GoSumDBKey(g) != sumdb.DefaultKey || c.Repositories[15].Virtual == nil || len(c.Repositories[15].Virtual.Members[0].Include) != 1 {
 		t.Errorf("unexpected Go repositories: %+v", c.Repositories[13:])
+	}
+	if r := c.Repositories[16]; r.Format != FormatOCI || r.Virtual == nil || len(r.Virtual.Members) != 3 || r.Virtual.PublishTo != "docker-local" {
+		t.Errorf("unexpected OCI virtual repository: %+v", r)
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)

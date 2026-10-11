@@ -128,5 +128,8 @@ func (h *Handler) RunProxy(ctx context.Context) {
 	if !h.hasProxy {
 		return
 	}
-	h.limits.Run(ctx, func(msg string, err error) { h.log.Warn(msg, "err", err) }, h.pruneValidated)
+	h.limits.Run(ctx, func(msg string, err error) { h.log.Warn(msg, "err", err) }, func() {
+		h.pruneValidated()
+		h.misses.Prune()
+	})
 }

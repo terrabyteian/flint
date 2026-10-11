@@ -211,6 +211,23 @@ func TestVirtualResolution(t *testing.T) {
 	if n := ve.hub.Count("GET", "org/tool/blobs/") + ve.hub.Count("HEAD", "org/tool/blobs/"); n != 0 {
 		t.Errorf("hub was asked for %d blobs of an image ghcr served: %v", n, ve.hub.Requests())
 	}
+	// Docker Hub's not found is remembered for its revalidation window,
+	// so pulling the tag again does not ask it, nor does listing the tags
+	// twice, until the window has passed.
+	asked := func() int { return ve.hub.Count("GET", "org/tool/manifests/") + ve.hub.Count("GET", "org/tool/tags/") }
+	before := asked()
+	ve.pullImage("all/org/tool", "v2", tool)
+	ve.tags("all/org/tool/tags/list")
+	ve.tags("all/org/tool/tags/list")
+	if n := asked() - before; n != 1 {
+		t.Errorf("hub was asked %d times within its window, want once for the tag listing", n)
+	}
+	ve.now = ve.now.Add(2 * time.Minute)
+	ve.pullImage("all/org/tool", "v2", tool)
+	if n := asked() - before; n != 2 {
+		t.Errorf("hub was asked %d times, want again once the window passed", n)
+	}
+
 	// HEAD works too, and after a restart, which forgets which member
 	// served the manifest, cached blobs are served by the member holding
 	// them without asking any upstream.
@@ -223,7 +240,7 @@ func TestVirtualResolution(t *testing.T) {
 		t.Error("ghcr's fetches are not counted")
 	}
 	ve.h = ve.newHandler()
-	before := len(ve.hub.Requests()) + len(ve.ghcr.Requests())
+	before = len(ve.hub.Requests()) + len(ve.ghcr.Requests())
 	ve.pull("all/org/tool", tool.Digest, tool.Manifest, tool.Blobs)
 	if n := len(ve.hub.Requests()) + len(ve.ghcr.Requests()) - before; n != 0 {
 		t.Errorf("pulling cached content by digest sent %d upstream requests", n)
@@ -615,4 +632,46 @@ func TestVirtualReferrers(t *testing.T) {
 	if ve.hub.Count("GET", "referrers") != 0 {
 		t.Error("hub was asked for referrers of a manifest it does not hold")
 	}
+}
+
+// TestVirtualPushReusesMemberBlobs checks a push through a virtual
+// repository under a name an upstream has: a blob's HEAD asks no
+// upstream, so it reports only blobs a member holds, and a manifest that
+// references a blob a proxy member holds under the name has it linked
+// into the publishTo member.
+func TestVirtualPushReusesMemberBlobs(t *testing.T) {
+	ve := newVirtualEnv(t)
+	base := ve.hub.PutImage("library/alpine", "3.20", []byte("alpine base layer"))
+	other := ve.hub.PutImage("library/redis", "7", []byte("redis layer"))
+
+	// A blob the upstream has but no member holds: HEAD says not found
+	// without asking the upstream, and GET fetches it.
+	want(t, ve.do("HEAD", "/v2/all/library/redis/blobs/"+other.Layers[0], nil), http.StatusNotFound, "")
+	if n := len(ve.hub.Requests()); n != 0 {
+		t.Errorf("a HEAD of a blob asked the upstream: %v", ve.hub.Requests())
+	}
+	want(t, ve.do("GET", "/v2/all/library/redis/blobs/"+other.Layers[0], nil), http.StatusOK, "")
+
+	// Once pulled, the base image's layer is held by hub, and a push of
+	// an image built on it needs only its own config.
+	ve.pullImage("all/library/alpine", "3.20", base)
+	layer := base.Layers[0]
+	want(t, ve.do("HEAD", "/v2/all/library/alpine/blobs/"+layer, nil), http.StatusOK, "")
+	cfg := []byte(`{"architecture":"amd64","os":"linux","custom":true}`)
+	ve.pushBlob("all/library/alpine", cfg)
+	manifest := mustJSON(map[string]any{"schemaVersion": 2, "mediaType": mtOCIManifest,
+		"config": desc("application/vnd.oci.image.config.v1+json", cfg),
+		"layers": []any{map[string]any{"mediaType": upstreamtest.MediaTypeLayer, "digest": layer, "size": len(base.Blobs[layer])}}})
+	want(t, ve.do("PUT", "/v2/all/library/alpine/manifests/custom", manifest, "Content-Type", mtOCIManifest), http.StatusCreated, "")
+	ve.pull("local/library/alpine", "custom", manifest, map[string][]byte{layer: base.Blobs[layer], blob.FromBytes(cfg).String(): cfg})
+	// The hosted member now owns the name.
+	ve.pull("all/library/alpine", "custom", manifest, map[string][]byte{layer: base.Blobs[layer]})
+	want(t, ve.do("GET", "/v2/all/library/alpine/manifests/3.20", nil), http.StatusNotFound, codeManifestUnknown)
+
+	// A blob no member holds is still missing.
+	missing := []byte("never uploaded")
+	manifest = mustJSON(map[string]any{"schemaVersion": 2, "mediaType": mtOCIManifest,
+		"config": desc("application/vnd.oci.image.config.v1+json", cfg),
+		"layers": []any{desc(upstreamtest.MediaTypeLayer, missing)}})
+	want(t, ve.do("PUT", "/v2/all/library/alpine/manifests/broken", manifest, "Content-Type", mtOCIManifest), http.StatusBadRequest, codeManifestBlobUnknown)
 }

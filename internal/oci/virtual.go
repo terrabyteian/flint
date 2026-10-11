@@ -40,8 +40,16 @@ import (
 //     name: a hosted member what is linked there, a proxy what its
 //     upstream has under the name. The virtual repository links nothing,
 //     so it never links a blob by its digest alone.
+//   - A blob's HEAD, which push clients send to learn whether a blob
+//     needs uploading, is answered only by the members that hold the
+//     blob under the name already, never by asking an upstream, so that
+//     it says what a push can use.
 //   - A tag listing is the union of the members' listings, sorted and
 //     paginated as a hosted repository's is.
+//   - A proxy member's not-found answer for a manifest reference or a tag
+//     listing is remembered for the member's revalidation window, so an
+//     image a later member serves costs the proxies before it one upstream
+//     request per window, not one per pull.
 //   - Referrers of a manifest are served by the member that holds it.
 //   - A member that fails, such as a proxy whose upstream cannot be
 //     reached with nothing cached, is skipped (see repo.First); a request
@@ -55,7 +63,10 @@ import (
 //   - Pushes and deletes go to the publishTo member, as if addressed to
 //     it, with the locations in responses naming the virtual repository.
 //     They are refused if there is no publishTo or its filters do not
-//     admit the name.
+//     admit the name. A manifest pushed may reference blobs another member
+//     holds under the name, which a client that checked for them through
+//     the virtual repository was told exist: they are linked into the
+//     publishTo member, as a cross-repository mount would link them.
 //
 // A virtual repository stores nothing of its own; it remembers in memory
 // only which member last served a manifest of each name.
@@ -168,7 +179,83 @@ func (h *Handler) virtualPublish(w http.ResponseWriter, r *http.Request, rn *rep
 		return
 	}
 	server.LogAttrs(r.Context(), slog.String("member", mrn.repo))
+	if ep == epManifest && r.Method == http.MethodPut {
+		if err := h.linkFromMembers(r, rn, mrn); err != nil {
+			h.writeError(w, r, err)
+			return
+		}
+	}
 	o.serve(w, r, mrn, arg)
+}
+
+// linkFromMembers links into mrn, the publishTo member of virtual
+// repository name rn, the blobs the manifest that r pushes references
+// that mrn does not hold but another member that may serve the name
+// holds under it. It leaves r's body to be read again.
+func (h *Handler) linkFromMembers(r *http.Request, rn, mrn *repoName) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxManifestSize+1))
+	if err != nil {
+		return manifestInvalid("reading the manifest: %v", err)
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	pm, err := parseManifest(body, r.Header.Get("Content-Type"))
+	if err != nil || len(body) > maxManifestSize {
+		return nil // the push answers it
+	}
+	var others []*repoName
+	for _, m := range h.sourcesOf(rn) {
+		if m.Name != mrn.repo {
+			others = append(others, h.member(rn, m.Name))
+		}
+	}
+	if len(others) == 0 {
+		return nil
+	}
+	var ds []blob.Digest
+	for _, desc := range pm.blobs {
+		if d, err := blob.ParseDigest(desc.Digest); err == nil && !slices.Contains(ds, d) {
+			ds = append(ds, d)
+		}
+	}
+	type link struct {
+		d    blob.Digest
+		size int64
+		from string
+	}
+	var links []link
+	v := h.view()
+	for _, d := range ds {
+		if _, ok := v.Get(blobKey(mrn, d)); ok {
+			continue
+		}
+		for _, o := range others {
+			if rec, ok := v.Get(blobKey(o, d)); ok {
+				if size, _, err := decodeBlobLink(rec.Value); err == nil {
+					links = append(links, link{d, size, o.full})
+				}
+				break
+			}
+		}
+	}
+	v.Release()
+	if len(links) == 0 {
+		return nil
+	}
+	linked := make([]blob.Digest, len(links))
+	for i, l := range links {
+		linked[i] = l.d
+	}
+	err = h.commitLink(r.Context(), linked, func(v meta.View, b *meta.Batch) error {
+		for _, l := range links {
+			b.Put(blobKey(mrn, l.d), encodeBlobLink(l.size, h.now()))
+		}
+		b.SetOrigin(h.origin(r, "oci.blob.mount", links[0].from+"@"+links[0].d.String()+" -> "+mrn.full))
+		return nil
+	}, h.statExists(r.Context(), linked...))
+	if err == errRetry {
+		return nil // the push reports the blobs it lacks
+	}
+	return err
 }
 
 // authorizeVirtual authorizes actions through virtual repository name rn,
@@ -253,11 +340,15 @@ func (h *Handler) byDigest(rn *repoName, members []repo.Member, held func(meta.V
 // member's failure if one failed. It returns the member that served the
 // request.
 func (h *Handler) virtualFirst(w http.ResponseWriter, r *http.Request, rn *repoName, members []repo.Member, arg string,
-	serve func(repo.Member) serveFunc, notFound error) (repo.Member, bool) {
+	serve func(repo.Member) serveFunc, notFound error, missed func(repo.Member)) (repo.Member, bool) {
 	a, ok, err := repo.First(r.Context(), rn.cfg.virtual, members, rn.name, func(ctx context.Context, m repo.Member) (struct{}, error) {
 		mw := newMemberWriter(w)
 		serve(m)(mw, r, h.member(rn, m.Name), arg)
-		return struct{}{}, mw.result()
+		err := mw.result()
+		if isMiss(err) && missed != nil {
+			missed(m)
+		}
+		return struct{}{}, err
 	}, isMiss)
 	switch {
 	case ok:
@@ -301,15 +392,49 @@ func (h *Handler) virtualManifest(w http.ResponseWriter, r *http.Request, rn *re
 		h.writeError(w, r, manifestUnknown(rn, ref))
 		return
 	}
+	members = h.withoutMisses(rn, members, ref)
 	m, ok := h.virtualFirst(w, r, rn, members, ref, func(m repo.Member) serveFunc {
 		if h.repos[m.Name].proxy != nil {
 			return h.proxyGetManifest
 		}
 		return h.memberGetManifest
-	}, manifestUnknown(rn, ref))
+	}, manifestUnknown(rn, ref), func(m repo.Member) {
+		// A proxy holding the reference cached answered not found for the
+		// request's Accept header, which another request may not share.
+		v := h.view()
+		_, _, _, err := lookupManifest(v, h.member(rn, m.Name), ref)
+		v.Release()
+		if err != nil {
+			h.missed(rn, m, ref)
+		}
+	})
 	if ok {
 		h.suppliers.put(rn.full, m.Name)
 	}
+}
+
+// missKey is the key under which a proxy member's not-found answer for
+// what of virtual repository name rn is remembered: a manifest reference,
+// or "" for the tag listing.
+func missKey(rn *repoName, m repo.Member, what string) string {
+	return rn.repo + "\x00" + m.Name + "\x00" + rn.name + "\x00" + what
+}
+
+// missed remembers that proxy member m answered not found for what of
+// name rn, for its revalidation window.
+func (h *Handler) missed(rn *repoName, m repo.Member, what string) {
+	if p := h.repos[m.Name].proxy; p != nil {
+		h.misses.Remember(missKey(rn, m, what), false, p.revalidate)
+	}
+}
+
+// withoutMisses returns members without the proxies that answered not
+// found for what of name rn within their revalidation window.
+func (h *Handler) withoutMisses(rn *repoName, members []repo.Member, what string) []repo.Member {
+	return slices.DeleteFunc(slices.Clone(members), func(m repo.Member) bool {
+		known, _ := h.misses.Known(missKey(rn, m, what))
+		return known
+	})
 }
 
 // memberGetManifest is getManifest for a hosted member of a virtual
@@ -335,16 +460,22 @@ func (h *Handler) virtualBlob(w http.ResponseWriter, r *http.Request, rn *repoNa
 		h.writeError(w, r, err)
 		return
 	}
-	members = h.byDigest(rn, members, func(v meta.View, mrn *repoName) bool {
+	held := func(v meta.View, mrn *repoName) bool {
 		_, ok := v.Get(blobKey(mrn, d))
 		return ok
-	})
+	}
+	members = h.byDigest(rn, members, held)
+	if r.Method == http.MethodHead {
+		v := h.view()
+		members = slices.DeleteFunc(members, func(m repo.Member) bool { return !m.Hosted && !held(v, h.member(rn, m.Name)) })
+		v.Release()
+	}
 	h.virtualFirst(w, r, rn, members, arg, func(m repo.Member) serveFunc {
 		if h.repos[m.Name].proxy != nil {
 			return h.proxyGetBlob
 		}
 		return h.getBlob
-	}, blobUnknown(d))
+	}, blobUnknown(d), nil)
 }
 
 // virtualTags serves GET /v2/<name>/tags/list of a virtual repository:
@@ -355,9 +486,13 @@ func (h *Handler) virtualTags(w http.ResponseWriter, r *http.Request, rn *repoNa
 		h.writeError(w, r, err)
 		return
 	}
-	answers, err := repo.Consult(r.Context(), rn.cfg.virtual, members, rn.name,
+	answers, err := repo.Consult(r.Context(), rn.cfg.virtual, h.withoutMisses(rn, members, ""), rn.name,
 		func(ctx context.Context, m repo.Member) ([]string, error) {
-			return h.memberTags(r, h.member(rn, m.Name))
+			tags, err := h.memberTags(r, h.member(rn, m.Name))
+			if isMiss(err) {
+				h.missed(rn, m, "")
+			}
+			return tags, err
 		}, isMiss)
 	if err != nil {
 		h.writeMemberError(w, r, err)
