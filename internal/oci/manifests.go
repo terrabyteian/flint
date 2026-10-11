@@ -173,49 +173,52 @@ func parseManifest(body []byte, contentType string) (*parsedManifest, error) {
 	return p, nil
 }
 
-// putManifest serves PUT /v2/<name>/manifests/<reference>, by tag or by
-// digest, with any extra tags given as ?tag= parameters.
-func (h *Handler) putManifest(w http.ResponseWriter, r *http.Request, rn *repoName, ref string) {
-	ctx := r.Context()
-	var tags []string
+// readManifestPut reads the body of r, a push of a manifest under
+// reference ref, and checks the request: the tags it names, by ref or as
+// ?tag= parameters, the body's size, and that its digest d is the one a
+// digest ref names.
+func readManifestPut(r *http.Request, ref string) (tags []string, body []byte, d blob.Digest, err error) {
 	var want blob.Digest
 	if strings.Contains(ref, ":") {
-		d, err := parseDigest(ref)
-		if err != nil {
-			h.writeError(w, r, err)
-			return
+		if want, err = parseDigest(ref); err != nil {
+			return nil, nil, d, err
 		}
-		want = d
 	} else if validTag(ref) {
 		tags = append(tags, ref)
 	} else {
-		h.writeError(w, r, manifestInvalid("invalid tag %q", abbrev(ref)))
-		return
+		return nil, nil, d, manifestInvalid("invalid tag %q", abbrev(ref))
 	}
 	for _, t := range r.URL.Query()["tag"] {
 		if !validTag(t) {
-			h.writeError(w, r, manifestInvalid("invalid tag %q", abbrev(t)))
-			return
+			return nil, nil, d, manifestInvalid("invalid tag %q", abbrev(t))
 		}
 		if !slices.Contains(tags, t) {
 			tags = append(tags, t)
 		}
 	}
-
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxManifestSize+1))
+	body, err = io.ReadAll(io.LimitReader(r.Body, maxManifestSize+1))
 	if err != nil {
-		h.writeError(w, r, manifestInvalid("reading the manifest: %v", err))
-		return
+		return nil, nil, d, manifestInvalid("reading the manifest: %v", err)
 	}
 	if len(body) > maxManifestSize {
-		h.writeError(w, r, newError(http.StatusRequestEntityTooLarge, codeSizeInvalid,
-			"the manifest exceeds the limit of %d bytes", maxManifestSize))
-		return
+		return nil, nil, d, newError(http.StatusRequestEntityTooLarge, codeSizeInvalid,
+			"the manifest exceeds the limit of %d bytes", maxManifestSize)
 	}
-	d := blob.FromBytes(body)
+	d = blob.FromBytes(body)
 	if !want.IsZero() && want != d {
-		h.writeError(w, r, newError(http.StatusBadRequest, codeDigestInvalid,
-			"the manifest's digest is %s, not %s", d, want).withDetail(map[string]string{"digest": want.String()}))
+		return nil, nil, d, newError(http.StatusBadRequest, codeDigestInvalid,
+			"the manifest's digest is %s, not %s", d, want).withDetail(map[string]string{"digest": want.String()})
+	}
+	return tags, body, d, nil
+}
+
+// putManifest serves PUT /v2/<name>/manifests/<reference>, by tag or by
+// digest, with any extra tags given as ?tag= parameters.
+func (h *Handler) putManifest(w http.ResponseWriter, r *http.Request, rn *repoName, ref string) {
+	ctx := r.Context()
+	tags, body, d, err := readManifestPut(r, ref)
+	if err != nil {
+		h.writeError(w, r, err)
 		return
 	}
 	pm, err := parseManifest(body, r.Header.Get("Content-Type"))
@@ -279,7 +282,7 @@ func (h *Handler) putManifest(w http.ResponseWriter, r *http.Request, rn *repoNa
 	}
 	h.manifestPuts.With(rn.repo).Inc()
 	hd := w.Header()
-	hd.Set("Location", "/v2/"+rn.full+"/manifests/"+d.String())
+	hd.Set("Location", "/v2/"+rn.path()+"/manifests/"+d.String())
 	hd.Set("Docker-Content-Digest", d.String())
 	if !pm.record.Subject.IsZero() {
 		hd.Set("OCI-Subject", pm.record.Subject.String())

@@ -256,9 +256,11 @@ func TestVirtualPermissions(t *testing.T) {
 		}
 	}
 
-	// The Docker challenge names a scope on each repository involved.
+	// The Docker challenge names the virtual repository, which is what
+	// Docker clients ask the token service for whatever the challenge
+	// says; see TestVirtualTokens.
 	resp := e.do(request{path: "/virtual/docker/pull,push/npm-all/npm-local"})
-	if got := parseChallenge(t, resp.header.Get("WWW-Authenticate"))["scope"]; got != "repository:npm-all:pull repository:npm-local:push" {
+	if got := parseChallenge(t, resp.header.Get("WWW-Authenticate"))["scope"]; got != "repository:npm-all:pull,push" {
 		t.Errorf("virtual scope %q", got)
 	}
 

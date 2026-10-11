@@ -169,6 +169,15 @@ Repositories and permission grants declared here are read-only through the API.
           {"name": "goproxy", "exclude": ["corp.example.com/*"]}
         ]
       }
+    },
+    {
+      "name": "docker",
+      "format": "oci",
+      "type": "virtual",
+      "virtual": {
+        "members": ["docker-local", "dockerhub", "ghcr"],
+        "publishTo": "docker-local"
+      }
     }
   ],
   "proxyCache": {
@@ -198,7 +207,7 @@ Repositories and permission grants declared here are read-only through the API.
         "groups": ["ci"]
       },
       {
-        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all", "go-all"],
+        "repositories": ["dockerhub", "ghcr", "docker", "pypi", "crates-io", "cargo-all", "go-all"],
         "role": "read",
         "groups": ["ci"]
       },
@@ -273,7 +282,7 @@ Cached upstream content is stored as the upstream sent it and rewritten when ser
 | --- | --- | --- | --- |
 | `name` | string | required | The repository's name, which clients address it by: the path prefix of its images, as in `host/docker-local/team/app`, of its index, as in `host/pypi/pypi-local/simple/` or `host/cargo/cargo-local/`, of its npm registry URL, as in `host/npm/npm-local/`, of its Go module proxy, as in `host/go/go-all/`, of its files, as in `host/generic/files/tools/app.tar.gz`, or of its Maven repository, as in `host/maven/maven-releases/`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique across formats. |
 | `format` | string | required | Package format: `oci` for container images and OCI artifacts, `pypi` for Python packages, `generic` for arbitrary files addressed by path, `cargo` for Rust crates, `npm` for npm packages, `maven` for Java and other JVM artifacts, or `go` for Go modules. |
-| `type` | string | required | Repository type: `hosted`, which clients publish to, for every format but `go`; `proxy`, a read-only cache of an upstream registry, index, repository, or module proxy; or, for `pypi`, `generic`, `cargo`, `maven`, and `go`, `virtual`, one view merged from other repositories. `npm` repositories are hosted. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
+| `type` | string | required | Repository type: `hosted`, which clients publish to, for every format but `go`; `proxy`, a read-only cache of an upstream registry, index, repository, or module proxy; or, for `oci`, `pypi`, `generic`, `cargo`, `maven`, and `go`, `virtual`, one view merged from other repositories of its format. `npm` repositories are hosted. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
 | `immutableTags` | bool | `false` | Hosted OCI repositories only. Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
 | `helmIndex` | bool | `false` | Hosted OCI repositories only. Also serve the Helm charts pushed to the repository as a classic Helm chart repository at `/helm/<name>/`; see [Helm chart repositories](#helm-chart-repositories). |
@@ -328,7 +337,7 @@ Redirects are followed only to allowed hosts. flint refuses to connect to loopba
 
 ### Virtual repository settings
 
-A virtual repository serves one index or repository merged from an ordered list of hosted and proxy repositories of its format, so clients need a single URL. `pypi`, `generic`, `cargo`, `maven`, and `go` have virtual repositories; [PyPI](pypi.md#virtual-repositories), [Cargo](cargo.md#virtual-repositories), [Maven](maven.md#virtual-repositories), and [Go modules](go.md#virtual-repositories) describe how they merge, and [generic files](generic.md#virtual-repositories) how a generic one serves each path from the first member that has it.
+A virtual repository serves one view merged from an ordered list of hosted and proxy repositories of its format, so clients need a single URL. `oci`, `pypi`, `generic`, `cargo`, `maven`, and `go` have virtual repositories; [OCI virtual repositories](#oci-virtual-repositories), [PyPI](pypi.md#virtual-repositories), [Cargo](cargo.md#virtual-repositories), [Maven](maven.md#virtual-repositories), and [Go modules](go.md#virtual-repositories) describe how they merge, and [generic files](generic.md#virtual-repositories) how a generic one serves each path from the first member that has it.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -336,10 +345,10 @@ A virtual repository serves one index or repository merged from an ordered list 
 | `virtual.members[].name` | string | required | The member repository. |
 | `virtual.members[].include` | array of strings | all names | Package names, or patterns in which `*` matches any run of characters, that the member is consulted for. Without it, the member is consulted for every name. |
 | `virtual.members[].exclude` | array of strings | none | Package names or patterns the member is never consulted for, even if `include` matches them. |
-| `virtual.publishTo` | string | none | A hosted member that receives what clients publish to the virtual repository, so one URL serves both installing and publishing. A publish of a package whose name the member's `include` and `exclude` filters do not admit is refused with `403`, naming the member and the filter, since the virtual repository would not serve it. Without it, the virtual repository refuses uploads. |
-| `virtual.dependencyConfusionProtection` | bool | `true` | Once a hosted member owns a package name, never serve that name from a proxy member, so a package published upstream under the same name can never replace or mix with the first-party one. A hosted repository owns a name from the first upload of a file of it, or the first publish of a crate, also after everything is deleted. Only a hosted member whose filters admit a name can own it. |
+| `virtual.publishTo` | string | none | A hosted member that receives what clients publish to the virtual repository, so one URL serves both installing and publishing; for `oci`, pushes and deletes. A publish of a package whose name the member's `include` and `exclude` filters do not admit is refused with `403`, naming the member and the filter, since the virtual repository would not serve it. Without it, the virtual repository refuses uploads. |
+| `virtual.dependencyConfusionProtection` | bool | `true` | Once a hosted member owns a package name, never serve that name from a proxy member, so a package published upstream under the same name can never replace or mix with the first-party one. A hosted repository owns a name from the first upload of a file of it, or the first publish of a crate, also after everything is deleted; a hosted OCI repository owns an image name while it holds a tag of it or a manifest of it without a `subject`, other than the signature tag schema's `sha256-<digest>.sig`, `.att`, and `.sbom` tags and the manifests only they point to, so a signature or attestation pushed for an upstream image does not hide the image. Only a hosted member whose filters admit a name can own it. |
 
-Filters are compared with package names after the format's normalization, as clients may spell a name several ways: for PyPI, case and runs of `-`, `_`, and `.` do not matter, so `Acme_*` and `acme-*` are the same filter; for Cargo, case does not matter and `-` and `_` are equal; Go module paths are compared exactly, so `corp.example.com/*` covers every module below `corp.example.com/`. For generic files, a filter matches a file's path, exactly, such as `"internal/*"`. For Maven, the name is `groupId:artifactId`, with `:` and `.` as one separator, so `com.acme.*` matches every artifact of group `com.acme` and its subgroups. A pattern is 1 to 256 printable characters other than space.
+Filters are compared with package names after the format's normalization, as clients may spell a name several ways: for PyPI, case and runs of `-`, `_`, and `.` do not matter, so `Acme_*` and `acme-*` are the same filter; for Cargo, case does not matter and `-` and `_` are equal; Go module paths are compared exactly, so `corp.example.com/*` covers every module below `corp.example.com/`. For OCI, a package name is the image name below the repository, such as `team/app` or `library/nginx`, and is compared exactly. For generic files, a filter matches a file's path, exactly, such as `"internal/*"`. For Maven, the name is `groupId:artifactId`, with `:` and `.` as one separator, so `com.acme.*` matches every artifact of group `com.acme` and its subgroups. A pattern is 1 to 256 printable characters other than space.
 
 > **Recommendation: exclude your internal names from proxy members.**
 > Dependency-confusion protection covers a name only once a hosted member owns it. Until your first upload of a new internal package, or while the hosted member that has it is left out by its filters, a public package of the same name would be served from a proxy member. An `exclude` pattern for every internal prefix or scope on each proxy member, such as `"exclude": ["acme-*"]`, keeps those names out of the upstream for good.
@@ -404,6 +413,25 @@ Deletes hide content at once; the disk space is reclaimed later by [garbage coll
 An upload session expires 24 hours after it starts; flint checks for expired sessions hourly and removes their staged data.
 
 Every request is authenticated and authorized as [authentication](auth.md) describes.
+
+### OCI virtual repositories
+
+An OCI virtual repository puts a hosted repository and proxies of several registries behind one path: `registry.example.com/docker/team/app` and `registry.example.com/docker/library/nginx` pull from whichever member has the image, and pushes go to its `publishTo` member. With the [example](#example)'s `docker` repository, whose members are `docker-local`, `dockerhub`, and `ghcr`:
+
+```sh
+docker pull registry.example.com/docker/library/nginx:1.27     # from Docker Hub, through dockerhub
+docker pull registry.example.com/docker/terrabyteian/flint:v0.3.0  # from ghcr.io, which Docker Hub does not have
+docker push registry.example.com/docker/team/app:1.0           # to docker-local
+```
+
+- **Which member serves a pull.** The members whose filters admit the image name are asked in order, and the first that has what the request asks for serves it, as a pull from that member would. A tag is the first member's that has it. With `dependencyConfusionProtection`, once `docker-local` holds a tag of a name or a manifest of it without a `subject`, other than the signatures described under **Referrers** below, Docker Hub and ghcr.io are never asked about it, so an upstream image never shadows a first-party one; a name nobody pushed yet is not protected, which `exclude` filters on the proxy members cover. A proxy member that answers that it does not have a tag or manifest is not asked about it again for its `revalidateAfter`, so pulling a ghcr.io image through the example asks Docker Hub about it once per window, not on every pull; member filters keep a member from being asked at all, such as `"exclude": ["acme/*"]` on `dockerhub` for an organization's images on ghcr.io.
+- **Blobs and manifests by digest** are served only by a member that holds them under the image name: one that has them linked there or, for a proxy, whose upstream serves them under that name. A digest held under another name is not enough. Members that already hold the content are asked first, so cached content is served without asking an upstream.
+- **Tag listings** merge the members' tags, sorted, and paginate them as a hosted repository does. **Referrers** merge those of the members that hold the subject manifest or referrers of it, the first member's winning on a duplicate digest. A signature or attestation pushed through the virtual repository for an image Docker Hub serves, such as with `cosign sign` or `oras attach` using the referrers API, lands in `docker-local` without making `docker-local` own the name: the image is still pulled from Docker Hub, and the referrers API lists the signature with Docker Hub's referrers. The same holds for the signature tag schema that cosign uses by default: a tag `sha256-<64 lowercase hex>.sig`, `.att`, or `.sbom`, and a manifest without a `subject` that only such tags point to, do not make `docker-local` own the name, while any other tag, or a manifest without a `subject` that no such tag points to, does.
+- **Failing members.** A member that fails, such as a proxy whose upstream cannot be reached with nothing cached, is skipped as for any virtual repository, so an outage of one registry does not stop pulls from the others or of cached content.
+- **Pushes and deletes** go to `publishTo`: the image lands in `docker-local/team/app`, and is pulled as `docker/team/app` or `docker-local/team/app`. Without a `publishTo` they are refused with `405 UNSUPPORTED`, and a name its filters do not admit with `403 DENIED`. A blob's `HEAD`, which push clients send to learn whether to upload it, never asks an upstream, and a pushed manifest may use blobs and platform manifests another member holds under the same name, such as those of a base image pulled through the virtual repository, even once `docker-local` owns the name. So `crane copy docker.io/library/nginx:1.27 registry.example.com/docker/library/nginx:1.27` or `docker buildx imagetools create` can push a multi-platform image from Docker Hub, pushing only the index: the platform images, which the client checks for through the virtual repository, are linked into `docker-local` with their blobs, and blobs `dockerhub` has not cached yet are fetched into it first, as a pull would fetch them, as long as `dockerhub` still serves the name: with `dependencyConfusionProtection` on (the default), no upstream is ever asked about a name `docker-local` owns, so a push under one uses only what members have cached. With it off, the proxy members still serve such a name, so a push may fetch missing blobs through them, just as pulls of the name already ask them. If a blob cannot be fetched (Docker Hub is unreachable or does not have it, or `dockerhub` would not cache it, under disk pressure or over its `sizeLimit`), the push is refused with `400 MANIFEST_BLOB_UNKNOWN` naming the blob. Retagging an upstream image through the virtual repository with a client that pushes the manifest without checking for what it references, such as `crane tag`, needs the image pulled first, through the virtual repository (every platform, for a multi-platform image) or with `crane copy`: a platform image `dockerhub` has not cached, and the blobs of a single-platform image, are not fetched on a push, and the push reports them missing. A push refused for the request (an invalid tag, a digest that does not match the manifest) or for what the manifest references links nothing into `docker-local`, so it never makes `docker-local` own the name; only a push that fails afterwards, while storing the manifest, such as with the disk full, can leave the linked platform manifests behind.
+- **containerd mirrors.** A request with containerd's `ns` query parameter, which containerd adds to the requests it sends to a registry mirror, is answered only by the proxy members of the registry `ns` names, so one virtual repository can be the mirror of Docker Hub, ghcr.io, and quay.io at once; [containerd mirrors](containerd.md#one-mirror-for-several-registries) shows the setup.
+
+Pulling through a virtual repository needs the `read` role on it, or its `anonymousPull`; the members' own permissions are not consulted, so a client can pull `docker/library/nginx` without any role on `dockerhub`. Pushing needs `write` on the same name in `publishTo`, and `read` on the virtual repository (or its `anonymousPull`) for the pulls a push makes; deleting needs `delete` on the same name in `publishTo`. Docker clients get their token for the name they push, `docker/team/app`, and flint grants it for the role on `docker-local/team/app`.
 
 ### PyPI repositories
 

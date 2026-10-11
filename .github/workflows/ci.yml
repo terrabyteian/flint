@@ -149,6 +149,9 @@ jobs:
             "log": {"level": "debug"},
             "repositories": [
               {"name": "conformance", "format": "oci", "type": "hosted"},
+              {"name": "vconformance-local", "format": "oci", "type": "hosted"},
+              {"name": "vconformance", "format": "oci", "type": "virtual",
+               "virtual": {"members": ["vconformance-local"], "publishTo": "vconformance-local"}},
               {"name": "e2e", "format": "oci", "type": "hosted"}
             ],
             "auth": {
@@ -201,6 +204,25 @@ jobs:
           mkdir -p "$RUNNER_TEMP/conformance"
           cd "$RUNNER_TEMP/conformance"
           OCI_REPORT_DIR="$PWD" "$RUNNER_TEMP/conformance.test"
+      - name: Run the conformance suite against a virtual repository
+        # Pushes and deletes go to the publishTo member, pulls through
+        # the virtual repository.
+        env:
+          OCI_ROOT_URL: http://127.0.0.1:5000
+          OCI_USERNAME: admin
+          OCI_NAMESPACE: vconformance/myorg/myrepo
+          OCI_CROSSMOUNT_NAMESPACE: vconformance/myorg/other
+          OCI_TEST_PULL: "1"
+          OCI_TEST_PUSH: "1"
+          OCI_TEST_CONTENT_DISCOVERY: "1"
+          OCI_TEST_CONTENT_MANAGEMENT: "1"
+          OCI_AUTOMATIC_CROSSMOUNT: "0"
+          OCI_HIDE_SKIPPED_WORKFLOWS: "0"
+        run: |
+          export OCI_PASSWORD="$ADMIN_PASSWORD"
+          mkdir -p "$RUNNER_TEMP/conformance-virtual"
+          cd "$RUNNER_TEMP/conformance-virtual"
+          OCI_REPORT_DIR="$PWD" "$RUNNER_TEMP/conformance.test"
       - name: Install crane and oras
         run: |
           go install "github.com/google/go-containerregistry/cmd/crane@$CRANE_VERSION"
@@ -233,7 +255,9 @@ jobs:
         if: always()
         with:
           name: oci-conformance-report
-          path: ${{ runner.temp }}/conformance
+          path: |
+            ${{ runner.temp }}/conformance
+            ${{ runner.temp }}/conformance-virtual
           if-no-files-found: ignore
 
   helm:
@@ -316,6 +340,10 @@ jobs:
       - name: Start flint
         run: |
           CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
           cat >"$RUNNER_TEMP/flint.json" <<JSON
           {
             "listen": "127.0.0.1:5000",
@@ -325,8 +353,15 @@ jobs:
               {"name": "dockerhub", "format": "oci", "type": "proxy", "anonymousPull": true,
                "proxy": {"url": "https://registry-1.docker.io", "revalidateAfter": "1s"}},
               {"name": "ghcr", "format": "oci", "type": "proxy", "anonymousPull": true,
-               "proxy": {"url": "https://ghcr.io", "revalidateAfter": "1s"}}
-            ]
+               "proxy": {"url": "https://ghcr.io", "revalidateAfter": "1s"}},
+              {"name": "docker-local", "format": "oci", "type": "hosted"},
+              {"name": "docker", "format": "oci", "type": "virtual", "anonymousPull": true,
+               "virtual": {"members": ["docker-local", "dockerhub", "ghcr"], "publishTo": "docker-local"}}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [{"repositories": ["docker-local"], "role": "write", "groups": ["ci"]}]
+            }
           }
           JSON
           "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
@@ -335,8 +370,21 @@ jobs:
             curl -fsS http://127.0.0.1:5000/readyz && break
             sleep 0.2
           done
+      - name: Create a CI user
+        # With write on the hosted member only: pushing through the
+        # virtual repository needs no role on it.
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          echo "E2E_PASSWORD=$bot_password" >>"$GITHUB_ENV"
       - name: Pull through the proxies with crane, docker, and containerd
         run: E2E_STATE_DIR="$RUNNER_TEMP/e2e-proxy" scripts/e2e-proxy.sh online 127.0.0.1:5000 dockerhub ghcr
+      - name: Push and pull through the virtual repository with crane, docker, and containerd
+        env:
+          E2E_USERNAME: ci-bot
+        run: E2E_STATE_DIR="$RUNNER_TEMP/e2e-virtual" scripts/e2e-virtual.sh online 127.0.0.1:5000 docker docker-local dockerhub ghcr
       - name: Restart flint with its upstreams unreachable
         run: |
           pid=$(cat "$RUNNER_TEMP/flint.pid")
@@ -351,6 +399,10 @@ jobs:
           done
       - name: Pull again from the cache
         run: E2E_STATE_DIR="$RUNNER_TEMP/e2e-proxy" scripts/e2e-proxy.sh offline 127.0.0.1:5000 dockerhub ghcr
+      - name: Pull again through the virtual repository
+        env:
+          E2E_USERNAME: ci-bot
+        run: E2E_STATE_DIR="$RUNNER_TEMP/e2e-virtual" scripts/e2e-virtual.sh offline 127.0.0.1:5000 docker docker-local dockerhub ghcr
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"

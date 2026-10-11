@@ -513,6 +513,17 @@ func (s *Service) Allowed(r *http.Request, repo string, actions ...string) bool 
 	return s.docker.Allowed(r, repo, actions...)
 }
 
+// AuthorizeVirtual is Authorize for a path within a virtual repository,
+// with Authorizer.AuthorizeVirtual's rule: pulling needs read on the
+// virtual repository, and pushing and deleting need write and delete on
+// publishTo, the same path within its publishTo member. The challenge
+// names the virtual repository's path, the scope Docker clients ask the
+// token service for, which grants a push on it for the role on
+// publishTo.
+func (s *Service) AuthorizeVirtual(w http.ResponseWriter, r *http.Request, virtual, publishTo string, actions ...string) bool {
+	return s.docker.AuthorizeVirtual(w, r, virtual, publishTo, actions...)
+}
+
 // Permit reports, as an HTTP status, whether the request's credentials,
 // or their absence, allow every action on repository repo, for clients
 // that authenticate with basic credentials on every request, such as

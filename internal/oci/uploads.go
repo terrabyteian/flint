@@ -14,11 +14,11 @@ import (
 )
 
 func uploadLocation(rn *repoName, id string) string {
-	return "/v2/" + rn.full + "/blobs/uploads/" + id
+	return "/v2/" + rn.path() + "/blobs/uploads/" + id
 }
 
 func blobLocation(rn *repoName, d blob.Digest) string {
-	return "/v2/" + rn.full + "/blobs/" + d.String()
+	return "/v2/" + rn.path() + "/blobs/" + d.String()
 }
 
 // writeUploadState answers with an upload's location and staged range.
@@ -112,7 +112,9 @@ func (h *Handler) startUpload(w http.ResponseWriter, r *http.Request, rn *repoNa
 // data. It reports whether it answered the request; if not, the caller
 // falls back to a normal upload. That happens when from is absent or not
 // readable by the caller, the blob is not linked there, or garbage
-// collection is reclaiming it.
+// collection is reclaiming it. A name in a virtual repository is linked
+// from the first member that may serve the name and links the blob
+// there.
 func (h *Handler) mount(w http.ResponseWriter, r *http.Request, rn *repoName, mount, from string) bool {
 	d, err := blob.ParseDigest(mount)
 	if err != nil || from == "" {
@@ -122,19 +124,29 @@ func (h *Handler) mount(w http.ResponseWriter, r *http.Request, rn *repoName, mo
 	if err != nil || !h.auth.Authorize(discardWriter{}, r, src.full, ActionPull) {
 		return false
 	}
+	srcs := []*repoName{src}
+	if src.cfg.virtual != nil {
+		srcs = srcs[:0]
+		for _, m := range h.sourcesOf(src) {
+			srcs = append(srcs, h.member(src, m.Name))
+		}
+	}
 	errNoSource := errors.New("not linked in the source")
 	err = h.commitLink(r.Context(), []blob.Digest{d}, func(v meta.View, b *meta.Batch) error {
-		rec, ok := v.Get(blobKey(src, d))
-		if !ok {
-			return errNoSource
+		for _, src := range srcs {
+			rec, ok := v.Get(blobKey(src, d))
+			if !ok {
+				continue
+			}
+			size, _, err := decodeBlobLink(rec.Value)
+			if err != nil {
+				return err
+			}
+			b.Put(blobKey(rn, d), encodeBlobLink(size, h.now()))
+			b.SetOrigin(h.origin(r, "oci.blob.mount", src.full+"@"+d.String()+" -> "+rn.full))
+			return nil
 		}
-		size, _, err := decodeBlobLink(rec.Value)
-		if err != nil {
-			return err
-		}
-		b.Put(blobKey(rn, d), encodeBlobLink(size, h.now()))
-		b.SetOrigin(h.origin(r, "oci.blob.mount", src.full+"@"+d.String()+" -> "+rn.full))
-		return nil
+		return errNoSource
 	}, h.statExists(r.Context(), d))
 	switch {
 	case err == nil:
