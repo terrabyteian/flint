@@ -51,6 +51,11 @@
   "backup": {
     "directory": "/var/backups/flint"
   },
+  "audit": {
+    "retention": {
+      "maxAge": "17520h"
+    }
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",

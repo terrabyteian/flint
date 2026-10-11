@@ -182,6 +182,8 @@ Request bodies are strict JSON: unknown fields are errors.
 | `DELETE /api/v1/tokens/{id}` | the owner, or admin | Revoke a token. |
 | `GET /api/v1/backup` | admin | Report the running backup and the last ones; see [backups](backup.md#the-admin-api). |
 | `POST /api/v1/backup` | admin | Start a backup. |
+| `GET /api/v1/audit` | admin | Query the [audit log](operations.md#audit-log). |
+| `GET /api/v1/audit/export` | admin | Export the audit log as JSON lines. |
 
 "admin" means the global admin role: an administrator authenticated with a password, or with a token created with `"admin": true`.
 Creating a token, creating or updating a user or its groups, and setting a password need a password, even for a token created with `"admin": true`, so a leaked token cannot mint longer-lived tokens or take over its owner's or anyone else's account.

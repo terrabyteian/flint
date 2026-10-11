@@ -92,7 +92,7 @@ The format packages translate protocol requests into blob and metadata operation
   meta/consumers/<name>        durable checkpoint of each registered log consumer
   auth/token-signing.key       Ed25519 key that signs the Docker token service's bearer tokens, generated on first start
   auth/url-signing.key         HMAC-SHA256 key that signs download URLs, generated on first start
-  audit/                       append-only audit stream of batch origins and touched keys, never values (M4)
+  audit/<seq>.audit            append-only audit stream of batch origins and touched keys, never values; segments named by first sequence number
   RESTORE-INCOMPLETE           present only while flint restore writes the directory; serve refuses to start while it exists
 ```
 
@@ -151,7 +151,7 @@ The store must meet these guarantees:
 2. At startup, a corrupted record followed by any intact record of a later group commit, or a gap in the log, is a startup error naming the segment and offset, never a silent truncation. Only a bad region confined to the final group-commit write may be truncated; as in any write-ahead log without a second fsync, rot confined to that last group cannot be told apart from an unsynced write.
 3. A log segment is deleted only once it is covered by the latest snapshot and by the checkpoint of every registered durable consumer (the audit log in M4, Raft replication later). The active segment is never deleted.
 4. On a log write or fsync failure the store rejects writes with a clear error, keeps serving reads from fsynced state, stays ready, and reports the fault through a metric and logs. A restart after fixing the cause recovers.
-5. The audit stream holds each batch's sequence number, commit time, origin (actor, action, target), and touched keys, never values.
+5. The audit stream holds each batch's sequence number, commit time, origin (actor, action, target, client address), and touched keys, never values.
 
 The garbage-collection guarantees are in [Cleanup and data safety](#cleanup-and-data-safety).
 The algorithms that meet these guarantees, including how recovery identifies the final group-commit write, are described in the `internal/meta` package documentation and proven by its crash tests.
@@ -283,6 +283,7 @@ type Origin struct {
 	Actor  string // user or token identity, or "system"
 	Action string // e.g. "oci.manifest.push"
 	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
+	Client string // the client's IP address for a change a request made, or ""
 }
 
 // Open opens or creates the store in dir (the data directory's meta/),
@@ -434,7 +435,7 @@ type CatalogAuthorizer interface {
 
 Deletes ask for `delete`, which only admins hold.
 A cross-repository mount asks, with a response writer it discards, whether the caller may pull from the source; if not, it falls back to a normal upload.
-`oci.Options.Actor` names the principal recorded in batch origins for the audit log.
+`oci.Options.Actor` names the principal recorded in batch origins for the audit log: `internal/auth` records the principal it admitted in the request's context, and names it as the user, the user and API token, or `anonymous`. Origins also record the client address, resolved through the trusted proxies, separately from the actor.
 
 ## Package layout
 
@@ -456,6 +457,7 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/gc` | Online mark-and-sweep garbage collection. |
 | `internal/backup` | Consistent, incremental backup to a directory; verify and restore. |
 | `internal/flock` | Exclusive file locks on the data and backup directories. |
+| `internal/audit` | Audit log: a durable log consumer writing batch origins and touched keys to its own stream, and the admin API that reads it. |
 | `internal/ui` | Server-rendered UI templates and static assets. |
 | `deploy/helm/flint` | Helm chart. |
 
@@ -552,7 +554,7 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - **Configuration.** One JSON file. Repositories and permissions declared in config are read-only through the API; repositories created through the API or UI are also allowed and live in the metadata store. Users and tokens are runtime data. The Helm chart renders YAML values to the JSON config.
 - **TLS.** Served from certificate files, reloaded when they change. flint is proxy-aware: forwarded headers are trusted only from a configured trusted-proxy list. Built-in ACME comes after v1.
 - **UI.** A small server-rendered UI (`html/template` plus hand-written JavaScript, no npm build chain) to browse repositories, tags, packages, layers, and signatures, and to manage one's own tokens. Administration is through the API and config.
-- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that writes one record per batch to its own append-only stream under `audit/`, never including operation values, so password hashes, token hashes, and other values never reach it (see the metadata store guarantees). The stream is retained separately (retention configurable, keep forever by default), so audit history never depends on log segment lifetime. OpenTelemetry is deferred.
+- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that writes one record per batch to its own append-only stream under `audit/`, never including operation values, so password hashes, token hashes, and other values never reach it (see the metadata store guarantees). It writes and fsyncs records before checkpointing, so the write-ahead log keeps every batch whose record may not be durable, and after a crash it resumes after its last durable record without losing or repeating one. The stream is retained separately (retention configurable by age and size, keep forever by default, deleting whole segments), so audit history never depends on log segment lifetime. Administrators query it, filtered by time, actor, action, and target, and export it as JSON lines through the admin API. OpenTelemetry is deferred.
 - **Releases.** Static binaries for linux and darwin on amd64 and arm64; a multi-arch `FROM scratch` image and a Helm chart on `ghcr.io/terrabyteian`; cosign signatures and an SBOM produced in CI. The chart lives in this repository. flint's own image and chart stay on ghcr.io permanently, so a broken flint can always be redeployed without depending on itself.
 
 ## Cleanup and data safety

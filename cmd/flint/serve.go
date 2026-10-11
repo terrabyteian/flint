@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/terrabyteian/flint/internal/audit"
 	"github.com/terrabyteian/flint/internal/auth"
 	"github.com/terrabyteian/flint/internal/backup"
 	"github.com/terrabyteian/flint/internal/blob"
@@ -92,20 +93,29 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		return err
 	}
 
-	srv, registry, backups, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
+	a, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
 	if err != nil {
 		return err
 	}
-	if backups != nil {
+	srv := a.srv
+	defer func() {
+		// The audit log writes the last batches' records before the
+		// metadata store closes.
+		if cerr := a.audit.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("closing the audit log: %w", cerr)
+		}
+	}()
+	if a.backups != nil {
 		// Cancel a running backup before the stores close.
-		defer backups.Close()
+		defer a.backups.Close()
 	}
-	// Expire abandoned uploads, and run the proxy repositories' upkeep,
-	// in the background until the stores close.
+	// Expire abandoned uploads, run the proxy repositories' upkeep, and
+	// keep the audit log current, in the background until the stores close.
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
 	var janitors sync.WaitGroup
-	janitors.Go(func() { registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
-	janitors.Go(func() { registry.RunProxy(janitorCtx) })
+	janitors.Go(func() { a.registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
+	janitors.Go(func() { a.registry.RunProxy(janitorCtx) })
+	janitors.Go(func() { a.audit.Run(janitorCtx) })
 	defer func() {
 		stopJanitor()
 		janitors.Wait()
@@ -137,12 +147,21 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	return nil
 }
 
+// app is a server and the parts of it that run in the background.
+type app struct {
+	srv      *server.Server
+	registry *oci.Handler
+	audit    *audit.Log
+	backups  *backup.Manager
+}
+
 // newServer builds the HTTP server and its metrics over open stores. The
 // format and auth packages register their routes, middleware, and
 // readiness checks on it here, using store and blobs. fsy is the data
-// directory's filesystem. The backup manager is nil unless backups are
-// configured; the caller closes it before the stores.
-func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, *backup.Manager, error) {
+// directory's filesystem. It opens the audit log, which the caller must
+// close before the metadata store. The backup manager is nil unless
+// backups are configured; the caller closes it before the stores.
+func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (_ *app, err error) {
 	reg := metrics.NewRegistry()
 	metrics.RegisterRuntime(reg, version)
 	registerStoreMetrics(reg, store)
@@ -161,8 +180,26 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	// the fault shows in flint_meta_store_poisoned and the logs.
 	srv, err := server.New(opts)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
+
+	auditLog, err := audit.Open(audit.Options{
+		Store:   store,
+		Dir:     filepath.Join(cfg.DataDir, "audit"),
+		FS:      fsy,
+		MaxAge:  cfg.Audit.Retention.MaxAge.Duration,
+		MaxSize: cfg.Audit.Retention.MaxSize.Bytes,
+		Logger:  logger,
+		Metrics: reg,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			auditLog.Close()
+		}
+	}()
 
 	authz, err := auth.New(auth.Options{
 		Store:   store,
@@ -173,18 +210,19 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Metrics: reg,
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if b := cfg.Auth.BootstrapAdmin; b != nil {
 		if _, err := authz.Bootstrap(ctx, b.Username, b.PasswordFile); err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
 	} else if ok, err := authz.HasAdmin(); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	} else if !ok {
 		logger.Warn("no administrator exists; set auth.bootstrapAdmin in the configuration to create one")
 	}
 	authz.Register(srv)
+	auditLog.Register(srv, authz.AdminHandler)
 
 	var space *upstream.Space
 	for _, r := range cfg.Repositories {
@@ -211,7 +249,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Space:          space,
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	registry.Register(srv)
 
@@ -227,11 +265,11 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 			Metrics:    reg,
 		})
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
 	}
 	backup.Register(srv, backups, authz.AdminHandler, authz.Actor)
-	return srv, registry, backups, nil
+	return &app{srv: srv, registry: registry, audit: auditLog, backups: backups}, nil
 }
 
 // blobReferences report the blobs every format package's records

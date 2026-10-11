@@ -29,7 +29,7 @@ cosign verify ghcr.io/terrabyteian/charts/flint:0.1.0 \
 
 - A **ConfigMap** holding `config.json`, rendered from the `config` value and mounted at `/etc/flint/config.json`. The pod restarts when it changes, because flint reads its configuration at startup.
 - A **StatefulSet** with one replica. flint locks its data directory, so the chart never runs two pods on one volume: an update stops the old pod before it starts the new one, which makes updates a short outage.
-- A **PersistentVolumeClaim** for `/var/lib/flint`, from the StatefulSet's claim template or `persistence.existingClaim`. Uninstalling the release keeps the claim; delete it yourself to delete the data.
+- A **PersistentVolumeClaim** for `/var/lib/flint`, from the StatefulSet's claim template or `persistence.existingClaim`. Uninstalling the release keeps the claim; delete it yourself to delete the data. The volume also holds the [audit log](operations.md#audit-log), kept forever unless `config.audit.retention` limits it.
 - A **Service** of type ClusterIP, NodePort, or LoadBalancer.
 - A **ServiceAccount** without an API token, since flint does not call the Kubernetes API.
 - Optionally a cert-manager **Certificate** and a **NetworkPolicy**.
