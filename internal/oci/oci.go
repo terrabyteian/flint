@@ -166,10 +166,9 @@ type Handler struct {
 	space         *upstream.Space
 	tagCalls      upstream.Group[*proxied]
 	manifestCalls upstream.Group[*proxied]
-	validatedMu   sync.Mutex
-	validated     map[string]time.Time // tag key: when the upstream last confirmed it
+	validated     *upstream.Freshness // by tag key: when the upstream last confirmed it
 	listings      listingCache
-	evictKick     chan struct{}
+	limits        *upstream.Limits
 
 	// The Helm view.
 	helmMu     sync.Mutex
@@ -179,8 +178,6 @@ type Handler struct {
 	proxyResults   *metrics.Counter
 	upstreamErrors *metrics.Counter
 	upstreamBytes  *metrics.Counter
-	evictions      *metrics.Counter
-	cachedBytes    *metrics.Gauge
 
 	// linkHook, if set, is called by every link batch after it read its
 	// view and before it checks that the blobs exist, so tests can
@@ -207,8 +204,6 @@ func New(opts Options) (*Handler, error) {
 		now:       opts.Now,
 		space:     opts.Space,
 		fetcher:   opts.Fetcher,
-		validated: map[string]time.Time{},
-		evictKick: make(chan struct{}, 1),
 		linkReads: map[string]time.Time{},
 		helmViews: map[string]*helmView{},
 	}
@@ -228,6 +223,7 @@ func New(opts Options) (*Handler, error) {
 	if h.actor == nil {
 		h.actor = clientActor
 	}
+	h.validated = upstream.NewFreshness(h.now)
 	upOpts := opts.Upstream
 	if upOpts.Logger == nil {
 		upOpts.Logger = h.log
@@ -275,8 +271,12 @@ func New(opts Options) (*Handler, error) {
 	h.proxyResults = pm.Requests
 	h.upstreamErrors = pm.UpstreamErrors
 	h.upstreamBytes = pm.UpstreamBytes
-	h.evictions = pm.Evictions
-	h.cachedBytes = pm.CachedBytes
+	h.limits = upstream.NewLimits(upstream.LimitsOptions{Meta: h.meta, Metrics: pm, Format: "oci", PulledKey: pulledKey,
+		EvictMore: func(v meta.View, b *meta.Batch, repo, key string, rec meta.Record) {
+			if strings.HasPrefix(key, nsManifest) {
+				evictManifestRefs(v, b, h.repos[repo], key, rec)
+			}
+		}, Evicted: func(keys []string) { h.forgetLinkReads(keys...) }, Now: h.now})
 	if err := h.loadTrackers(); err != nil {
 		return nil, err
 	}
@@ -288,17 +288,15 @@ func New(opts Options) (*Handler, error) {
 func (h *Handler) loadTrackers() error {
 	v := h.view()
 	defer v.Release()
-	for _, c := range h.trackers() {
-		if err := loadTracker(c, v); err != nil {
+	for _, rc := range h.repos {
+		if rc.proxy == nil || rc.proxy.cache == nil {
+			continue
+		}
+		c := rc.proxy.cache
+		if err := h.loadTracker(c, v); err != nil {
 			return fmt.Errorf("oci: loading the cache of proxy repository %s: %w", c.Repo(), err)
 		}
-		h.cachedBytes.With(c.Repo()).Set(float64(c.Size()))
-		if c.Size() > c.Limit() {
-			select {
-			case h.evictKick <- struct{}{}:
-			default:
-			}
-		}
+		h.limits.Add(c)
 	}
 	return nil
 }

@@ -12,13 +12,13 @@ import (
 //     tombstone references nothing;
 //   - a file or core-metadata file a proxy repository cached references
 //     its bytes;
-//   - a project page a proxy repository cached references the blob that
-//     holds it;
 //   - project, index, and name records, and pull times, reference
 //     nothing.
 //
 // Every function reads its record, so one that cannot be read makes a
-// run refuse to delete anything.
+// run refuse to delete anything. Project pages a proxy repository cached
+// are documents of the shared proxy cache, whose marker is
+// upstream.Marks.
 func GCMarker() gc.Marker {
 	return gc.Marker{
 		nsProject:  projectRefs,
@@ -26,7 +26,6 @@ func GCMarker() gc.Marker {
 		nsIndex:    emptyRefs,
 		nsName:     nameRefs,
 		nsMetadata: fileRefs,
-		nsPage:     pageRefs,
 		nsPulled:   pulledRefs,
 	}
 }
@@ -49,15 +48,6 @@ func fileRefs(_, value []byte) ([]blob.Digest, error) {
 		return nil, err
 	}
 	return nonZero(f.Digest, f.Meta), nil
-}
-
-// pageRefs returns the blob that holds a cached project page.
-func pageRefs(_, value []byte) ([]blob.Digest, error) {
-	p, err := decodePage(value)
-	if err != nil {
-		return nil, err
-	}
-	return nonZero(p.Digest), nil
 }
 
 func projectRefs(_, value []byte) ([]blob.Digest, error) {

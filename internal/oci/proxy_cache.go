@@ -3,10 +3,7 @@ package oci
 import (
 	"bytes"
 	"context"
-	"errors"
-	"slices"
 	"strings"
-	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
 	"github.com/terrabyteian/flint/internal/meta"
@@ -33,15 +30,8 @@ import (
 // bytes stay in the blob store, as for any delete, until garbage
 // collection reclaims what nothing links any more.
 
-// Size-limit intervals and batch sizes.
-const (
-	// PullFlushInterval is how often last-pull times are persisted.
-	PullFlushInterval = time.Minute
-	// pullBatch bounds the pull times persisted in one batch.
-	pullBatch = 1000
-	// evictBatch bounds the items evicted in one batch.
-	evictBatch = 100
-)
+// PullFlushInterval is how often last-pull times are persisted.
+const PullFlushInterval = upstream.PullFlushInterval
 
 const nsPulled = "oci\x00pulled\x00"
 
@@ -53,10 +43,11 @@ func pulledKey(key []byte) []byte {
 
 // loadTracker loads the cached items of c's repository, and their pull
 // times, from v.
-func loadTracker(c *upstream.CacheTracker, v meta.View) error {
+func (h *Handler) loadTracker(c *upstream.CacheTracker, v meta.View) error {
 	var failure error
 	for _, ns := range []string{nsBlob, nsManifest} {
-		v.Scan([]byte(ns+c.Repo()+"\x00"), nil, func(key []byte, rec meta.Record) bool {
+		pfx := []byte(ns + c.Repo() + "\x00")
+		v.Scan(pfx, nil, func(key []byte, rec meta.Record) bool {
 			var size int64
 			if ns == nsBlob {
 				size, _, failure = decodeBlobLink(rec.Value)
@@ -72,19 +63,9 @@ func loadTracker(c *upstream.CacheTracker, v meta.View) error {
 			c.Load(string(key), size)
 			return true
 		})
-		if failure != nil {
-			return failure
+		if failure == nil {
+			failure = h.limits.LoadPulled(c, v, pfx)
 		}
-		pfx := pulledKey([]byte(ns + c.Repo() + "\x00"))
-		v.Scan(pfx, nil, func(key []byte, rec meta.Record) bool {
-			d := newDec(rec.Value)
-			t := d.varint()
-			if failure = d.done(); failure != nil {
-				return false
-			}
-			c.LoadPulled("oci\x00"+string(key[len(nsPulled):]), t)
-			return true
-		})
 		if failure != nil {
 			return failure
 		}
@@ -95,125 +76,22 @@ func loadTracker(c *upstream.CacheTracker, v meta.View) error {
 // track records content cached in rn's repository, and asks for an
 // eviction if it is now over its size limit.
 func (h *Handler) track(rn *repoName, key []byte, size int64) {
-	c := rn.cfg.proxy.cache
-	if c == nil {
-		return
-	}
-	over := c.Add(key, size, h.now())
-	h.cachedBytes.With(c.Repo()).Set(float64(c.Size()))
-	if over {
-		select {
-		case h.evictKick <- struct{}{}:
-		default:
-		}
-	}
+	h.limits.Track(rn.cfg.proxy.cache, key, size)
 }
 
 // touch records a pull of cached content in rn's repository.
 func (h *Handler) touch(rn *repoName, key []byte) {
-	if c := rn.cfg.proxy.cache; c != nil {
-		c.Touch(key, h.now())
-	}
-}
-
-// trackers returns the size-limited proxy repositories' trackers.
-func (h *Handler) trackers() []*upstream.CacheTracker {
-	var out []*upstream.CacheTracker
-	for _, rc := range h.repos {
-		if rc.proxy != nil && rc.proxy.cache != nil {
-			out = append(out, rc.proxy.cache)
-		}
-	}
-	slices.SortFunc(out, func(a, b *upstream.CacheTracker) int { return strings.Compare(a.Repo(), b.Repo()) })
-	return out
+	h.limits.Touch(rn.cfg.proxy.cache, key)
 }
 
 // FlushPullTimes persists the last-pull times recorded since the last
 // flush.
-func (h *Handler) FlushPullTimes(ctx context.Context) error {
-	for _, c := range h.trackers() {
-		dirty := c.TakeDirty()
-		keys := make([]string, 0, len(dirty))
-		for k := range dirty {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		for len(keys) > 0 {
-			chunk := keys[:min(len(keys), pullBatch)]
-			keys = keys[len(chunk):]
-			var b meta.Batch
-			for _, k := range chunk {
-				b.Put(pulledKey([]byte(k)), newEnc().varint(dirty[k]))
-			}
-			b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: "oci.proxy.pulled", Target: c.Repo()})
-			if err := h.commit(ctx, &b); err != nil {
-				c.MarkDirty(chunk)
-				c.MarkDirty(keys)
-				return err
-			}
-		}
-	}
-	return nil
-}
+func (h *Handler) FlushPullTimes(ctx context.Context) error { return h.limits.Flush(ctx) }
 
 // Evict evicts the least recently pulled content of every size-limited
-// proxy repository that exceeds its limit.
-func (h *Handler) Evict(ctx context.Context) error {
-	for _, c := range h.trackers() {
-		victims := c.Victims()
-		for len(victims) > 0 {
-			chunk := victims[:min(len(victims), evictBatch)]
-			victims = victims[len(chunk):]
-			if err := h.evict(ctx, c, chunk); err != nil {
-				return err
-			}
-		}
-		h.cachedBytes.With(c.Repo()).Set(float64(c.Size()))
-	}
-	return nil
-}
-
-// evict removes cached items of c's repository in one batch. Each item
-// must still be at the version read, so an item cached again meanwhile
-// is not removed behind the tracker's back; such a conflict fails the
-// batch, and the next eviction run decides again.
-func (h *Handler) evict(ctx context.Context, c *upstream.CacheTracker, keys []string) error {
-	var b meta.Batch
-	var gone []string
-	v := h.view()
-	for _, k := range keys {
-		key := []byte(k)
-		rec, ok := v.Get(key)
-		if !ok {
-			gone = append(gone, k)
-			continue
-		}
-		b.Require(key, rec.Version)
-		b.Delete(key)
-		b.Delete(pulledKey(key))
-		if strings.HasPrefix(k, nsManifest) {
-			evictManifestRefs(v, &b, h.repos[c.Repo()], k, rec)
-		}
-	}
-	v.Release()
-	c.Remove(gone)
-	h.forgetLinkReads(gone...)
-	if len(gone) == len(keys) {
-		return nil
-	}
-	b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: "oci.proxy.evict",
-		Target: c.Repo() + ": least recently pulled content over the size limit"})
-	if err := h.commit(ctx, &b); err != nil {
-		if errors.Is(err, meta.ErrConflict) {
-			return nil
-		}
-		return err
-	}
-	c.Remove(keys)
-	h.forgetLinkReads(keys...)
-	h.evictions.With(c.Repo()).Add(float64(len(keys) - len(gone)))
-	return nil
-}
+// proxy repository that exceeds its limit: a blob link, or a manifest
+// record with the tags that point to it and its referrers entry.
+func (h *Handler) Evict(ctx context.Context) error { return h.limits.Evict(ctx) }
 
 // evictManifestRefs adds to b the deletion of the tags that point to the
 // manifest record at key, and of its referrers entry.
@@ -250,26 +128,5 @@ func (h *Handler) RunProxy(ctx context.Context) {
 	if !h.hasProxy {
 		return
 	}
-	t := time.NewTicker(PullFlushInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			fctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := h.FlushPullTimes(fctx); err != nil {
-				h.log.Warn("persisting proxy pull times", "err", err)
-			}
-			cancel()
-			return
-		case <-t.C:
-			if err := h.FlushPullTimes(ctx); err != nil && ctx.Err() == nil {
-				h.log.Warn("persisting proxy pull times", "err", err)
-			}
-			h.pruneValidated()
-		case <-h.evictKick:
-			if err := h.Evict(ctx); err != nil && ctx.Err() == nil {
-				h.log.Warn("evicting proxy content over its size limit", "err", err)
-			}
-		}
-	}
+	h.limits.Run(ctx, func(msg string, err error) { h.log.Warn(msg, "err", err) }, h.pruneValidated)
 }

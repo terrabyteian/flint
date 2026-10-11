@@ -656,7 +656,7 @@ func TestProxySizeLimit(t *testing.T) {
 	// Pulling "a" again makes "b" the least recently pulled.
 	pe.get("/v2/small/app/blobs/"+layers[0], data[0])
 	select {
-	case <-pe.h.evictKick:
+	case <-pe.h.limits.Kicked():
 	default:
 		t.Error("going over the limit did not ask for an eviction")
 	}
@@ -710,7 +710,7 @@ func TestProxySizeLimitPersistence(t *testing.T) {
 		t.Errorf("reloaded size %d, want %d", got, pe.h.repos["small"].proxy.cache.Size())
 	}
 	select {
-	case <-h.evictKick:
+	case <-h.limits.Kicked():
 	default:
 		t.Error("starting over the limit did not ask for an eviction")
 	}

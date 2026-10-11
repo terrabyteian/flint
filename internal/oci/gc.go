@@ -158,9 +158,7 @@ func (p linkPruner) Remove(cutoff time.Time, es []gc.Expired, remove func([]gc.E
 		delete(h.linkReads, string(e.Key))
 		repo, _, _ := strings.Cut(string(e.Key[len(nsBlob):]), "\x00")
 		if rc := h.repos[repo]; rc != nil && rc.proxy != nil && rc.proxy.cache != nil {
-			c := rc.proxy.cache
-			c.Remove([]string{string(e.Key)})
-			h.cachedBytes.With(c.Repo()).Set(float64(c.Size()))
+			h.limits.Remove(rc.proxy.cache, []string{string(e.Key)})
 		}
 	}
 	return err

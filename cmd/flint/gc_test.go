@@ -8,15 +8,22 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/config"
+	"github.com/terrabyteian/flint/internal/fsys"
 	"github.com/terrabyteian/flint/internal/gc"
+	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // registryImage is an image pushed through the registry API.
@@ -322,5 +329,61 @@ func TestFormatBytes(t *testing.T) {
 		if got := formatBytes(n); got != want {
 			t.Errorf("formatBytes(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+// TestGCProxyCache checks that flint serve registers the shared proxy
+// cache's records with the garbage collector: a run on a server whose
+// PyPI proxy repository cached a project page succeeds instead of
+// refusing to delete anything.
+func TestGCProxyCache(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/simple/pkg/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, `<!DOCTYPE html><html><body><a href="/files/pkg-1.0.tar.gz">pkg-1.0.tar.gz</a></body></html>`)
+	}))
+	defer up.Close()
+	m := fsys.NewMem()
+	store, err := meta.Open("/data/meta", meta.Options{FS: m, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	blobs, err := blob.NewFS("/data", blob.Options{FS: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse([]byte(`{"dataDir": "/data", "repositories": [{"name": "pypi-remote", "format": "pypi",
+		"type": "proxy", "anonymousPull": true, "proxy": {"url": "` + up.URL + `/simple/"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := newServer(context.Background(), cfg, slog.New(slog.DiscardHandler), m, store, blobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.audit.Close()
+	defer a.gc.Close()
+
+	rec := httptest.NewRecorder()
+	a.srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/pypi/pypi-remote/simple/pkg/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project page = %d %s", rec.Code, rec.Body)
+	}
+	v := store.View()
+	_, cached := v.Get(upstream.DocKey("pypi-remote", "pkg"))
+	v.Release()
+	if !cached {
+		t.Fatal("the project page is not in the proxy cache")
+	}
+	rep, err := a.gc.Run(context.Background(), gc.RunOptions{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.State != gc.StateSucceeded {
+		t.Errorf("run = %s, refused %q", rep.State, rep.Refused)
 	}
 }

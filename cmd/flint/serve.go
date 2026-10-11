@@ -125,6 +125,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	janitors.Go(func() { a.oci.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
 	janitors.Go(func() { a.oci.RunProxy(janitorCtx) })
 	janitors.Go(func() { a.pypi.RunProxy(janitorCtx) })
+	janitors.Go(func() { a.docs.Run(janitorCtx, a.revalidate) })
 	if a.space != nil {
 		janitors.Go(func() { a.space.Run(janitorCtx, upstream.SpaceCheckInterval) })
 	}
@@ -163,8 +164,8 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 }
 
 // app is a server and the parts of it that run in the background: the
-// package format handlers, the free-space watcher their proxy
-// repositories share, the audit log, and the backup manager.
+// package format handlers, the free-space watcher and document cache
+// their proxy repositories share, the audit log, and the backup manager.
 type app struct {
 	srv     *server.Server
 	oci     *oci.Handler
@@ -173,6 +174,10 @@ type app struct {
 	audit   *audit.Log
 	backups *backup.Manager // nil unless backups are configured
 	gc      *gc.Collector
+	// docs caches the documents proxy repositories of every format
+	// fetch, and revalidate is the longest revalidation window of any.
+	docs       *upstream.DocCache
+	revalidate time.Duration
 }
 
 // newServer builds the HTTP server and its metrics over open stores. The
@@ -247,20 +252,26 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	auditLog.Register(srv, authz.AdminHandler)
 
 	var space *upstream.Space
+	var revalidate time.Duration
 	for _, r := range cfg.Repositories {
-		if r.Type == config.TypeProxy {
+		if r.Type != config.TypeProxy {
+			continue
+		}
+		revalidate = max(revalidate, r.Proxy.RevalidateAfter.Duration)
+		if space == nil {
 			space = upstream.NewSpace(upstream.SpaceOptions{
 				Path:    cfg.DataDir,
 				MinFree: cfg.ProxyCache.MinFreeSpace.Of,
 				Logger:  logger,
 			})
-			break
 		}
 	}
-	// Proxy repositories of every format share one fetcher and one set of
-	// proxy metrics.
+	// Proxy repositories of every format share one fetcher, one document
+	// cache, and one set of proxy metrics.
 	fetcher := upstream.NewFetcher(blobs, 0)
 	proxyMetrics := upstream.NewMetrics(reg, fetcher, space)
+	docs := upstream.NewDocCache(upstream.DocCacheOptions{Meta: store, Blobs: blobs, Space: space,
+		Metrics: proxyMetrics, Logger: logger})
 	upOpts := upstream.Options{UserAgent: "flint/" + version}
 	registry, err := oci.New(oci.Options{
 		Meta:         store,
@@ -295,6 +306,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Now:          now,
 		Fetcher:      fetcher,
 		ProxyMetrics: proxyMetrics,
+		Docs:         docs,
 	})
 	if err != nil {
 		return nil, err
@@ -321,7 +333,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	collector, err := gc.New(gc.Options{
 		Meta:        store,
 		Blobs:       blobs,
-		Markers:     []gc.Marker{oci.GCMarker(), pypi.GCMarker(), auth.GCMarker()},
+		Markers:     []gc.Marker{oci.GCMarker(), pypi.GCMarker(), upstream.Marks, auth.GCMarker()},
 		Pruners:     []gc.Pruner{registry.GCPruner()},
 		GracePeriod: cfg.GC.GracePeriod.Duration,
 		Interval:    cfg.GC.Interval.Duration,
@@ -334,12 +346,14 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	}
 	authz.HandleAdmin(srv, gc.StatusPattern, collector.HandleStatus)
 	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
-	return &app{srv: srv, oci: registry, pypi: index, space: space, audit: auditLog, backups: backups, gc: collector}, nil
+	return &app{srv: srv, oci: registry, pypi: index, space: space, audit: auditLog, backups: backups, gc: collector,
+		docs: docs, revalidate: revalidate}, nil
 }
 
-// blobReferences report the blobs every format package's records
-// reference, for backups to check that they hold them all.
-var blobReferences = []backup.References{oci.References, pypi.References}
+// blobReferences report the blobs every format package's records, and
+// the proxy cache the formats share, reference, for backups to check that
+// they hold them all.
+var blobReferences = []backup.References{oci.References, pypi.References, upstream.References}
 
 // registerStoreMetrics exposes the metadata store's counters and health.
 func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {

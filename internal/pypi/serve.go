@@ -14,6 +14,7 @@ import (
 	"github.com/terrabyteian/flint/internal/blob"
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // serveIndex serves GET /pypi/<repo>/simple/: every project the
@@ -38,11 +39,10 @@ func (h *Handler) projectNames(v meta.View, rp *repository) []string {
 	var out []string
 	switch rp.typ {
 	case config.TypeHosted, config.TypeProxy:
-		ns := nsProject
+		pfx := key(nsProject, rp.name, "")
 		if rp.typ == config.TypeProxy {
-			ns = nsPage
+			pfx = upstream.DocKey(rp.name, "") // the cached project pages
 		}
-		pfx := key(ns, rp.name, "")
 		v.Scan(pfx, nil, func(k []byte, _ meta.Record) bool {
 			project := string(k[len(pfx):])
 			if rp.typ == config.TypeHosted && !hasFiles(v, rp.name, project) {

@@ -9,6 +9,7 @@ import (
 	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/gc/gctest"
 	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // TestGCMarker writes every kind of PyPI record and checks that the
@@ -36,21 +37,21 @@ func TestGCMarker(t *testing.T) {
 
 	v := e.meta.View()
 	defer v.Release()
-	for _, ns := range []string{nsProject, nsFile, nsIndex, nsName, nsMetadata, nsPage, nsPulled + "file\x00", nsPulled + "metadata\x00"} {
+	for _, ns := range []string{nsProject, nsFile, nsIndex, nsName, nsMetadata, nsPulled + "file\x00", nsPulled + "metadata\x00"} {
 		found := false
 		v.Scan([]byte(ns), nil, func([]byte, meta.Record) bool { found = true; return false })
 		if !found {
 			t.Errorf("the test writes no record under %q", ns)
 		}
 	}
-	rec, _ := v.Get(pageKey("remote", "up"))
-	page, err := decodePage(rec.Value)
+	rec, _ := v.Get(upstream.DocKey("remote", "up"))
+	page, err := upstream.DecodeDocRecord(rec.Value)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	got := map[blob.Digest]bool{}
-	for _, d := range gctest.CheckStored(t, e.meta, e.blobs, GCMarker()) {
+	for _, d := range gctest.CheckStored(t, e.meta, e.blobs, GCMarker(), upstream.Marks) {
 		got[d] = true
 	}
 	want := []blob.Digest{blob.FromBytes(kept.body), blob.FromBytes(kept.metadata),

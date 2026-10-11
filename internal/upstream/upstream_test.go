@@ -788,7 +788,8 @@ func TestGetURL(t *testing.T) {
 		io.WriteString(w, "file")
 	}))
 	defer files.Close()
-	c := newClient(t, index.URL+"/simple/", upstream.Options{Username: "me", PasswordFile: pwFile})
+	c := newClient(t, index.URL+"/simple/", upstream.Options{Username: "me", PasswordFile: pwFile,
+		Policy: upstream.Policy{AllowHosts: []string{strings.TrimPrefix(files.URL, "http://")}}})
 	get := func(u string) (string, error) {
 		resp, err := c.GetURL(ctx, u, nil)
 		if err != nil {

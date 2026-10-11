@@ -13,6 +13,7 @@ import (
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/server"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // The JSON API, /pypi/<repo>/pypi/<project>/json, follows PyPI's: the
@@ -383,7 +384,7 @@ func (h *Handler) serialIn(v meta.View, rp *repository, project string) int64 {
 			return true
 		})
 	case config.TypeProxy:
-		if rec, ok := v.Get(pageKey(rp.name, project)); ok {
+		if rec, ok := v.Get(upstream.DocKey(rp.name, project)); ok {
 			s = rec.Version
 		}
 	case config.TypeVirtual:
