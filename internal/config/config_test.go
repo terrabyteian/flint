@@ -48,7 +48,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 18 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 19 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -84,6 +84,9 @@ func TestExampleConfig(t *testing.T) {
 	if g := c.Repositories[16].Go; c.Repositories[15].Format != FormatGo || g == nil || len(g.NoSumCheck) != 1 ||
 		GoSumDBKey(g) != sumdb.DefaultKey || c.Repositories[17].Virtual == nil || len(c.Repositories[17].Virtual.Members[0].Include) != 1 {
 		t.Errorf("unexpected Go repositories: %+v", c.Repositories[15:])
+	}
+	if r := c.Repositories[18]; r.Format != FormatOCI || r.Virtual == nil || len(r.Virtual.Members) != 3 || r.Virtual.PublishTo != "docker-local" {
+		t.Errorf("unexpected OCI virtual repository: %+v", r)
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
@@ -218,8 +221,16 @@ func TestValidation(t *testing.T) {
 		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "nuget", "type": "group"}]}`,
 			[]string{`repositories[0].format: "nuget" is not supported`, `repositories[0].type: "group" is not supported`}},
 		{"oci virtual", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "oci", "type": "hosted"},
-			{"name": "a", "format": "oci", "type": "virtual", "virtual": {"members": ["h"]}}]}`,
-			[]string{`repositories[1].type: "virtual" is not supported for format oci`}},
+			{"name": "dockerhub", "format": "oci", "type": "proxy", "proxy": {"url": "https://registry-1.docker.io"}},
+			{"name": "a", "format": "oci", "type": "virtual", "anonymousPull": true, "virtual": {"publishTo": "h",
+			 "members": [{"name": "h", "include": ["team/*"]}, {"name": "dockerhub", "exclude": ["team/*"]}]}}]}`, nil},
+		{"oci virtual problems", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "oci", "type": "hosted"},
+			{"name": "p", "format": "pypi", "type": "hosted"},
+			{"name": "a", "format": "oci", "type": "virtual", "immutableTags": true, "helmIndex": true,
+			 "virtual": {"members": ["h", "p"]}}]}`,
+			[]string{"repositories[2].immutableTags: is only allowed for a hosted OCI repository",
+				"repositories[2].helmIndex: is only allowed for a hosted OCI repository",
+				`repositories[2].virtual.members[1]: "p" is a pypi repository, not oci`}},
 		{"pypi good", `{"dataDir": "/d", "repositories": [
 			{"name": "pypi-local", "format": "pypi", "type": "hosted"},
 			{"name": "pypi", "format": "pypi", "type": "proxy", "anonymousPull": true,

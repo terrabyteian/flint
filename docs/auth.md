@@ -192,6 +192,8 @@ Deleting the file invalidates every signed URL at the next start.
 A virtual repository serves a merged view of its member repositories.
 Reading through it needs `read` on the virtual repository only, since the view is what its administrator composed: a client needs no role on the members.
 Publishing through it needs `write`, and deleting needs `delete`, on the member it publishes to (`publishTo`); a virtual repository without one refuses publishes.
+For an OCI virtual repository, the role that counts is the one on the same image name in `publishTo`: pushing `docker/team/app` through a virtual repository `docker` that publishes to `docker-local` needs `write` on `docker-local/team/app`, and `read` on `docker/team/app` for the pulls a push makes.
+Docker clients ask the [token endpoint](#docker-clients) for a token for the name they push, `repository:docker/team/app:pull,push`, and flint grants the push for the role on `docker-local/team/app`; a token for `docker-local/team/app` does not cover the virtual repository's name.
 
 ### Generic files repositories
 

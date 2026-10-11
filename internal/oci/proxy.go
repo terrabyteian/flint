@@ -123,6 +123,22 @@ func (p *proxyRepo) upstreamName(name string) string {
 	return name
 }
 
+// mirrors reports whether the proxy's upstream is the registry ns, as
+// containerd names the registry of an image in the ns parameter of a
+// mirror request: the upstream's host, or for Docker Hub, docker.io or
+// another host Docker Hub goes by.
+func (p *proxyRepo) mirrors(ns string) bool {
+	if p.dockerHub {
+		switch strings.ToLower(ns) {
+		case "docker.io", "index.docker.io", dockerHubHost:
+			return true
+		}
+		return false
+	}
+	host := p.client.Host()
+	return strings.EqualFold(ns, host) || strings.EqualFold(ns, strings.TrimSuffix(host, ":443"))
+}
+
 // proxied is a manifest resolved through a proxy repository.
 type proxied struct {
 	d      blob.Digest
@@ -317,11 +333,46 @@ func (h *Handler) linkProxyBlob(ctx context.Context, actor string, rn *repoName,
 // for the same blob, or passes it through if it cannot be cached.
 func (h *Handler) fetchBlob(w http.ResponseWriter, r *http.Request, rn *repoName, d blob.Digest) {
 	ctx := r.Context()
+	fe, err := h.startBlobFetch(r, rn, d)
+	if err != nil {
+		h.passThroughBlob(w, r, rn, d)
+		return
+	}
+	defer fe.Release()
+	size, err := fe.Wait(ctx)
+	if errors.Is(err, errPassThrough) {
+		h.passThroughBlob(w, r, rn, d)
+		return
+	}
+	if err != nil {
+		// The fetch logs and counts its failure once, however many
+		// clients wait on it.
+		if ctx.Err() == nil {
+			err = h.upstreamError(rn, err, blobUnknownError(d))
+		}
+		h.writeError(w, r, err)
+		return
+	}
+	setBlobHeaders(w, d, size)
+	w.WriteHeader(http.StatusOK)
+	if _, err := fe.Stream(ctx, w); err != nil {
+		// Part of the blob is out: cut the connection, so the client
+		// cannot take it for the whole blob. The fetch logs its failure.
+		panic(http.ErrAbortHandler)
+	}
+	h.proxyResults.With(rn.repo, resultFetched).Inc()
+}
+
+// startBlobFetch starts, or joins, the fetch of blob d from rn's upstream
+// into the cache, which links it in rn once committed. It returns
+// errPassThrough if the blob store is under pressure, and the fetch fails
+// with it if the blob is not to be cached. The caller must release the
+// fetch.
+func (h *Handler) startBlobFetch(r *http.Request, rn *repoName, d blob.Digest) (*upstream.Fetch, error) {
 	p := rn.cfg.proxy
 	up := p.upstreamName(rn.name)
 	if h.space != nil && h.space.Pressure() {
-		h.passThroughBlob(w, r, rn, d)
-		return
+		return nil, errPassThrough
 	}
 	actor := h.actor(r)
 	var release func()
@@ -359,29 +410,48 @@ func (h *Handler) fetchBlob(w http.ResponseWriter, r *http.Request, rn *repoName
 		}
 	}
 	fe, _ := h.fetcher.Fetch("oci\x00"+rn.repo+"\x00"+up+"\x00"+d.String(), d, open, done)
-	defer fe.Release()
-	size, err := fe.Wait(ctx)
-	if errors.Is(err, errPassThrough) {
-		h.passThroughBlob(w, r, rn, d)
-		return
+	return fe, nil
+}
+
+// cacheBlob makes proxy repository name rn hold blob d, as a pull of it
+// would: a blob stored already is linked once the upstream confirms that
+// rn has it, and any other is fetched from the upstream into the cache.
+// It fails if the upstream cannot supply the blob or it is not to be
+// cached, under disk pressure or over the size limit.
+func (h *Handler) cacheBlob(r *http.Request, rn *repoName, d blob.Digest) error {
+	ctx := r.Context()
+	linked := func() bool {
+		v := h.view()
+		defer v.Release()
+		_, ok := v.Get(blobKey(rn, d))
+		return ok
 	}
-	if err != nil {
-		// The fetch logs and counts its failure once, however many
-		// clients wait on it.
-		if ctx.Err() == nil {
-			err = h.upstreamError(rn, err, blobUnknownError(d))
+	if _, err := h.blobs.Stat(ctx, d); err == nil {
+		head := r.Clone(ctx)
+		head.Method = http.MethodHead
+		mw := newMemberWriter(nil)
+		h.proxyGetBlob(mw, head, rn, d.String())
+		if err := mw.result(); err != nil {
+			return err
 		}
-		h.writeError(w, r, err)
-		return
+		if !linked() {
+			return errPassThrough
+		}
+		return nil
 	}
-	setBlobHeaders(w, d, size)
-	w.WriteHeader(http.StatusOK)
-	if _, err := fe.Stream(ctx, w); err != nil {
-		// Part of the blob is out: cut the connection, so the client
-		// cannot take it for the whole blob. The fetch logs its failure.
-		panic(http.ErrAbortHandler)
+	fe, err := h.startBlobFetch(r, rn, d)
+	if err != nil {
+		return err
 	}
-	h.proxyResults.With(rn.repo, resultFetched).Inc()
+	defer fe.Release()
+	if _, err := fe.Stream(ctx, io.Discard); err != nil {
+		return err
+	}
+	info, err := h.blobs.Stat(ctx, d)
+	if err != nil {
+		return err
+	}
+	return h.linkProxyBlob(ctx, h.actor(r), rn, d, info.Size)
 }
 
 // passThroughBlob streams blob d from rn's upstream to the client without

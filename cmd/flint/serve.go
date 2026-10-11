@@ -304,6 +304,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Now:            now,
 		Fetcher:        fetcher,
 		ProxyMetrics:   proxyMetrics,
+		VirtualMetrics: virtualMetrics,
 	})
 	if err != nil {
 		return nil, err

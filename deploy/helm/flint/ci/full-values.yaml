@@ -32,6 +32,13 @@ config:
       type: proxy
       proxy:
         url: https://ghcr.io
+    - name: docker
+      format: oci
+      type: virtual
+      anonymousPull: true
+      virtual:
+        members: [docker-local, {name: dockerhub, exclude: ["acme/*"]}, ghcr]
+        publishTo: docker-local
     - name: pypi-local
       format: pypi
       type: hosted

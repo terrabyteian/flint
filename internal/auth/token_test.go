@@ -145,6 +145,63 @@ func TestDockerChallengeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestVirtualTokens checks the token flow of a push through a virtual
+// repository: the client asks for a token for the virtual repository's
+// path, and the token service grants the push for the role on the same
+// path within its publishTo member, and never without a publishTo.
+func TestVirtualTokens(t *testing.T) {
+	e := newEnv(t, `{
+  "dataDir": "/data",
+  "repositories": [
+    {"name": "docker-local", "format": "oci", "type": "hosted"},
+    {"name": "docker-all", "format": "oci", "type": "virtual", "virtual": {"members": ["docker-local"], "publishTo": "docker-local"}},
+    {"name": "docker-ro", "format": "oci", "type": "virtual", "virtual": {"members": ["docker-local"]}}
+  ],
+  "auth": {
+    "permissions": [
+      {"repositories": ["docker-all", "docker-ro"], "role": "read", "users": ["carol", "bob"]},
+      {"repositories": ["docker-local"], "role": "delete", "users": ["carol"]},
+      {"repositories": ["*"], "role": "delete", "users": ["dave"]}
+    ]
+  }
+}`)
+	for _, u := range []string{"carol", "bob", "dave"} {
+		e.addUser(u, u+"-password", false)
+	}
+	resp, tok := e.dockerFlow("/virtual/docker/pull,push/docker-all/docker-local", "carol", "carol-password")
+	if resp.status != http.StatusOK {
+		t.Fatalf("carol push through docker-all: %d %s", resp.status, resp.body)
+	}
+	if c := claimsOf(t, tok); !reflect.DeepEqual(c.Access, []access{{"repository", "docker-all", []string{"pull", "push"}}}) {
+		t.Errorf("carol's token access = %+v", c.Access)
+	}
+	if resp, _ := e.dockerFlow("/virtual/docker/delete/docker-all/docker-local", "carol", "carol-password"); resp.status != http.StatusOK {
+		t.Errorf("carol delete through docker-all: %d", resp.status)
+	}
+	// Read on the virtual repository does not let bob push through it.
+	resp, tok = e.dockerFlow("/virtual/docker/pull,push/docker-all/docker-local", "bob", "bob-password")
+	if resp.status != http.StatusUnauthorized {
+		t.Errorf("bob push through docker-all: %d", resp.status)
+	}
+	if c := claimsOf(t, tok); !reflect.DeepEqual(c.Access, []access{{"repository", "docker-all", []string{"pull"}}}) {
+		t.Errorf("bob's token access = %+v", c.Access)
+	}
+	// A token for the member's own path does not cover the virtual one.
+	tr := e.do(request{path: TokenPath + "?service=flint&scope=repository:docker-local:push", user: "carol", pass: "carol-password"})
+	var body tokenResponse
+	if err := json.Unmarshal([]byte(tr.body), &body); err != nil {
+		t.Fatal(err)
+	}
+	if resp := e.do(request{path: "/virtual/docker/push/docker-all/docker-local", bearer: body.Token}); resp.status != http.StatusUnauthorized {
+		t.Errorf("push through docker-all with a token for docker-local: %d", resp.status)
+	}
+	// Without a publishTo, no one gets a push token, not even with every role.
+	_, tok = e.dockerFlow("/virtual/docker/pull,push/docker-ro/-", "dave", "dave-password")
+	if c := claimsOf(t, tok); !reflect.DeepEqual(c.Access, []access{{"repository", "docker-ro", []string{"pull"}}}) {
+		t.Errorf("dave's token access through docker-ro = %+v", c.Access)
+	}
+}
+
 // TestDockerLogin checks the flow of "docker login": the base endpoint
 // challenges without a scope, and accepts any valid token.
 func TestDockerLogin(t *testing.T) {

@@ -117,21 +117,27 @@ type grant struct {
 	groups map[string]bool
 }
 
-// policy is the permission configuration: grants and the repositories
-// that allow anonymous pulls.
+// policy is the permission configuration: grants, the repositories
+// that allow anonymous pulls, and the virtual repositories.
 type policy struct {
 	grants    []grant
 	anonymous map[string]bool
+	// publishTo maps each virtual repository to its publishTo member, or
+	// to "" if it has none.
+	publishTo map[string]string
 }
 
 func newPolicy(cfg *config.Config) *policy {
-	p := &policy{anonymous: map[string]bool{}}
+	p := &policy{anonymous: map[string]bool{}, publishTo: map[string]string{}}
 	if cfg == nil {
 		return p
 	}
 	for _, r := range cfg.Repositories {
 		if r.AnonymousPull {
 			p.anonymous[r.Name] = true
+		}
+		if r.Type == config.TypeVirtual && r.Virtual != nil {
+			p.publishTo[r.Name] = r.Virtual.PublishTo
 		}
 	}
 	for _, cp := range cfg.Auth.Permissions {
@@ -176,6 +182,25 @@ func (p *policy) role(pr *Principal, repo string) Role {
 		user = min(user, scopesRole(pr.scopes, repo))
 	}
 	return max(r, user)
+}
+
+// through returns the repository path whose roles govern action on path
+// within virtual repository repoOf(path): path itself for a pull, and the
+// same path within the publishTo member for anything else, or "" if the
+// virtual repository has no publishTo. ok is false if path is not within
+// a virtual repository.
+func (p *policy) through(path, action string) (governing string, ok bool) {
+	virtual := repoOf(path)
+	publishTo, ok := p.publishTo[virtual]
+	switch {
+	case !ok:
+		return "", false
+	case action == ActionPull:
+		return path, true
+	case publishTo == "":
+		return "", true
+	}
+	return publishTo + path[len(virtual):], true
 }
 
 func (g grant) anyGroup(groups []string) bool {

@@ -34,7 +34,7 @@ type formatSpec struct {
 
 // formats are the formats the configuration accepts.
 var formats = []formatSpec{
-	{name: FormatOCI, types: []string{TypeHosted, TypeProxy}},
+	{name: FormatOCI, types: []string{TypeHosted, TypeProxy, TypeVirtual}},
 	{name: FormatPyPI, types: []string{TypeHosted, TypeProxy, TypeVirtual}},
 	{name: FormatGeneric, types: []string{TypeHosted, TypeProxy, TypeVirtual},
 		settings: func(r *Repository) any {

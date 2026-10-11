@@ -4,7 +4,9 @@
 // manifests and indexes, Docker schema 2 manifests and manifest lists),
 // the referrers API, paginated tag and catalog listings, and deletes.
 // Proxy repositories cache an upstream registry and are read-only; see
-// proxy.go. Hosted repositories with helmIndex also serve the Helm charts
+// proxy.go. Virtual repositories serve one view of hosted and proxy
+// repositories, and pass pushes to a hosted one; see virtual.go. Hosted
+// repositories with helmIndex also serve the Helm charts
 // pushed to them as a classic Helm chart repository at /helm/; see
 // helm.go.
 //
@@ -33,6 +35,7 @@ import (
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
+	"github.com/terrabyteian/flint/internal/repo"
 	"github.com/terrabyteian/flint/internal/server"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
@@ -74,11 +77,30 @@ type CatalogAuthorizer interface {
 	AuthorizeCatalog(w http.ResponseWriter, r *http.Request) (visible func(repo string) bool, ok bool)
 }
 
+// VirtualAuthorizer is an optional extension of Authorizer for virtual
+// repositories. AuthorizeVirtual is Authorize for virtual, a full
+// repository name within a virtual repository, such as
+// "docker-all/team/app": pulling needs pull on virtual, and pushing and
+// deleting need push and delete on publishTo, the same image name within
+// the virtual repository's publishTo member, such as
+// "docker-local/team/app". A challenge names the scope on virtual, which
+// is what Docker clients ask a token service for. With an Authorizer that
+// does not implement it, each action is authorized with Authorize on the
+// repository whose permissions govern it.
+type VirtualAuthorizer interface {
+	AuthorizeVirtual(w http.ResponseWriter, r *http.Request, virtual, publishTo string, actions ...string) bool
+}
+
 // AllowAll is an Authorizer that allows every request, for tests.
 type AllowAll struct{}
 
 // Authorize allows the request.
 func (AllowAll) Authorize(http.ResponseWriter, *http.Request, string, ...string) bool { return true }
+
+// AuthorizeVirtual allows the request.
+func (AllowAll) AuthorizeVirtual(http.ResponseWriter, *http.Request, string, string, ...string) bool {
+	return true
+}
 
 // AuthorizeCatalog allows the request and lists every repository.
 func (AllowAll) AuthorizeCatalog(http.ResponseWriter, *http.Request) (func(string) bool, bool) {
@@ -91,7 +113,7 @@ type Options struct {
 	Meta  meta.Store
 	Blobs blob.Store
 	// Repositories are the configured repositories; those with format
-	// "oci" and type "hosted" or "proxy" are served.
+	// "oci" are served.
 	Repositories []config.Repository
 	// Upstream holds the defaults for proxy repositories' upstream
 	// clients, such as the user agent; each repository's URL and
@@ -121,6 +143,10 @@ type Options struct {
 	Logger *slog.Logger
 	// Metrics, if set, receives the OCI metrics.
 	Metrics *metrics.Registry
+	// VirtualMetrics, if set, are the virtual repository metrics shared
+	// with other formats' virtual repositories; nil registers them on
+	// Metrics.
+	VirtualMetrics *repo.Metrics
 	// Actor names the principal behind a request in the origin of the
 	// metadata batches it writes, for the audit log; nil names the
 	// client address. It must not return secrets.
@@ -133,8 +159,9 @@ type Options struct {
 type repository struct {
 	name          string
 	immutableTags bool
-	helmIndex     bool       // serve the Helm view
-	proxy         *proxyRepo // nil for a hosted repository
+	helmIndex     bool          // serve the Helm view
+	proxy         *proxyRepo    // for a proxy repository
+	virtual       *repo.Virtual // for a virtual repository
 }
 
 // Handler serves the OCI distribution API.
@@ -169,6 +196,11 @@ type Handler struct {
 	validated     *upstream.Freshness // by tag key: when the upstream last confirmed it
 	listings      listingCache
 	limits        *upstream.Limits
+
+	// Virtual repositories: the member that last served each image
+	// name's manifest, and the proxy members' recent not-found answers.
+	suppliers suppliers
+	misses    *upstream.NegativeCache
 
 	// The Helm view.
 	helmMu     sync.Mutex
@@ -224,6 +256,7 @@ func New(opts Options) (*Handler, error) {
 		h.actor = clientActor
 	}
 	h.validated = upstream.NewFreshness(h.now)
+	h.misses = upstream.NewNegativeCache(h.now)
 	upOpts := opts.Upstream
 	if upOpts.Logger == nil {
 		upOpts.Logger = h.log
@@ -253,6 +286,20 @@ func New(opts Options) (*Handler, error) {
 	reg := opts.Metrics
 	if reg == nil {
 		reg = metrics.NewRegistry() // unexposed; keeps the counters usable
+	}
+	vm := opts.VirtualMetrics
+	for _, rc := range opts.Repositories {
+		if rc.Format != config.FormatOCI || rc.Type != config.TypeVirtual {
+			continue
+		}
+		if vm == nil {
+			vm = repo.NewMetrics(reg)
+		}
+		v, err := repo.NewVirtual(rc, opts.Repositories, repo.VirtualOptions{Logger: h.log, Metrics: vm})
+		if err != nil {
+			return nil, fmt.Errorf("oci: %w", err)
+		}
+		h.repos[rc.Name] = &repository{name: rc.Name, virtual: v}
 	}
 	h.uploadBytes = reg.Counter("flint_oci_upload_bytes_total",
 		"Blob bytes received in OCI uploads, by repository.", "repository")
@@ -314,6 +361,18 @@ type repoName struct {
 	repo string // the configured repository: "docker-local"
 	name string // the image name below it: "team/app"
 	cfg  *repository
+	// addr, if set, is the name the client addressed instead of full, for
+	// a member of a virtual repository serving it: "docker-all/team/app".
+	// The locations returned to the client use it.
+	addr string
+}
+
+// path returns the name the client addresses: addr, or else full.
+func (rn *repoName) path() string {
+	if rn.addr != "" {
+		return rn.addr
+	}
+	return rn.full
 }
 
 // resolve parses a full repository name.
@@ -376,12 +435,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveProxy(w, r, rn, ep, arg)
 		return
 	}
-
-	push := []string{ActionPull, ActionPush}
-	type op struct {
-		actions []string
-		serve   func(http.ResponseWriter, *http.Request, *repoName, string)
+	ops := h.hostedOps(ep)
+	o, ok := ops[r.Method]
+	if !ok {
+		allowOps(w, r, h, ops)
+		return
 	}
+	if rn.cfg.virtual != nil {
+		h.serveVirtual(w, r, rn, ep, arg, o)
+		return
+	}
+	if !h.auth.Authorize(w, r, rn.full, o.actions...) {
+		return
+	}
+	o.serve(w, r, rn, arg)
+}
+
+// op is how a hosted repository serves a method of an endpoint.
+type op struct {
+	actions []string // the actions to authorize
+	serve   func(http.ResponseWriter, *http.Request, *repoName, string)
+}
+
+// hostedOps returns how a hosted repository serves each method of ep.
+func (h *Handler) hostedOps(ep endpoint) map[string]op {
+	push := []string{ActionPull, ActionPush}
 	var ops map[string]op
 	switch ep {
 	case epBlob:
@@ -411,19 +489,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case epReferrers:
 		ops = map[string]op{http.MethodGet: {[]string{ActionPull}, h.listReferrers}}
 	}
-	o, ok := ops[r.Method]
-	if !ok {
-		methods := make([]string, 0, len(ops))
-		for m := range ops {
-			methods = append(methods, m)
-		}
-		allow(w, r, h, methods...)
-		return
+	return ops
+}
+
+// allowOps answers 405 for a method that is not one of ops'.
+func allowOps(w http.ResponseWriter, r *http.Request, h *Handler, ops map[string]op) {
+	methods := make([]string, 0, len(ops))
+	for m := range ops {
+		methods = append(methods, m)
 	}
-	if !h.auth.Authorize(w, r, rn.full, o.actions...) {
-		return
-	}
-	o.serve(w, r, rn, arg)
+	allow(w, r, h, methods...)
 }
 
 var endpointRoutes = map[endpoint]string{

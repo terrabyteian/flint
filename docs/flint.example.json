@@ -170,6 +170,15 @@
           {"name": "goproxy", "exclude": ["corp.example.com/*"]}
         ]
       }
+    },
+    {
+      "name": "docker",
+      "format": "oci",
+      "type": "virtual",
+      "virtual": {
+        "members": ["docker-local", "dockerhub", "ghcr"],
+        "publishTo": "docker-local"
+      }
     }
   ],
   "proxyCache": {
@@ -199,7 +208,7 @@
         "groups": ["ci"]
       },
       {
-        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all", "npmjs", "npm", "go-all"],
+        "repositories": ["dockerhub", "ghcr", "docker", "pypi", "crates-io", "cargo-all", "npmjs", "npm", "go-all"],
         "role": "read",
         "groups": ["ci"]
       },
