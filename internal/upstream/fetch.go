@@ -71,6 +71,7 @@ type Fetch struct {
 	d         blob.Digest   // the digest, or zero if it is not known in advance
 	expect    *Expect       // what content fetched by path must match, or nil
 	sums      Sums          // the digests computed for expect, once verified
+	ctype     string        // the media type a PathSource reported
 	ready     chan struct{} // closed once the size is known or the fetch failed
 	readyOnce sync.Once
 
@@ -104,6 +105,8 @@ func (f *Fetcher) Fetch(key string, d blob.Digest, open Source, done func(ctx co
 type PathResult struct {
 	Info blob.Info
 	Sums Sums
+	// ContentType is the media type the PathSource reported.
+	ContentType string
 }
 
 // FetchPath is Fetch for content whose sha256 digest is not known in
@@ -114,8 +117,30 @@ type PathResult struct {
 // client receives its final byte. label names the content in messages,
 // such as its path. done receives the committed blob and the digests
 // computed for e; an Expect naming an unknown algorithm fails the fetch.
-func (f *Fetcher) FetchPath(key, label string, e Expect, open Source, done func(ctx context.Context, r PathResult, err error)) (fe *Fetch, joined bool) {
-	return f.start(&Fetch{key: key, label: label, expect: &e}, open, done)
+func (f *Fetcher) FetchPath(key, label string, e Expect, open PathSource, done func(ctx context.Context, r PathResult, err error)) (fe *Fetch, joined bool) {
+	nf := &Fetch{key: key, label: label, expect: &e}
+	src := func(ctx context.Context) (io.ReadCloser, int64, error) {
+		body, size, ct, err := open(ctx)
+		if err == nil {
+			nf.mu.Lock()
+			nf.ctype = ct
+			nf.mu.Unlock()
+		}
+		return body, size, err
+	}
+	return f.start(nf, src, done)
+}
+
+// PathSource is a Source that also reports the content's media type,
+// such as the upstream's Content-Type.
+type PathSource func(ctx context.Context) (body io.ReadCloser, size int64, contentType string, err error)
+
+// ContentType returns the media type the PathSource of a fetch by path
+// reported, once Wait has returned without an error.
+func (fe *Fetch) ContentType() string {
+	fe.mu.Lock()
+	defer fe.mu.Unlock()
+	return fe.ctype
 }
 
 // start joins the fetch in progress under nf's key or starts nf.
@@ -145,7 +170,7 @@ func (f *Fetcher) run(fe *Fetch, open Source, done func(context.Context, PathRes
 	} else {
 		fe.finish(fetchVerified, nil)
 	}
-	done(ctx, PathResult{Info: info, Sums: fe.sums}, err)
+	done(ctx, PathResult{Info: info, Sums: fe.sums, ContentType: fe.ContentType()}, err)
 	f.mu.Lock()
 	delete(f.active, fe.key)
 	f.mu.Unlock()

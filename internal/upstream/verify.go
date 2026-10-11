@@ -66,7 +66,11 @@ const copyChunk = 64 << 10
 // reports a clean end. A client therefore never receives the whole of
 // content that fails verification: on failure the caller aborts the
 // response, and the client sees a truncated body.
-func CopyVerified(w io.Writer, r *Verifier) (int64, error) {
+func CopyVerified(w io.Writer, r *Verifier) (int64, error) { return copyHeld(w, r) }
+
+// copyHeld is CopyVerified for any reader that returns io.EOF only once
+// the content it read verified.
+func copyHeld(w io.Writer, r io.Reader) (int64, error) {
 	cur := make([]byte, copyChunk)
 	next := make([]byte, copyChunk)
 	var pending []byte

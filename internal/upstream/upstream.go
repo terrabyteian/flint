@@ -323,15 +323,20 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 // their authentication challenges answered; a 401 from anywhere else is
 // ErrDenied.
 func (c *Client) GetURL(ctx context.Context, rawURL string, header http.Header) (*http.Response, error) {
+	return c.Request(ctx, http.MethodGet, rawURL, header)
+}
+
+// Request is GetURL for another method, such as HEAD.
+func (c *Client) Request(ctx context.Context, method, rawURL string, header http.Header) (*http.Response, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return nil, &Error{Op: "GET " + rawURL, Err: fmt.Errorf("%q is not an http or https URL", rawURL)}
+		return nil, &Error{Op: method + " " + rawURL, Err: fmt.Errorf("%q is not an http or https URL", rawURL)}
 	}
 	u.Fragment, u.RawFragment = "", ""
 	if err := c.pol.check(u); err != nil {
-		return nil, &Error{Op: "GET " + u.Redacted(), Err: err}
+		return nil, &Error{Op: method + " " + u.Redacted(), Err: err}
 	}
-	return c.do(ctx, http.MethodGet, u, header, "")
+	return c.do(ctx, method, u, header, "")
 }
 
 // Allowed reports whether the client's Policy allows fetching rawURL.

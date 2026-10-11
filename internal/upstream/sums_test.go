@@ -110,10 +110,10 @@ func TestParseIntegrity(t *testing.T) {
 	}
 }
 
-// pathSource returns a Source serving data, announcing size.
-func pathSource(data []byte, size int64) upstream.Source {
-	return func(context.Context) (io.ReadCloser, int64, error) {
-		return io.NopCloser(bytes.NewReader(data)), size, nil
+// pathSource returns a PathSource serving data, announcing size.
+func pathSource(data []byte, size int64) upstream.PathSource {
+	return func(context.Context) (io.ReadCloser, int64, string, error) {
+		return io.NopCloser(bytes.NewReader(data)), size, "application/test", nil
 	}
 }
 
