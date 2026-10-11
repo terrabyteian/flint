@@ -48,7 +48,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 17 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 19 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -75,11 +75,17 @@ func TestExampleConfig(t *testing.T) {
 	if r := c.Repositories[12]; r.Format != FormatNPM || r.Type != TypeHosted {
 		t.Errorf("unexpected npm repository: %+v", r)
 	}
-	if g := c.Repositories[14].Go; c.Repositories[13].Format != FormatGo || g == nil || len(g.NoSumCheck) != 1 ||
-		GoSumDBKey(g) != sumdb.DefaultKey || c.Repositories[15].Virtual == nil || len(c.Repositories[15].Virtual.Members[0].Include) != 1 {
-		t.Errorf("unexpected Go repositories: %+v", c.Repositories[13:])
+	if p := c.Repositories[13].Proxy; c.Repositories[13].Format != FormatNPM || p == nil || NPMRegistryURL(p.URL) != "https://registry.npmjs.org/" {
+		t.Errorf("unexpected npm proxy repository: %+v", c.Repositories[13])
 	}
-	if r := c.Repositories[16]; r.Format != FormatOCI || r.Virtual == nil || len(r.Virtual.Members) != 3 || r.Virtual.PublishTo != "docker-local" {
+	if v := c.Repositories[14].Virtual; v == nil || v.PublishTo != "npm-local" || len(v.Members) != 2 || v.Members[1].Exclude[0] != "@acme/*" {
+		t.Errorf("unexpected npm virtual repository: %+v", c.Repositories[14])
+	}
+	if g := c.Repositories[16].Go; c.Repositories[15].Format != FormatGo || g == nil || len(g.NoSumCheck) != 1 ||
+		GoSumDBKey(g) != sumdb.DefaultKey || c.Repositories[17].Virtual == nil || len(c.Repositories[17].Virtual.Members[0].Include) != 1 {
+		t.Errorf("unexpected Go repositories: %+v", c.Repositories[15:])
+	}
+	if r := c.Repositories[18]; r.Format != FormatOCI || r.Virtual == nil || len(r.Virtual.Members) != 3 || r.Virtual.PublishTo != "docker-local" {
 		t.Errorf("unexpected OCI virtual repository: %+v", r)
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
@@ -214,8 +220,6 @@ func TestValidation(t *testing.T) {
 			[]string{"repositories[0].format: is required", "repositories[0].type: is required"}},
 		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "nuget", "type": "group"}]}`,
 			[]string{`repositories[0].format: "nuget" is not supported`, `repositories[0].type: "group" is not supported`}},
-		{"npm proxy", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "npm", "type": "proxy", "proxy": {"url": "https://registry.npmjs.org"}}]}`,
-			[]string{`repositories[0].type: "proxy" is not supported for format npm; supported types: hosted`}},
 		{"oci virtual", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "oci", "type": "hosted"},
 			{"name": "dockerhub", "format": "oci", "type": "proxy", "proxy": {"url": "https://registry-1.docker.io"}},
 			{"name": "a", "format": "oci", "type": "virtual", "anonymousPull": true, "virtual": {"publishTo": "h",
@@ -236,9 +240,28 @@ func TestValidation(t *testing.T) {
 			 "virtual": {"members": ["pypi-local", "pypi", "torch"], "dependencyConfusionProtection": false}}]}`, nil},
 		{"npm good", `{"dataDir": "/d", "repositories": [
 			{"name": "npm-local", "format": "npm", "type": "hosted", "anonymousPull": true}]}`, nil},
-		{"npm virtual", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "npm", "type": "hosted"},
-			{"name": "a", "format": "npm", "type": "virtual", "virtual": {"members": ["h"]}}]}`,
-			[]string{`repositories[1].type: "virtual" is not supported for format npm`}},
+		{"npm proxy and virtual", `{"dataDir": "/d", "repositories": [
+			{"name": "npm-local", "format": "npm", "type": "hosted"},
+			{"name": "npmjs", "format": "npm", "type": "proxy", "anonymousPull": true,
+			 "proxy": {"url": "https://registry.npmjs.org", "revalidateAfter": "10m", "sizeLimit": "100GiB"}},
+			{"name": "npm-private", "format": "npm", "type": "proxy", "npm": {"forwardAudit": false},
+			 "proxy": {"url": "https://npm.example.com/registry/", "passwordFile": "/run/secrets/npm-token"}},
+			{"name": "npm-all", "format": "npm", "type": "virtual", "npm": {"forwardAudit": true, "mergeLimit": "64MiB"},
+			 "virtual": {"publishTo": "npm-local", "members": ["npm-local", {"name": "npmjs", "exclude": ["@acme/*"]}, "npm-private"]}}]}`, nil},
+		{"npm problems", `{"dataDir": "/d", "repositories": [
+			{"name": "h", "format": "npm", "type": "hosted", "npm": {"forwardAudit": false}},
+			{"name": "p", "format": "npm", "type": "proxy", "npm": {"mergeLimit": "1MiB"}, "proxy": {"url": "ftp://registry.npmjs.org"}},
+			{"name": "o", "format": "oci", "type": "hosted", "npm": {}},
+			{"name": "q", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple/", "passwordFile": "/token"}},
+			{"name": "v", "format": "npm", "type": "virtual", "npm": {"mergeLimit": 0}, "virtual": {"members": ["h"]}},
+			{"name": "w", "format": "npm", "type": "virtual", "npm": {"mergeLimit": "lots"}, "virtual": {"members": ["h"]}}]}`,
+			[]string{"repositories[0].npm.forwardAudit: is only allowed for a proxy or virtual repository",
+				"repositories[1].npm.mergeLimit: is only allowed for a virtual repository",
+				`repositories[1].proxy.url: "ftp://registry.npmjs.org" must be an http or https URL`,
+				"repositories[2].npm: is only allowed for a repository of format npm",
+				"repositories[3].proxy.username: is required with passwordFile",
+				"repositories[4].npm.mergeLimit: must be positive",
+				`repositories[5].npm.mergeLimit: "lots" is not a size: ` + sizeRule}},
 		{"pypi virtual problems", `{"dataDir": "/d", "repositories": [
 			{"name": "h", "format": "pypi", "type": "hosted", "immutableTags": true, "helmIndex": true, "virtual": {"members": []}},
 			{"name": "o", "format": "oci", "type": "hosted"},
@@ -722,6 +745,22 @@ func TestVirtualProtected(t *testing.T) {
 	}{{Virtual{}, true}, {Virtual{DependencyConfusionProtection: &on}, true}, {Virtual{DependencyConfusionProtection: &off}, false}} {
 		if got := tt.v.Protected(); got != tt.want {
 			t.Errorf("Protected() with %v = %v", tt.v.DependencyConfusionProtection, got)
+		}
+	}
+}
+
+func TestNPMMergeBytes(t *testing.T) {
+	c, err := Parse([]byte(`{"dataDir": "/d", "repositories": [
+		{"name": "h", "format": "npm", "type": "hosted"},
+		{"name": "a", "format": "npm", "type": "virtual", "virtual": {"members": ["h"]}},
+		{"name": "b", "format": "npm", "type": "virtual", "npm": {"forwardAudit": false}, "virtual": {"members": ["h"]}},
+		{"name": "c", "format": "npm", "type": "virtual", "npm": {"mergeLimit": "4MiB"}, "virtual": {"members": ["h"]}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []int64{DefaultNPMMergeLimit, DefaultNPMMergeLimit, DefaultNPMMergeLimit, 4 << 20} {
+		if got := c.Repositories[i].NPM.MergeBytes(); got != want {
+			t.Errorf("repository %s: MergeBytes() = %d, want %d", c.Repositories[i].Name, got, want)
 		}
 	}
 }

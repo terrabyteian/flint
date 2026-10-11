@@ -1,12 +1,20 @@
 # npm
 
-flint serves npm packages from hosted npm repositories, which hold first-party packages: npm, pnpm, Yarn (classic and Berry), and Bun install from them, and publish to them.
+flint serves npm packages to npm, pnpm, Yarn (classic and Berry), and Bun from three kinds of npm repositories:
+
+- **Hosted** repositories hold first-party packages, which clients install from them and publish to them.
+- **Proxy** repositories cache an upstream registry, such as registry.npmjs.org, so installs keep working when it is slow or down, and a package or version it removes keeps installing from lockfiles.
+- **Virtual** repositories merge hosted and proxy repositories into one registry, so clients need a single URL to install everything and to publish, with protection against dependency confusion.
 
 [Configuration](configuration.md#repositories) describes how to declare them:
 
 ```json
 "repositories": [
-  {"name": "npm-local", "format": "npm", "type": "hosted"}
+  {"name": "npm-local", "format": "npm", "type": "hosted"},
+  {"name": "npmjs", "format": "npm", "type": "proxy",
+   "proxy": {"url": "https://registry.npmjs.org/"}},
+  {"name": "npm", "format": "npm", "type": "virtual",
+   "virtual": {"members": ["npm-local", {"name": "npmjs", "exclude": ["@acme/*"]}], "publishTo": "npm-local"}}
 ]
 ```
 
@@ -33,10 +41,12 @@ Packuments carry an `ETag`, so a client revalidating its cached copy gets `304 N
 Tarball URLs in packuments are absolute, because lockfiles record them: `https://registry.example/npm/npm-local/@acme/widget/-/widget-1.0.0.tgz`.
 They are built from [`publicURL`](configuration.md#public-url) when it is set, and otherwise from the scheme and host the client used, through [trusted proxies](configuration.md#trusted-proxies) as configured; set `publicURL` so lockfiles hold one stable URL however clients reach flint.
 Tarballs are below the registry URL, so clients send the registry's credentials when they download them.
+Proxy and virtual repositories serve the same API, with every tarball URL below their own registry URL, so a lockfile records only flint's URLs.
 
 ## Configuring clients
 
 The examples use `https://registry.example` for flint and the repository `npm-local`.
+To install public and first-party packages from one URL and publish there too, give clients a [virtual repository](#virtual-repositories) instead, such as `npm` above; see [one registry for everything](#one-registry-for-everything).
 
 ### Credentials
 
@@ -122,6 +132,36 @@ npmScopes:
 
 Yarn Berry refuses plain-HTTP registries unless their host is in `unsafeHttpWhitelist`; serve flint over HTTPS.
 
+### One registry for everything
+
+With a virtual repository whose members are a hosted repository and a proxy of registry.npmjs.org, and whose `publishTo` is the hosted repository, one registry URL serves installing every package and publishing first-party ones.
+Each client is configured as above, with the virtual repository's URL:
+
+```ini
+# .npmrc, for npm, pnpm, Bun, and Yarn classic
+registry=https://registry.example/npm/npm/
+//registry.example/npm/npm/:_authToken=${FLINT_TOKEN}
+# Yarn classic only:
+always-auth=true
+```
+
+```yaml
+# .yarnrc.yml, for Yarn Berry
+npmRegistryServer: "https://registry.example/npm/npm/"
+npmAuthToken: "${FLINT_TOKEN}"
+npmAlwaysAuth: true
+```
+
+```toml
+# bunfig.toml, if Bun is configured there rather than in .npmrc
+[install]
+registry = { url = "https://registry.example/npm/npm/", token = "$FLINT_TOKEN" }
+```
+
+Installing needs `read` on the virtual repository only; publishing, dist-tags, deprecating, and unpublishing need their roles on the `publishTo` member, `npm-local` here.
+Lockfiles written through flint name only flint's tarball URLs, where the client records URLs at all; pnpm and Yarn Berry record none for registry packages, and fetch them from the registry configured.
+npm also installs a lockfile written against registry.npmjs.org through flint, since it fetches the tarballs such a lockfile names from the registry configured (its `replace-registry-host` setting).
+
 ### Logging in with npm login
 
 `npm login` asks for a user name and password and stores a token for the registry in `~/.npmrc`:
@@ -163,7 +203,7 @@ A repository owns a package from its first publish, and keeps owning it after ev
 
 A provenance bundle published with `npm publish --provenance` is stored with the version, and served at the URL the version's `dist.attestations` names, `/npm/<repository>/-/npm/v1/attestations/<name>@<version>`.
 flint does not verify it; `npm audit signatures` does.
-flint does not sign packuments, so `/-/npm/v1/keys` lists no keys.
+flint does not sign packuments, so a hosted repository's `/-/npm/v1/keys` lists no keys.
 
 ## Dist-tags
 
@@ -205,10 +245,41 @@ The version can never be published again.
 Dist-tags pointing at it are removed, and if `latest` pointed at it, `latest` moves to the highest version left, preferring releases to pre-releases.
 Unpublishing every version leaves the package without a packument, but the repository keeps owning its name, and new versions can be published later.
 
+## Proxy repositories
+
+A proxy repository caches one upstream registry, such as `https://registry.npmjs.org/`:
+
+- **Packuments** are fetched from the upstream and stored in the cache exactly as the upstream sent them, the full form and the abbreviated form installers ask for each in its own right. A cached packument is served for `revalidateAfter` (default 5 minutes) after the upstream last confirmed it; after that, flint asks the upstream again, sending its `ETag` and `Last-Modified` so an unchanged packument costs a `304`, also on the first request after a restart. A packument flint cannot read, or of another package, never replaces the cached one. Packuments of hundreds of megabytes are streamed into the cache, and streamed to clients while their URLs are rewritten.
+- **URLs point at flint.** When flint serves a packument, each version's `dist.tarball`, and its `dist.attestations.url`, point below the proxy repository's registry URL, so lockfiles record flint's URLs and clients send flint's credentials with tarball requests. Everything else is served as the upstream sent it, including `dist.integrity` and `dist.signatures`, which sign a version's name, version, and integrity, not its URLs, so `npm audit signatures` verifies proxied packages with the upstream's keys, which flint serves at `/-/npm/v1/keys`.
+- **Tarballs** never change, so once cached they are served forever without asking the upstream. Each is checked against its version's `dist.integrity` (sha512), or for versions too old to have one, `dist.shasum` (sha1): a tarball that does not match is refused with `502`, or cut off before its last byte if part of it was already sent, and never enters the cache, and a version with neither is refused with `502`. A proxy repository serves only what its upstream sent it: a tarball is fetched even if flint stores the same bytes for another repository. Concurrent requests for the same tarball share one upstream fetch, and the first client streams it as it arrives.
+- **Versions the upstream removes** leave the packument, which follows the upstream, but their cached tarballs keep being served by their URLs, so installs from lockfiles keep working. flint never removes a cached tarball on its own.
+- **When the upstream is unreachable**, because of network errors, timeouts, `5xx` errors, or `429` rate limiting, cached packuments and tarballs keep being served, and flint treats the upstream as offline for 30 seconds. A package that was never cached is answered with `503`.
+- **When the upstream answers that a package is not found**, with `404`, `410`, or `451`, or denies access, flint answers `404` too, even if it has the package cached; its cached tarballs stay cached.
+- **Disk space and size limits** work as for [OCI proxy repositories](configuration.md#proxy-repositories): under `proxyCache.minFreeSpace`, new tarballs are passed through without being cached, still checked; with `proxy.sizeLimit`, the least recently downloaded tarballs are evicted to stay within the limit. Packuments do not count against the limit.
+- **Search** is passed through to the upstream and not cached. **`npm audit`** is passed through to the upstream too, unless `npm.forwardAudit` is `false`. The upstream's signing keys and each version's attestations are cached like packuments.
+- **Credentials.** With `proxy.passwordFile`, flint sends credentials with every request to the host of `proxy.url`, as npm does, since a registry may answer a request without them `404`: with `proxy.username`, HTTP basic credentials, and without one, the file's token as `Authorization: Bearer`, as an `_authToken` would be sent. They are never sent to another host.
+- **Read-only.** Publishes, dist-tag changes, deprecations, and unpublishes are refused with `405`.
+- **Fetch policy.** flint fetches only from the host of `proxy.url`, which for registry.npmjs.org also serves its tarballs, and the hosts in `proxy.allowHosts`: a registry whose packuments name tarballs on another host needs that host there. See [the fetch policy](configuration.md#upstream-fetch-policy).
+
+## Virtual repositories
+
+A virtual repository serves one registry over an ordered list of hosted and proxy members:
+
+- **Packuments merge by version.** A package's packument lists the versions of every member that has the package. Where members have the same version, the first member's manifest is served, and the version's tarball is downloaded from that member. The dist-tags come from the first member that has the package, and each version's publish time from the member that supplied it. Tarball URLs point below the virtual repository's registry URL.
+- **Merge limit.** Merging holds the members' packuments in memory, so it is bounded by `npm.mergeLimit`, 32MiB by default: when the packuments of the members that have a package are larger than that together, flint does not merge them and serves the first such member's packument alone, as that member serves it, a large one streamed. That member's versions are the only ones listed, though the others' tarballs can still be downloaded by URL; filters and dependency-confusion protection still decide which members are asked. Each fallback is logged with a warning and counted in `flint_npm_virtual_merge_fallbacks_total`. Concurrent requests for the same merge share one build, and merges are cached in memory with the other rendered packuments.
+- **Filters.** A member with `include` or `exclude` patterns is consulted only for the package names they admit, compared exactly, so a scope pattern such as `@acme/*` covers a whole scope. Exclude your internal scopes from the registry.npmjs.org member, as in `{"name": "npmjs", "exclude": ["@acme/*"]}`: dependency-confusion protection covers a name only once a hosted member owns it, and the filter also covers internal names you have not published yet, or whose hosted repository is unreachable.
+- **Dependency-confusion protection**, on by default: once a hosted member owns a package name, that name's upstream versions are never served through the virtual repository, not even versions the hosted member lacks, and the proxy members are not even asked about it. A hosted repository owns a name from its first publish, and keeps it after every version is unpublished. So a package someone publishes on registry.npmjs.org under the name of a first-party package, even at a higher version, can never be installed in its place. Set `virtual.dependencyConfusionProtection` to `false` to merge every member for every name.
+- A member that fails, such as a proxy whose upstream is unreachable and has the package uncached, is left out with a warning in the log, counted in `flint_virtual_member_skips_total`, so one unreachable upstream does not take the whole registry down. The request fails only if no member could answer.
+- **Publishing, dist-tags, deprecating, and unpublishing** go to the hosted member that `virtual.publishTo` names, so one `registry=` line serves both installing and publishing; they need the permissions the same change to that member needs. npm reads a package before it edits it, and through the virtual repository it reads the `publishTo` member's packument, which the edit is made to. A change to a package whose name that member's filters do not admit is refused with `403`, naming the member and the filter, and nothing changes. Without `publishTo`, changes are refused with `405`, naming the hosted members to publish to instead.
+- **`npm audit`** is forwarded to each proxy member's upstream with only the package names that member may serve and that no hosted member owns, so the names of internal packages never leave the network through `npm audit`; the members' answers merge, the first member's advisories of a package winning. `npm.forwardAudit` set to `false` on the virtual repository forwards nothing.
+- **Search** lists the hosted members' matches first, then the proxy members' answers, each package once, as the members' filters and dependency-confusion protection admit it. The signing keys are those of the proxy members' upstreams, and a version's attestations are those of the member that supplies the version.
+
+Installing through a virtual repository needs the `read` role on the virtual repository, or its `anonymousPull`; the members' own permissions are not consulted.
+
 ## Search, audit, and ping
 
-- `npm search` finds the packages whose names contain every word of the query, names that start with the first word first. Qualifiers such as `keywords:` are ignored.
-- `npm audit` asks flint for advisories about the versions it installed. flint knows of none for hosted packages, so it reports no vulnerabilities.
+- `npm search` through a hosted repository finds the packages whose names contain every word of the query, names that start with the first word first. Qualifiers such as `keywords:` are ignored. Through a proxy repository, the upstream answers; through a virtual one, see [above](#virtual-repositories).
+- `npm audit` asks flint for advisories about the versions it installed. flint knows of none for hosted packages, so a hosted repository reports no vulnerabilities; proxy and virtual repositories ask their upstreams, as described above.
 - `npm ping` needs no credentials.
 
 ## Not supported
@@ -217,4 +288,4 @@ Unpublishing every version leaves the package without a packument, but the repos
 - `npm access`, `npm owner`, `npm team`, `npm org`, `npm token`, `npm star`, and `npm hook`. Manage tokens and permissions through flint's [admin API](auth.md#admin-api) and [configuration](configuration.md#permissions).
 - Staged publishing, and the CouchDB replication endpoints (`/-/all`, `_changes`).
 - Trusted publishing over OIDC, which comes with flint's trusted publishing after v1.
-- Proxy repositories of an upstream registry such as registry.npmjs.org, and virtual repositories merging several, which come next.
+- The audit endpoint npm used before the bulk advisories (`/-/npm/v1/security/audits/quick`), which current npm falls back to only when the bulk one fails.

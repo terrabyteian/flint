@@ -29,6 +29,7 @@
 package upstream
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -115,6 +116,12 @@ type Options struct {
 	// newline is ignored.
 	Username     string
 	PasswordFile string
+	// Preemptive sends the credentials with every request to the
+	// upstream's own scheme and host, without waiting for a challenge, as
+	// npm clients do with registries, which may answer a request without
+	// credentials 404 rather than challenge it: HTTP basic credentials,
+	// or with no Username, the password as a bearer token.
+	Preemptive bool
 	// HTTPClient sends the requests; nil means a client with a transport
 	// like NewTransport's that also enforces Policy's address rule, and
 	// no overall timeout. A given client's redirects are still checked
@@ -150,6 +157,7 @@ type Client struct {
 	base         *url.URL
 	username     string
 	passwordFile string
+	preemptive   bool
 	hc           *http.Client
 	userAgent    string
 	attempts     int
@@ -189,6 +197,7 @@ func New(opts Options) (*Client, error) {
 		base:         u,
 		username:     opts.Username,
 		passwordFile: opts.PasswordFile,
+		preemptive:   opts.Preemptive && opts.PasswordFile != "",
 		hc:           opts.HTTPClient,
 		userAgent:    opts.UserAgent,
 		attempts:     opts.Attempts,
@@ -231,7 +240,7 @@ func New(opts Options) (*Client, error) {
 	if c.now == nil {
 		c.now = time.Now
 	}
-	if c.username != "" {
+	if c.username != "" || c.preemptive {
 		if _, err := c.password(); err != nil {
 			return nil, err
 		}
@@ -315,7 +324,7 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	u := *c.base
 	u.Path = path
 	u.RawQuery = query.Encode()
-	return c.do(ctx, method, &u, header, scope)
+	return c.do(ctx, method, &u, header, nil, scope)
 }
 
 // GetURL fetches an absolute http or https URL, such as a package file
@@ -331,6 +340,12 @@ func (c *Client) GetURL(ctx context.Context, rawURL string, header http.Header) 
 
 // Request is GetURL for another method, such as HEAD.
 func (c *Client) Request(ctx context.Context, method, rawURL string, header http.Header) (*http.Response, error) {
+	return c.Send(ctx, method, rawURL, header, nil)
+}
+
+// Send is Request with a request body, such as a POST of a query that
+// is forwarded to the upstream; body is sent again with every retry.
+func (c *Client) Send(ctx context.Context, method, rawURL string, header http.Header, body []byte) (*http.Response, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return nil, &Error{Op: method + " " + rawURL, Err: fmt.Errorf("%q is not an http or https URL", rawURL)}
@@ -339,7 +354,7 @@ func (c *Client) Request(ctx context.Context, method, rawURL string, header http
 	if err := c.pol.check(u); err != nil {
 		return nil, &Error{Op: method + " " + u.Redacted(), Err: err}
 	}
-	return c.do(ctx, method, u, header, "")
+	return c.do(ctx, method, u, header, body, "")
 }
 
 // idleWatch is a timer that gives up on a request when the upstream is
@@ -420,7 +435,7 @@ func (b *releaseBody) Close() error {
 }
 
 // do sends a request for u; see Do.
-func (c *Client) do(ctx context.Context, method string, u *url.URL, header http.Header, scope string) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, method string, u *url.URL, header http.Header, body []byte, scope string) (*http.Response, error) {
 	op := method + " " + u.Path
 	var lastErr error
 	for attempt := 1; ; attempt++ {
@@ -428,7 +443,7 @@ func (c *Client) do(ctx context.Context, method string, u *url.URL, header http.
 		if err != nil {
 			return nil, err
 		}
-		resp, err := c.send(ctx, method, u, header, scope)
+		resp, err := c.send(ctx, method, u, header, body, scope)
 		if err != nil {
 			release()
 		} else {
@@ -485,12 +500,22 @@ func (c *Client) ctxError(op string, ctx context.Context) error {
 
 // send sends one request, answering an authentication challenge once.
 // Network failures are *Errors wrapping ErrUnavailable.
-func (c *Client) send(ctx context.Context, method string, u *url.URL, header http.Header, scope string) (*http.Response, error) {
+func (c *Client) send(ctx context.Context, method string, u *url.URL, header http.Header, body []byte, scope string) (*http.Response, error) {
 	op := method + " " + u.Path
 	own := strings.EqualFold(u.Scheme, c.base.Scheme) && strings.EqualFold(u.Host, c.base.Host)
-	auth := ""
+	auth, preempted := "", false
 	if tok, ok := c.cachedToken(scope); ok && own {
 		auth = "Bearer " + tok
+	} else if own && c.preemptive {
+		preempted = true
+		pw, err := c.password()
+		if err != nil {
+			return nil, &Error{Op: op, Err: err}
+		}
+		auth = "Bearer " + pw
+		if c.username != "" {
+			auth = "Basic " + basicAuth(c.username, pw)
+		}
 	} else if own && c.username != "" && (c.basicAccepted.Load() || c.tokenAccepted.Load()) {
 		// The upstream took the credentials before: send them at once
 		// rather than waiting for its challenge.
@@ -503,7 +528,7 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 			auth = "Basic " + basicAuth(c.username, pw)
 		}
 	}
-	resp, err := c.roundTrip(ctx, method, u.String(), header, auth)
+	resp, err := c.roundTrip(ctx, method, u.String(), header, body, auth)
 	if err != nil {
 		return nil, transportError(op, err)
 	}
@@ -514,6 +539,11 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 		drain(resp)
 		return nil, &Error{Op: op, Status: http.StatusUnauthorized,
 			Err: fmt.Errorf("%w: %s asks for credentials, which flint sends only to %s", ErrDenied, u.Host, c.base.Host)}
+	}
+	if preempted {
+		// The credentials were sent, and refused.
+		drain(resp)
+		return nil, &Error{Op: op, Status: http.StatusUnauthorized, Err: fmt.Errorf("%w: the upstream refused the credentials", ErrAuth)}
 	}
 	ch, ok := parseChallenge(resp.Header.Values("WWW-Authenticate"))
 	drain(resp)
@@ -540,7 +570,7 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 			auth = "Basic " + basicAuth(c.username, pw)
 		}
 	}
-	resp, err = c.roundTrip(ctx, method, u.String(), header, auth)
+	resp, err = c.roundTrip(ctx, method, u.String(), header, body, auth)
 	if err != nil {
 		return nil, transportError(op, err)
 	}
@@ -579,8 +609,12 @@ func unwrapURLError(err error) error {
 	return err
 }
 
-func (c *Client) roundTrip(ctx context.Context, method, u string, header http.Header, auth string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, u, nil)
+func (c *Client) roundTrip(ctx context.Context, method, u string, header http.Header, body []byte, auth string) (*http.Response, error) {
+	var rb io.Reader
+	if body != nil {
+		rb = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, rb)
 	if err != nil {
 		return nil, err
 	}

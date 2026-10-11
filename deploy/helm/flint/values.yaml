@@ -99,6 +99,23 @@ config:
   #   virtual:
   #     members: [cargo-local, crates-io]
   #     publishTo: cargo-local
+  # # npm: a hosted repository, a registry.npmjs.org proxy, and a virtual
+  # # registry merging them, which npm publish can publish to; the proxy
+  # # member never serves the internal @acme scope (docs/npm.md).
+  # - name: npm-local
+  #   format: npm
+  #   type: hosted
+  # - name: npmjs
+  #   format: npm
+  #   type: proxy
+  #   proxy:
+  #     url: https://registry.npmjs.org/
+  # - name: npm
+  #   format: npm
+  #   type: virtual
+  #   virtual:
+  #     members: [npm-local, {name: npmjs, exclude: ["@acme/*"]}]
+  #     publishTo: npm-local
   # # Maven: hosted release and snapshot repositories, a Maven Central proxy,
   # # and a virtual repository merging them behind one URL (docs/maven.md).
   # - name: maven-releases

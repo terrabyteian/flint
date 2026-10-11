@@ -1,6 +1,9 @@
-// Package npm serves npm repositories: hosted repositories that npm,
-// pnpm, Yarn, and Bun install from and npm publishes to, through the npm
-// registry API.
+// Package npm serves npm repositories through the npm registry API that
+// npm, pnpm, Yarn, and Bun use: hosted repositories that they install
+// from and publish to, proxy repositories that cache an upstream registry
+// such as registry.npmjs.org, and virtual repositories that merge hosted
+// and proxy repositories into one registry with dependency-confusion
+// protection.
 //
 // Each repository is served under /npm/<repo>/, which is the registry URL
 // clients are configured with:
@@ -32,18 +35,21 @@
 //
 // Tarballs, version manifests, readmes, and provenance bundles live in
 // the blob store; the metadata store records which repository has which
-// package and version (see records.go). Every request is authorized
-// through an Authorizer, which answers refusals as npm expects: 401
-// without a challenge, after which npm tells the user to log in.
+// package and version (see records.go), and proxy repositories use the
+// shared proxy cache (see proxy.go). Every request is authorized through
+// an Authorizer, which answers refusals as npm expects: 401 without a
+// challenge, after which npm tells the user to log in.
 package npm
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
@@ -52,6 +58,7 @@ import (
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/repo"
 	"github.com/terrabyteian/flint/internal/server"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // Actions passed to Authorizer.Authorize.
@@ -69,6 +76,10 @@ type Authorizer interface {
 	// response: 401 or 403, or 500. When it returns true, it records the
 	// principal in r's context, for Options.User and Options.Actor.
 	Authorize(w http.ResponseWriter, r *http.Request, repo string, actions ...string) bool
+	// AuthorizeVirtual is Authorize for a virtual repository: pulling
+	// needs read on the virtual repository, and other actions need their
+	// roles on publishTo.
+	AuthorizeVirtual(w http.ResponseWriter, r *http.Request, virtual, publishTo string, actions ...string) bool
 }
 
 // AllowAll is an Authorizer that allows every request, for tests.
@@ -76,6 +87,11 @@ type AllowAll struct{}
 
 // Authorize allows the request.
 func (AllowAll) Authorize(http.ResponseWriter, *http.Request, string, ...string) bool { return true }
+
+// AuthorizeVirtual allows the request.
+func (AllowAll) AuthorizeVirtual(http.ResponseWriter, *http.Request, string, string, ...string) bool {
+	return true
+}
 
 // ErrInvalidLogin is what Options.Login returns for a user name and
 // password that do not authenticate.
@@ -110,13 +126,42 @@ type Options struct {
 	// RenderBudget bounds the bytes of rendered packuments kept in
 	// memory; zero means DefaultRenderBudget.
 	RenderBudget int64
+	// Upstream holds the defaults for proxy repositories' upstream
+	// clients, such as the user agent.
+	Upstream upstream.Options
+	// Space, if set, watches the data directory's free space, so proxy
+	// repositories stop caching new content when it runs low.
+	Space *upstream.Space
+	// Fetcher, Docs, and Paths are the proxy cache shared with other
+	// formats: the fetcher, the document cache, which keeps packuments,
+	// and the path-cache engine, which keeps tarballs. Nil means new ones
+	// of the handler's own.
+	Fetcher *upstream.Fetcher
+	Docs    *upstream.DocCache
+	Paths   *upstream.PathCache
+	// ProxyMetrics are the proxy metrics shared with other formats; nil
+	// registers them on Metrics.
+	ProxyMetrics *upstream.Metrics
+	// VirtualMetrics are the virtual repository metrics shared with other
+	// formats; nil registers them on Metrics.
+	VirtualMetrics *repo.Metrics
 }
 
 // repository is a configured npm repository.
 type repository struct {
 	name      string
-	typ       string // config.TypeHosted
-	anonymous bool   // anyone may pull
+	typ       string        // config.TypeHosted, TypeProxy, or TypeVirtual
+	anonymous bool          // anyone may pull
+	audit     bool          // npm audit is forwarded upstream (proxy and virtual)
+	proxy     *proxyRepo    // for a proxy repository
+	virtual   *repo.Virtual // for a virtual repository
+	// mergeLimit, for a virtual repository, bounds the combined size of
+	// the members' packuments it merges in memory.
+	mergeLimit int64
+	// via, for a hosted repository written to through a virtual one,
+	// whose publishTo it is, is that virtual repository, so writes are
+	// authorized as writes through it.
+	via *repository
 }
 
 // Handler serves npm repositories.
@@ -132,9 +177,22 @@ type Handler struct {
 	now   func() time.Time
 
 	renders *renderCache
+	// merges are the merges of virtual repositories' packuments being
+	// built, by render key.
+	mergeMu        sync.Mutex
+	merges         map[string]*mergeFlight
+	mergeFallbacks *metrics.Counter
 
 	publishes    *metrics.Counter
 	publishBytes *metrics.Counter
+
+	// Proxy repositories.
+	space   *upstream.Space
+	fetcher *upstream.Fetcher
+	pm      *upstream.Metrics
+	docs    *upstream.DocCache
+	paths   *upstream.PathCache
+	dists   distCache
 }
 
 // New returns a Handler.
@@ -156,6 +214,10 @@ func New(opts Options) (*Handler, error) {
 		log:     opts.Logger,
 		now:     opts.Now,
 		renders: newRenderCache(opts.RenderBudget),
+		merges:  map[string]*mergeFlight{},
+		space:   opts.Space,
+		docs:    opts.Docs,
+		paths:   opts.Paths,
 	}
 	if h.log == nil {
 		h.log = slog.Default()
@@ -169,23 +231,87 @@ func New(opts Options) (*Handler, error) {
 	if h.user == nil {
 		h.user = func(*http.Request) string { return "" }
 	}
-	for _, rc := range opts.Repositories {
-		if rc.Format != config.FormatNPM {
-			continue
-		}
-		if rc.Type != config.TypeHosted {
-			return nil, fmt.Errorf("npm: repository %s has unsupported type %q", rc.Name, rc.Type)
-		}
-		h.repos[rc.Name] = &repository{name: rc.Name, typ: rc.Type, anonymous: rc.AnonymousPull}
+	upOpts := opts.Upstream
+	if upOpts.Logger == nil {
+		upOpts.Logger = h.log
+	}
+	if upOpts.Now == nil {
+		upOpts.Now = h.now
 	}
 	reg := opts.Metrics
 	if reg == nil {
 		reg = metrics.NewRegistry() // unexposed; keeps the counters usable
 	}
+	vm := opts.VirtualMetrics
+	if vm == nil {
+		vm = repo.NewMetrics(reg)
+	}
+	hasProxy := false
+	for _, rc := range opts.Repositories {
+		if rc.Format != config.FormatNPM {
+			continue
+		}
+		r := &repository{name: rc.Name, typ: rc.Type, anonymous: rc.AnonymousPull, audit: rc.NPM.AuditForwarded()}
+		switch rc.Type {
+		case config.TypeHosted:
+		case config.TypeProxy:
+			if rc.Proxy == nil {
+				return nil, fmt.Errorf("npm: proxy repository %s has no upstream", rc.Name)
+			}
+			p, err := newProxyRepo(rc, upOpts)
+			if err != nil {
+				return nil, fmt.Errorf("npm: proxy repository %s: %w", rc.Name, err)
+			}
+			r.proxy = p
+			hasProxy = true
+		case config.TypeVirtual:
+			v, err := repo.NewVirtual(rc, opts.Repositories, repo.VirtualOptions{Logger: h.log, Metrics: vm})
+			if err != nil {
+				return nil, err
+			}
+			r.virtual = v
+			r.mergeLimit = rc.NPM.MergeBytes()
+		default:
+			return nil, fmt.Errorf("npm: repository %s has unsupported type %q", rc.Name, rc.Type)
+		}
+		h.repos[rc.Name] = r
+	}
 	h.publishes = reg.Counter("flint_npm_publishes_total",
 		"Package versions published to hosted npm repositories, by repository.", "repository")
 	h.publishBytes = reg.Counter("flint_npm_publish_bytes_total",
 		"Bytes of package tarballs published to hosted npm repositories, by repository.", "repository")
+	h.mergeFallbacks = reg.Counter("flint_npm_virtual_merge_fallbacks_total",
+		"Packuments npm virtual repositories served from their first member alone because the members' packuments "+
+			"together exceeded the repository's mergeLimit, by virtual repository.", "repository")
+	h.pm = opts.ProxyMetrics
+	h.fetcher = opts.Fetcher
+	if h.fetcher == nil {
+		h.fetcher = upstream.NewFetcher(opts.Blobs, 0)
+	}
+	if h.pm == nil {
+		space := h.space
+		if !hasProxy {
+			space = nil
+		}
+		h.pm = upstream.NewMetrics(reg, h.fetcher, space)
+	}
+	if h.docs == nil {
+		h.docs = upstream.NewDocCache(upstream.DocCacheOptions{Meta: h.meta, Blobs: h.blobs, Space: h.space,
+			Metrics: h.pm, Logger: h.log, Now: h.now})
+	}
+	if h.paths == nil {
+		h.paths = upstream.NewPathCache(upstream.PathCacheOptions{Meta: h.meta, Blobs: h.blobs, Fetcher: h.fetcher,
+			Docs: h.docs, Space: h.space, Metrics: h.pm, Logger: h.log, Now: h.now})
+	}
+	for _, r := range h.repos {
+		if r.proxy == nil {
+			continue
+		}
+		r.proxy.path.WriteError = WriteError
+		if err := h.paths.Add(r.proxy.path); err != nil {
+			return nil, fmt.Errorf("npm: loading the cache of proxy repository %s: %w", r.name, err)
+		}
+	}
 	return h, nil
 }
 
@@ -193,6 +319,14 @@ func New(opts Options) (*Handler, error) {
 func (h *Handler) Register(s interface{ Handle(string, http.Handler) }) {
 	s.Handle(repo.Prefix(config.FormatNPM), h)
 }
+
+// FlushPullTimes persists the last-pull times recorded since the last
+// flush.
+func (h *Handler) FlushPullTimes(ctx context.Context) error { return h.paths.FlushPullTimes(ctx) }
+
+// Evict evicts the least recently pulled tarballs of every size-limited
+// proxy repository over its limit.
+func (h *Handler) Evict(ctx context.Context) error { return h.paths.Evict(ctx) }
 
 // ServeHTTP routes an /npm/ request.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -230,7 +364,9 @@ func (h *Handler) servePackage(w http.ResponseWriter, r *http.Request, rp *repos
 	if r.Method == http.MethodDelete {
 		if name, file, rev, ok := tarballDeletePath(sub); ok {
 			server.SetRoute(ctx, "npm.unpublish")
-			h.serveTarballDelete(w, r, rp, name, file, rev)
+			if t := h.writable(w, r, rp, name); t != nil {
+				h.serveTarballDelete(w, r, t, name, file, rev)
+			}
 			return
 		}
 	}
@@ -251,7 +387,9 @@ func (h *Handler) servePackage(w http.ResponseWriter, r *http.Request, rp *repos
 		switch r.Method {
 		case http.MethodPut:
 			server.SetRoute(ctx, "npm.publish")
-			h.servePut(w, r, rp, name, "")
+			if t := h.writable(w, r, rp, name); t != nil {
+				h.servePut(w, r, t, name, "")
+			}
 		default:
 			server.SetRoute(ctx, "npm.packument")
 			if allow(w, r, http.MethodGet, http.MethodHead, http.MethodPut) && h.permit(w, r, rp, ActionPull) {
@@ -263,11 +401,15 @@ func (h *Handler) servePackage(w http.ResponseWriter, r *http.Request, rp *repos
 		switch r.Method {
 		case http.MethodPut:
 			server.SetRoute(ctx, "npm.publish")
-			h.servePut(w, r, rp, name, rev)
+			if t := h.writable(w, r, rp, name); t != nil {
+				h.servePut(w, r, t, name, rev)
+			}
 		default:
 			server.SetRoute(ctx, "npm.unpublish")
 			if allow(w, r, http.MethodPut, http.MethodDelete) {
-				h.serveUnpublishAll(w, r, rp, name, rev)
+				if t := h.writable(w, r, rp, name); t != nil {
+					h.serveUnpublishAll(w, r, t, name, rev)
+				}
 			}
 		}
 	case strings.HasPrefix(rest, "-/") && !strings.Contains(rest[len("-/"):], "/"):
@@ -322,7 +464,7 @@ func (h *Handler) serveSpecial(w http.ResponseWriter, r *http.Request, rp *repos
 	case sub == "npm/v1/keys":
 		server.SetRoute(ctx, "npm.keys")
 		if allow(w, r, http.MethodGet, http.MethodHead) && h.permit(w, r, rp, ActionPull) {
-			writeJSON(w, http.StatusOK, map[string][]any{"keys": {}})
+			h.serveKeys(w, r, rp)
 		}
 	case strings.HasPrefix(sub, "npm/v1/attestations/"):
 		server.SetRoute(ctx, "npm.attestations")
@@ -388,9 +530,50 @@ func tarballDeletePath(p string) (name, file, rev string, ok bool) {
 }
 
 // permit authorizes the request for actions on rp, writing the response
-// when it is refused.
+// when it is refused. Pulling through a virtual repository needs read on
+// it; other actions through it need their roles on its publishTo member,
+// which a hosted repository with via is.
 func (h *Handler) permit(w http.ResponseWriter, r *http.Request, rp *repository, actions ...string) bool {
+	switch {
+	case rp.via != nil:
+		return h.auth.AuthorizeVirtual(w, r, rp.via.name, rp.name, actions...)
+	case rp.typ == config.TypeVirtual:
+		return h.auth.AuthorizeVirtual(w, r, rp.name, rp.virtual.PublishTo, actions...)
+	}
 	return h.auth.Authorize(w, r, rp.name, actions...)
+}
+
+// writable returns the hosted repository that receives the changes to
+// package name sent to rp: rp itself, or a virtual repository's
+// publishTo member, with via set, so its writes are authorized as writes
+// through the virtual repository. It writes the response and returns nil
+// if there is none, or the publishTo member's filters refuse the name.
+func (h *Handler) writable(w http.ResponseWriter, r *http.Request, rp *repository, name string) *repository {
+	switch rp.typ {
+	case config.TypeHosted:
+		return rp
+	case config.TypeProxy:
+		if h.permit(w, r, rp, ActionPull) {
+			writeError(w, http.StatusMethodNotAllowed, "repository %s is a read-only proxy of %s; publish to a hosted repository instead",
+				rp.name, rp.proxy.registry)
+		}
+		return nil
+	}
+	if !h.permit(w, r, rp, ActionPull) {
+		return nil
+	}
+	if rp.virtual.PublishTo == "" {
+		writeError(w, http.StatusMethodNotAllowed, "repository %s is a virtual repository without publishTo; publish to one of its hosted members: %s",
+			rp.name, strings.Join(rp.virtual.Hosted(), ", "))
+		return nil
+	}
+	if err := rp.virtual.CheckPublish(name); err != nil {
+		writeError(w, http.StatusForbidden, "%v", err)
+		return nil
+	}
+	t := *h.repos[rp.virtual.PublishTo]
+	t.via = rp
+	return &t
 }
 
 // allow reports whether the request's method is one of methods, and

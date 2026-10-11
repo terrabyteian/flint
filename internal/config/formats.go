@@ -45,7 +45,14 @@ var formats = []formatSpec{
 		},
 		check: checkGeneric},
 	{name: FormatCargo, types: []string{TypeHosted, TypeProxy, TypeVirtual}},
-	{name: FormatNPM, types: []string{TypeHosted}},
+	{name: FormatNPM, types: []string{TypeHosted, TypeProxy, TypeVirtual},
+		settings: func(r *Repository) any {
+			if r.NPM == nil {
+				return nil
+			}
+			return r.NPM
+		},
+		check: checkNPM},
 	{name: FormatMaven, types: []string{TypeHosted, TypeProxy, TypeVirtual},
 		settings: func(r *Repository) any {
 			if r.Maven == nil {
@@ -62,6 +69,57 @@ var formats = []formatSpec{
 			return r.Go
 		},
 		check: validateGo},
+}
+
+// NPM holds the settings of an npm repository.
+type NPM struct {
+	// ForwardAudit, on by default, forwards npm audit's requests to the
+	// upstream: a proxy repository's own, and a virtual repository's
+	// proxy members', without the names its hosted members own. Off,
+	// audits are answered with no advisories, so no package name leaves
+	// the network. Proxy and virtual repositories only.
+	ForwardAudit *bool `json:"forwardAudit,omitempty"`
+	// MergeLimit bounds the combined size of the members' packuments a
+	// virtual repository merges in memory. Above it, the first member's
+	// packument that has the package is served alone. Default 32MiB.
+	// Virtual repositories only.
+	MergeLimit ByteSize `json:"mergeLimit,omitzero"`
+}
+
+// DefaultNPMMergeLimit is an npm virtual repository's default
+// mergeLimit.
+const DefaultNPMMergeLimit = 32 << 20
+
+// AuditForwarded reports whether npm audit's requests are forwarded to
+// the upstream.
+func (n *NPM) AuditForwarded() bool { return n == nil || n.ForwardAudit == nil || *n.ForwardAudit }
+
+// MergeBytes returns the merge limit, with the default filled in.
+func (n *NPM) MergeBytes() int64 {
+	if n == nil || n.MergeLimit.Bytes <= 0 {
+		return DefaultNPMMergeLimit
+	}
+	return n.MergeLimit.Bytes
+}
+
+// checkNPM checks an npm repository's settings, at path.
+func checkNPM(v *validator, path string, r *Repository) {
+	n := r.NPM
+	if n == nil {
+		return
+	}
+	if n.ForwardAudit != nil && r.Type == TypeHosted {
+		v.addf(path+".forwardAudit", "is only allowed for a proxy or virtual repository")
+	}
+	switch s := n.MergeLimit; {
+	case s.IsZero():
+	case r.Type != TypeVirtual:
+		v.addf(path+".mergeLimit", "is only allowed for a virtual repository")
+	case s.invalid != "":
+		v.addf(path+".mergeLimit", "%s", s.invalid)
+	case s.Bytes <= 0:
+		v.addf(path+".mergeLimit", "must be positive")
+	}
 }
 
 // Generic holds the settings of a generic files repository.

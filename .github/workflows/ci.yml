@@ -720,15 +720,29 @@ jobs:
             "dataDir": "$RUNNER_TEMP/flint-data",
             "log": {"level": "debug"},
             "repositories": [
-              {"name": "npm-local", "format": "npm", "type": "hosted"}
+              {"name": "npm-local", "format": "npm", "type": "hosted"},
+              {"name": "npmjs", "format": "npm", "type": "proxy", "anonymousPull": true,
+               "proxy": {"url": "https://registry.npmjs.org/", "revalidateAfter": "1s"}},
+              {"name": "npm-all", "format": "npm", "type": "virtual",
+               "virtual": {"members": ["npm-local", "npmjs"], "publishTo": "npm-local"}},
+              {"name": "npm-decoy", "format": "npm", "type": "hosted", "anonymousPull": true},
+              {"name": "npm-decoy-proxy", "format": "npm", "type": "proxy",
+               "proxy": {"url": "http://127.0.0.1:5000/npm/npm-decoy/", "revalidateAfter": "1s"}},
+              {"name": "npm-guarded", "format": "npm", "type": "virtual",
+               "virtual": {"members": ["npm-local", {"name": "npm-decoy-proxy", "exclude": ["@flint-internal/*"]}]}}
             ],
             "auth": {
               "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
-              "permissions": [{"repositories": ["npm-local"], "role": "delete", "groups": ["ci"]}]
+              "permissions": [
+                {"repositories": ["npm-local"], "role": "delete", "groups": ["ci"]},
+                {"repositories": ["npm-decoy"], "role": "write", "groups": ["ci"]},
+                {"repositories": ["npm-all", "npm-guarded"], "role": "read", "groups": ["ci"]}
+              ]
             }
           }
           JSON
           "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/flint.pid"
           for _ in $(seq 50); do
             curl -fsS http://127.0.0.1:5000/readyz && break
             sleep 0.2
@@ -748,7 +762,28 @@ jobs:
         env:
           E2E_USERNAME: ci-bot
           E2E_CLIENTS: pnpm yarn yarn-berry bun
-        run: E2E_PASSWORD="$BOT_PASSWORD" scripts/e2e-npm.sh 127.0.0.1:5000 npm-local
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-npm" E2E_PASSWORD="$BOT_PASSWORD" scripts/e2e-npm.sh online 127.0.0.1:5000 \
+            npm-local npmjs npm-all npm-decoy npm-decoy-proxy npm-guarded
+      - name: Restart flint with its upstream unreachable
+        run: |
+          pid=$(cat "$RUNNER_TEMP/flint.pid")
+          kill "$pid"
+          while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+          # Every upstream request now goes to a proxy that refuses connections.
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 NO_PROXY= \
+            "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >>"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Install again from the cache
+        env:
+          E2E_USERNAME: ci-bot
+          E2E_CLIENTS: pnpm yarn yarn-berry bun
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-npm" E2E_PASSWORD="$BOT_PASSWORD" scripts/e2e-npm.sh offline 127.0.0.1:5000 \
+            npm-local npmjs npm-all npm-decoy npm-decoy-proxy npm-guarded
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"

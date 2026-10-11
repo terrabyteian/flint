@@ -25,6 +25,8 @@ A blob is **referenced**, and kept, while any of these records points at it, in 
 - a Cargo index file, or an upstream's `config.json`, that a proxy repository cached, until a newer copy replaces it;
 - an npm version in a hosted repository, which references its tarball, its manifest, and its provenance bundle, until the version is unpublished;
 - an npm package in a hosted repository, which references the readme of the last publish that created or moved its `latest` dist-tag;
+- an npm tarball that a proxy repository cached, until the cache evicts it;
+- an npm packument, an upstream's signing keys, or a version's attestations that a proxy repository cached, until a newer copy replaces it;
 - a Maven file in a hosted repository, which references the file's bytes, until the file is deleted;
 - a Maven file that a proxy repository cached, until the cache evicts it, or a `maven-metadata.xml` it cached, until a newer copy replaces it;
 - a Go module version's `.info`, `.mod`, or `.zip`, or a checksum database lookup or tile, that a proxy repository cached, until the cache evicts it;

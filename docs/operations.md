@@ -51,6 +51,8 @@ Actions:
 | `npm.publish` | A version published to a hosted [npm repository](npm.md). |
 | `npm.dist-tag` | An npm dist-tag set or removed. |
 | `npm.deprecate`, `npm.unpublish` | npm versions deprecated or undeprecated, or versions or a whole package unpublished. |
+| `npm.proxy.cache` | An npm proxy repository cached a packument, its upstream's signing keys or a version's attestations, or a tarball for the client that fetched it. |
+| `npm.proxy.pulled`, `npm.proxy.evict` | `(system)`: a size-limited npm proxy repository saved its pull times or evicted tarballs. |
 | `maven.deploy`, `maven.delete` | A file, or a group's plugin prefixes, deployed to a hosted [Maven repository](maven.md), or a file or a version's files deleted. |
 | `maven.proxy.cache` | A Maven proxy repository cached a file or `maven-metadata.xml` for the client that fetched it. |
 | `go.proxy.cache` | A [Go proxy repository](go.md) cached a module version's file, a version list or query answer, or a checksum database record, for the client that fetched it. |

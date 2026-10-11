@@ -23,9 +23,12 @@ import (
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/server"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 var quiet = slog.New(slog.DiscardHandler)
+
+const testWindow = time.Minute
 
 // testAuth records Authorize calls and refuses the actions in deny with
 // the status given, by default 403; a request with the header
@@ -47,6 +50,24 @@ func (a *testAuth) Authorize(w http.ResponseWriter, r *http.Request, repo string
 	}
 	for _, act := range actions {
 		if a.deny[act] {
+			WriteError(w, r, http.StatusForbidden, "access denied")
+			return false
+		}
+	}
+	return true
+}
+
+func (a *testAuth) AuthorizeVirtual(w http.ResponseWriter, r *http.Request, virtual, publishTo string, actions ...string) bool {
+	a.mu.Lock()
+	a.calls = append(a.calls, virtual+">"+publishTo+":"+strings.Join(actions, ","))
+	deny := a.deny
+	a.mu.Unlock()
+	if r.Header.Get("X-Test-Anonymous") != "" {
+		WriteError(w, r, http.StatusUnauthorized, "authentication required")
+		return false
+	}
+	for _, act := range actions {
+		if deny[act] {
 			WriteError(w, r, http.StatusForbidden, "access denied")
 			return false
 		}
@@ -84,19 +105,35 @@ func testUser(r *http.Request) string {
 // env is a Handler over in-memory stores, behind a server with the public
 // URL https://registry.example, with these repositories:
 //
-//	local   hosted
-//	open    hosted, with anonymous pull
-//	oci     a hosted OCI repository
+//	local     hosted
+//	open      hosted, with anonymous pull
+//	oci       a hosted OCI repository
+//	remote    proxy of the fake upstream registry up
+//	quiet     proxy of up, with forwardAudit off and anonymous pull
+//	small     proxy of up with a size limit
+//	all       virtual: local, remote; publishes to local
+//	exposed   virtual: local, remote, without dependency-confusion protection
+//	scoped    virtual: local, remote except @acme/*; publishes to local
+//	acme      virtual: local for @acme/* only, open; publishes to local
+//	plain     virtual: local, open, without publishTo
+//	capped    virtual: remote, local, without dependency-confusion
+//	          protection, merging at most 4KiB
+//	pair      virtual: quiet, remote, without dependency-confusion
+//	          protection
 type env struct {
 	t     *testing.T
 	fs    *fsys.Mem
 	meta  meta.Store
 	blobs blob.Store
 	auth  *testAuth
+	up    *upRegistry
 	h     *Handler
 	reg   *metrics.Registry
 	srv   http.Handler
 	login func(*http.Request, string, string, string) (string, error)
+	// deriveBudget, if set, is the budget of the document cache's derived
+	// documents.
+	deriveBudget int64
 
 	mu    sync.Mutex
 	clock time.Time
@@ -106,7 +143,7 @@ const testBase = "https://registry.example"
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	e := &env{t: t, fs: fsys.NewMem(), auth: &testAuth{}, clock: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)}
+	e := &env{t: t, fs: fsys.NewMem(), auth: &testAuth{}, up: newUpRegistry(t), clock: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)}
 	ms, err := meta.Open("/data/meta", meta.Options{FS: e.fs, Logger: quiet})
 	if err != nil {
 		t.Fatal(err)
@@ -130,14 +167,41 @@ func newEnv(t *testing.T) *env {
 // restart builds a new Handler over the same stores, as a restart would.
 func (e *env) restart() {
 	e.t.Helper()
+	off := false
+	window := config.Duration{Duration: testWindow}
 	repos := []config.Repository{
 		{Name: "local", Format: config.FormatNPM, Type: config.TypeHosted},
 		{Name: "open", Format: config.FormatNPM, Type: config.TypeHosted, AnonymousPull: true},
 		{Name: "oci", Format: config.FormatOCI, Type: config.TypeHosted},
+		{Name: "remote", Format: config.FormatNPM, Type: config.TypeProxy,
+			Proxy: &config.Proxy{URL: e.up.URL + "/registry", RevalidateAfter: window}},
+		{Name: "quiet", Format: config.FormatNPM, Type: config.TypeProxy, AnonymousPull: true, NPM: &config.NPM{ForwardAudit: &off},
+			Proxy: &config.Proxy{URL: e.up.URL + "/registry/", RevalidateAfter: window}},
+		{Name: "small", Format: config.FormatNPM, Type: config.TypeProxy,
+			Proxy: &config.Proxy{URL: e.up.URL + "/registry/", RevalidateAfter: window, SizeLimit: config.ByteSize{Bytes: 100}}},
+		{Name: "all", Format: config.FormatNPM, Type: config.TypeVirtual,
+			Virtual: &config.Virtual{Members: config.Members("local", "remote"), PublishTo: "local"}},
+		{Name: "exposed", Format: config.FormatNPM, Type: config.TypeVirtual,
+			Virtual: &config.Virtual{Members: config.Members("local", "remote"), DependencyConfusionProtection: &off}},
+		{Name: "scoped", Format: config.FormatNPM, Type: config.TypeVirtual, Virtual: &config.Virtual{PublishTo: "local",
+			Members: []config.VirtualMember{{Name: "local"}, {Name: "remote", Exclude: []string{"@acme/*"}}}}},
+		{Name: "acme", Format: config.FormatNPM, Type: config.TypeVirtual, Virtual: &config.Virtual{PublishTo: "local",
+			Members: []config.VirtualMember{{Name: "local", Include: []string{"@acme/*"}}, {Name: "open"}}}},
+		{Name: "plain", Format: config.FormatNPM, Type: config.TypeVirtual, Virtual: &config.Virtual{Members: config.Members("local", "open")}},
+		{Name: "capped", Format: config.FormatNPM, Type: config.TypeVirtual, NPM: &config.NPM{MergeLimit: config.ByteSize{Bytes: 4 << 10}},
+			Virtual: &config.Virtual{Members: config.Members("remote", "local"), DependencyConfusionProtection: &off}},
+		{Name: "pair", Format: config.FormatNPM, Type: config.TypeVirtual,
+			Virtual: &config.Virtual{Members: config.Members("quiet", "remote"), DependencyConfusionProtection: &off}},
 	}
 	e.reg = metrics.NewRegistry()
+	var docs *upstream.DocCache
+	if e.deriveBudget > 0 {
+		docs = upstream.NewDocCache(upstream.DocCacheOptions{Meta: e.meta, Blobs: e.blobs, Logger: quiet, Now: e.now,
+			DeriveBudget: e.deriveBudget})
+	}
 	h, err := New(Options{Meta: e.meta, Blobs: e.blobs, Repositories: repos, Authorizer: e.auth, Logger: quiet,
-		Metrics: e.reg, Now: e.now, User: testUser, Login: e.login})
+		Metrics: e.reg, Now: e.now, User: testUser, Login: e.login, Docs: docs,
+		Upstream: upstream.Options{Attempts: 2, Backoff: time.Millisecond}})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -162,16 +226,48 @@ func (e *env) advance(d time.Duration) {
 	e.clock = e.clock.Add(d)
 }
 
+// aborted is the status do reports for a response the handler cut off,
+// as a server would close the connection.
+const aborted = -1
+
 // do serves a request; hdr holds header name and value pairs.
-func (e *env) do(method, path string, body io.Reader, hdr ...string) *httptest.ResponseRecorder {
+func (e *env) do(method, path string, body io.Reader, hdr ...string) (w *httptest.ResponseRecorder) {
 	e.t.Helper()
 	r := httptest.NewRequest(method, path, body)
 	for i := 0; i+1 < len(hdr); i += 2 {
 		r.Header.Set(hdr[i], hdr[i+1])
 	}
-	w := httptest.NewRecorder()
+	w = httptest.NewRecorder()
+	defer func() {
+		if v := recover(); v != nil {
+			if v != http.ErrAbortHandler {
+				panic(v)
+			}
+			w.Code = aborted
+		}
+	}()
 	e.srv.ServeHTTP(w, r)
 	return w
+}
+
+// settle waits until fetches in progress have linked their files.
+func (e *env) settle() {
+	e.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for e.h.fetcher.Active() > 0 {
+		if time.Now().After(deadline) {
+			e.t.Fatal("fetches did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// has reports whether the metadata store has key k.
+func (e *env) has(k []byte) bool {
+	v := e.meta.View()
+	defer v.Release()
+	_, ok := v.Get(k)
+	return ok
 }
 
 // expect serves a request and checks the status.
@@ -266,9 +362,6 @@ func (e *env) publish(repo string, p *pkg, status int) *httptest.ResponseRecorde
 	return e.expect("PUT", "/npm/"+repo+"/"+escapeName(p.name), bytes.NewReader(p.body()), status,
 		"Content-Type", "application/json")
 }
-
-// escapeName escapes a package name as npm does in URLs.
-func escapeName(name string) string { return strings.Replace(name, "/", "%2f", 1) }
 
 // packument is a full packument as clients read it.
 type testPackument struct {
