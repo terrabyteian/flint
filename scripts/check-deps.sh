@@ -11,6 +11,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Check this module alone, even inside a contributor's multi-module go.work.
+export GOWORK=off
+
 module=$(go list -m)
 status=0
 
