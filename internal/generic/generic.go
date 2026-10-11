@@ -137,9 +137,6 @@ type Handler struct {
 	ownPaths bool // paths is this handler's own, which RunProxy runs
 	docs     *upstream.DocCache
 	ownDocs  bool
-
-	uploads     *metrics.Counter
-	uploadBytes *metrics.Counter
 }
 
 // New returns a Handler.
@@ -234,10 +231,6 @@ func New(opts Options) (*Handler, error) {
 		}
 		h.repos[rc.Name] = r
 	}
-	h.uploads = reg.Counter("flint_generic_uploads_total",
-		"Files uploaded to hosted generic files repositories, by repository.", "repository")
-	h.uploadBytes = reg.Counter("flint_generic_upload_bytes_total",
-		"Bytes of files uploaded to hosted generic files repositories, by repository.", "repository")
 	return h, nil
 }
 

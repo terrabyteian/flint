@@ -646,7 +646,7 @@ For generic files:
 ### Generic files
 
 - `PUT`, `GET`, `HEAD`, and `DELETE` of files by path, with `Range` and conditional requests (`If-None-Match`, `If-Modified-Since`, `If-Range`).
-- Upload digests in `Content-Digest` (RFC 9530, `sha-256`) and `X-Checksum-Sha256`; downloads carry `Repr-Digest`, `X-Checksum-Sha256`, and an `ETag` of the sha256 digest.
+- Upload digests in `Content-Digest` (RFC 9530, `sha-256`) and `X-Checksum-Sha256`; downloads carry an `ETag` of the sha256 digest.
 - Directory listings as JSON or HTML that `wget -r` can follow.
 - Clients: curl and wget, with basic credentials, a `.netrc` file, or an API token as a bearer token.
 - Not supported: WebDAV, multipart form uploads, and archive extraction or bundling.

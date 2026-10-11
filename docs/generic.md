@@ -39,7 +39,7 @@ Downloads carry:
 
 - `Content-Type`: the type given at upload, or the one the file's extension implies, or `application/octet-stream`. A proxied file has the upstream's type.
 - `ETag`: `"sha256:<hex>"`, the file's sha256 digest, with which a client revalidates a copy it has.
-- For hosted files, `Last-Modified` (the upload time, so `wget -N` skips files it has), `X-Checksum-Sha256`, and `Repr-Digest` (RFC 9530).
+- For hosted files, `Last-Modified` (the upload time, so `wget -N` skips files it has).
 - `Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff`, so an uploaded HTML page or script opened in a browser never runs as part of flint's site.
 
 ### Listings
@@ -158,7 +158,7 @@ A proxy repository caches files from one upstream base URL, `proxy.url`: a reque
 - **Directory listings** are not proxied: a path ending in `/` is `404`.
 - **Disk space and size limits** work as for [OCI proxy repositories](configuration.md#proxy-repositories): under `proxyCache.minFreeSpace`, new files are passed through without being cached; without `generic.immutable`, only files up to 64 MiB, and a larger file that is not cached is answered with `503`. `proxy.sizeLimit` needs `generic.immutable`, since only files cached forever count against it; over it, the least recently downloaded files are evicted.
 - **Credentials.** With `proxy.username` and `proxy.passwordFile`, flint answers the upstream's Basic or Bearer authentication challenges, and sends the credentials only to the host of `proxy.url`, never to a host it is redirected to.
-- **Read-only.** Uploads and deletes are refused with `405`.
+- **Read-only.** Uploads and deletes are refused with `405` to clients that may download from the repository, and with `401` or `403` to others.
 
 ## Virtual repositories
 
@@ -168,7 +168,7 @@ A virtual repository serves each path from the first of its members, in order, t
 - **Dependency-confusion protection**, on by default: once a hosted member has a file at a path, or a tombstone of one, the proxy members are never consulted for that path, so a file an upstream serves can never stand in for a first-party one, even after the first-party file is deleted. Set `virtual.dependencyConfusionProtection` to `false` to consult every member in order.
 - A member that fails, such as a proxy whose upstream is unreachable and has the file uncached, is skipped with a warning in the log, counted in `flint_virtual_member_skips_total`, and the next member is consulted. The request fails with the first failure only if no member has the file.
 - **Listings** merge the listings of the hosted members, filtered by their filters, the first member's entry winning where several have the same name. Proxy members' directories are not listed.
-- **Uploads** go to the hosted member that `virtual.publishTo` names, and need the permission an upload to it directly needs. An upload to a path that member's filters do not admit is refused with `403`, naming the member and the filter, and nothing is stored. Without `publishTo`, uploads are refused with `405`, naming the hosted members to upload to instead. Deletes go to the hosted repository directly.
+- **Uploads** go to the hosted member that `virtual.publishTo` names, and need the permission an upload to it directly needs. An upload to a path that member's filters do not admit is refused with `403`, naming the member and the filter, and nothing is stored. Without `publishTo`, uploads are refused with `405`, naming the hosted members to upload to instead, to clients that may download through the virtual repository, and with `401` or `403` to others. Deletes go to the hosted repository directly.
 
 Downloading through a virtual repository needs the `read` role on the virtual repository, or its `anonymousPull`; the members' own permissions are not consulted.
 

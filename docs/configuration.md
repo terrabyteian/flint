@@ -404,8 +404,6 @@ Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime
 | `flint_oci_link_retries_total` | Link batches retried because a concurrent change, such as a garbage-collection sweep starting, failed their precondition. |
 | `flint_pypi_uploads_total{repository}` | Distribution files uploaded to hosted PyPI repositories. |
 | `flint_pypi_upload_bytes_total{repository}` | Bytes of distribution files uploaded to hosted PyPI repositories. |
-| `flint_generic_uploads_total{repository}` | Files uploaded to hosted generic files repositories, including identical re-uploads. |
-| `flint_generic_upload_bytes_total{repository}` | Bytes of files uploaded to hosted generic files repositories. |
 | `flint_virtual_member_skips_total{repository,member}` | Members of virtual repositories left out of a response because they failed, such as a proxy whose upstream could not be reached with nothing cached. |
 | `flint_proxy_requests_total{repository,result}` | Pulls from proxy repositories, by result: `hit` (served from the cache), `revalidated` (served after the upstream confirmed a tag, listing, or project page), `fetched` (fetched from the upstream and cached), `passthrough` (fetched without caching, under disk pressure, over the size limit, or for a PyPI file whose index entry has no sha256 digest), and `stale` (served from the cache because the upstream failed). |
 | `flint_proxy_upstream_errors_total{repository}` | Upstream requests that failed: unreachable, server errors, denied access, failed authentication, or content that did not match its digest. A blob fetch shared by several clients counts once. |

@@ -31,12 +31,9 @@ func TestHostedUploadDownload(t *testing.T) {
 	if w.Body.String() != string(body) {
 		t.Errorf("body = %q", w.Body)
 	}
-	sum, _ := hex.DecodeString(sha(body))
 	for k, want := range map[string]string{
 		"Content-Type":            "text/plain; charset=utf-8",
 		"ETag":                    `"sha256:` + sha(body) + `"`,
-		"X-Checksum-Sha256":       sha(body),
-		"Repr-Digest":             "sha-256=:" + base64.StdEncoding.EncodeToString(sum) + ":",
 		"Content-Security-Policy": "sandbox",
 		"X-Content-Type-Options":  "nosniff",
 		"Cache-Control":           "private, max-age=31536000, immutable",
@@ -61,12 +58,6 @@ func TestHostedUploadDownload(t *testing.T) {
 	e.get(http.StatusNotFound, "/generic/team/tools/v1/hello.txt") // another repository
 	e.get(http.StatusNotFound, "/generic/pypi/tools/v1/hello.txt") // another format
 	e.get(http.StatusNotFound, "/generic/nope/x")
-	if got := e.metric(`flint_generic_uploads_total{repository="local"}`); got != "1" {
-		t.Errorf("uploads metric = %q", got)
-	}
-	if got := e.metric(`flint_generic_upload_bytes_total{repository="local"}`); got != "21" {
-		t.Errorf("upload bytes metric = %q", got)
-	}
 
 	// Anonymous pull makes a file cacheable by shared caches.
 	e.put(http.StatusCreated, "/generic/team/a.bin", body)
@@ -308,16 +299,29 @@ func TestListing(t *testing.T) {
 }
 
 // TestReadOnlyRepositories checks the writes proxy and virtual
-// repositories refuse.
+// repositories refuse, and that only clients that may read the
+// repository learn why.
 func TestReadOnlyRepositories(t *testing.T) {
 	e := newEnv(t)
 	e.put(http.StatusMethodNotAllowed, "/generic/remote/a", []byte("x"))
 	e.put(http.StatusMethodNotAllowed, "/generic/all/a", []byte("x"))
 	e.expect(http.StatusMethodNotAllowed, "DELETE", "/generic/remote/a", nil)
 	e.expect(http.StatusMethodNotAllowed, "DELETE", "/generic/filtered/a", nil)
-	if calls := e.auth.reset(); len(calls) != 0 {
-		t.Errorf("refused writes were authorized: %v", calls)
+	want := []string{"remote:pull", "virtual all>:pull", "remote:pull", "virtual filtered>team:pull"}
+	if got := e.auth.reset(); !slices.Equal(got, want) {
+		t.Errorf("authorized %q, want %q", got, want)
 	}
+
+	e.auth.deny = "remote"
+	if w := e.put(http.StatusUnauthorized, "/generic/remote/a", []byte("x")); strings.Contains(w.Body.String(), e.up.URL) {
+		t.Errorf("an unauthorized upload refusal names the upstream: %q", w.Body)
+	}
+	e.expect(http.StatusUnauthorized, "DELETE", "/generic/remote/a", nil)
+	e.auth.deny = "all"
+	if w := e.put(http.StatusUnauthorized, "/generic/all/a", []byte("x")); strings.Contains(w.Body.String(), "local") {
+		t.Errorf("an unauthorized upload refusal names the members: %q", w.Body)
+	}
+	e.expect(http.StatusUnauthorized, "DELETE", "/generic/all/a", nil)
 }
 
 // TestAuthorization checks the actions each request is authorized for.

@@ -77,9 +77,6 @@ func (h *Handler) serveBlob(w http.ResponseWriter, r *http.Request, rp *reposito
 	setFileHeaders(hd)
 	hd.Set("Content-Type", f.ContentType)
 	hd.Set("ETag", `"`+f.Digest.String()+`"`)
-	sum, _ := hex.DecodeString(f.Digest.Hex())
-	hd.Set("Repr-Digest", "sha-256=:"+base64.StdEncoding.EncodeToString(sum)+":")
-	hd.Set("X-Checksum-Sha256", f.Digest.Hex())
 	switch {
 	case rp.overwrite:
 		hd.Set("Cache-Control", "no-cache")
@@ -112,13 +109,17 @@ func (h *Handler) serveUpload(w http.ResponseWriter, r *http.Request, rp *reposi
 	var via *repo.Virtual
 	switch {
 	case rp.typ == config.TypeProxy:
-		writeError(w, http.StatusMethodNotAllowed, "repository %s is a read-only proxy of %s; upload to a hosted repository instead",
-			rp.name, rp.proxy.base.Redacted())
+		if h.permit(w, r, rp, ActionPull) {
+			writeError(w, http.StatusMethodNotAllowed, "repository %s is a read-only proxy of %s; upload to a hosted repository instead",
+				rp.name, rp.proxy.base.Redacted())
+		}
 		return
 	case rp.typ == config.TypeVirtual && rp.virtual.PublishTo == "":
-		writeError(w, http.StatusMethodNotAllowed,
-			"repository %s is a virtual repository without publishTo; upload to one of its hosted members: %s",
-			rp.name, strings.Join(rp.virtual.Hosted(), ", "))
+		if h.permit(w, r, rp, ActionPull) {
+			writeError(w, http.StatusMethodNotAllowed,
+				"repository %s is a virtual repository without publishTo; upload to one of its hosted members: %s",
+				rp.name, strings.Join(rp.virtual.Hosted(), ", "))
+		}
 		return
 	}
 	if !h.permit(w, r, rp, ActionPush) {
@@ -136,8 +137,6 @@ func (h *Handler) serveUpload(w http.ResponseWriter, r *http.Request, rp *reposi
 		h.fail(w, r, err)
 		return
 	}
-	h.uploads.With(rp.name).Inc()
-	h.uploadBytes.With(rp.name).Add(float64(f.Size))
 	h.log.InfoContext(r.Context(), "generic file uploaded", "repository", rp.name, "path", p,
 		"digest", f.Digest.String(), "size", f.Size, "created", created, "via", viaName(via))
 	status := http.StatusOK
@@ -367,7 +366,9 @@ func uploadType(ct, p string) (string, error) {
 // used again; in one that allows overwrites, its record is deleted.
 func (h *Handler) serveDelete(w http.ResponseWriter, r *http.Request, rp *repository, p string) {
 	if rp.typ != config.TypeHosted {
-		writeError(w, http.StatusMethodNotAllowed, "repository %s is a %s repository; delete files from a hosted repository", rp.name, rp.typ)
+		if h.permit(w, r, rp, ActionPull) {
+			writeError(w, http.StatusMethodNotAllowed, "repository %s is a %s repository; delete files from a hosted repository", rp.name, rp.typ)
+		}
 		return
 	}
 	if !h.permit(w, r, rp, ActionDelete) {
