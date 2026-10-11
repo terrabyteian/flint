@@ -6,7 +6,7 @@ When a decision here changes, update this document in the same pull request.
 
 ## Goals
 
-flint is an artifact registry: a self-hosted replacement for JFrog Artifactory, built from scratch.
+flint is a self-hosted artifact registry, built from scratch.
 
 - Serve container images and OCI artifacts, and Python packages, from one server.
 - Host first-party artifacts and cache upstream registries (Docker Hub, ghcr.io, quay.io, PyPI) behind the same endpoint.
@@ -16,7 +16,7 @@ flint is an artifact registry: a self-hosted replacement for JFrog Artifactory, 
 
 ## Non-goals
 
-- **Migration from Artifactory.** flint is a fresh build; there is no import tool.
+- **Migration from other registries.** flint is a fresh build; there is no import tool.
 - **Multi-server high availability in v1.** v1 is a single server. The data layout and metadata store are designed so HA can be added later without a data migration (see [High availability later](#high-availability-later)).
 - **Every package format.** v1 supports OCI/Docker and PyPI. Other formats come later, on the same storage and metadata core.
 - **Docker image manifest schema 1.** It is deprecated and unsupported.

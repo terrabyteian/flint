@@ -1,6 +1,6 @@
 # flint
 
-flint is a self-hosted artifact registry, built from scratch as a lightweight replacement for JFrog Artifactory.
+flint is a self-hosted artifact registry, built from scratch.
 It serves container images and OCI artifacts, and Python packages, from hosted repositories and caching proxies of upstream registries such as Docker Hub, ghcr.io, and PyPI.
 
 > **Status: pre-alpha.** flint does not serve anything yet.
