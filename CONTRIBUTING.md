@@ -52,6 +52,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/flint
 
 It also builds the container image for linux/amd64 and linux/arm64 from the [`Dockerfile`](Dockerfile); see [releasing](docs/releasing.md#building-the-image-locally) to build it locally.
 
+CI also runs the official OCI distribution conformance suite and [`scripts/e2e-oci.sh`](scripts/e2e-oci.sh) against a running flint; the `oci` job in [`ci.yml`](.github/workflows/ci.yml) shows the configuration, and the script's header lists the clients it needs.
+
 ## Pull requests
 
 - Keep pull requests focused on one change.
