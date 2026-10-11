@@ -3,21 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/gc"
 )
 
@@ -112,16 +107,15 @@ func gcCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr i
 
 // gcFlags are the flags every gc command takes.
 type gcFlags struct {
-	fs                              *flag.FlagSet
-	url, config, user, passwordFile string
-	json                            bool
+	fs                      *flag.FlagSet
+	url, user, passwordFile string
+	json                    bool
 }
 
 func newGCFlags(stderr io.Writer) *gcFlags {
 	f := &gcFlags{fs: flag.NewFlagSet("flint gc", flag.ContinueOnError)}
 	f.fs.SetOutput(stderr)
-	f.fs.StringVar(&f.url, "url", "", "the server's base `URL`; default $FLINT_URL, else the local server -config describes")
-	f.fs.StringVar(&f.config, "config", defaultConfigPath, "the server's configuration `file`, to find the local server without -url")
+	f.fs.StringVar(&f.url, "url", "", "the server's base `URL`; default $FLINT_URL")
 	f.fs.StringVar(&f.user, "user", "", "user `name`; default $FLINT_USER, else __token__, to authenticate with an API token")
 	f.fs.StringVar(&f.passwordFile, "password-file", "", "`file` holding the password or API token, - for standard input; default $FLINT_PASSWORD")
 	f.fs.BoolVar(&f.json, "json", false, "print JSON")
@@ -138,15 +132,7 @@ func newGCClient(f *gcFlags, stdin io.Reader) (*gcClient, error) {
 	c := &gcClient{client: &http.Client{Timeout: time.Minute}}
 	base := firstSet(f.url, os.Getenv("FLINT_URL"))
 	if base == "" {
-		cfg, err := config.Load(f.config)
-		if err != nil {
-			return nil, fmt.Errorf("finding the server: give -url, set FLINT_URL, or give -config: %w", err)
-		}
-		var tc *tls.Config
-		if base, tc, err = localServer(cfg); err != nil {
-			return nil, err
-		}
-		c.client.Transport = &http.Transport{TLSClientConfig: tc}
+		return nil, errors.New("no server: give -url or set FLINT_URL")
 	}
 	c.url = strings.TrimSuffix(base, "/") + "/api/v1/gc"
 
@@ -187,48 +173,6 @@ func firstSet(ss ...string) string {
 func trimNewline(s string) string {
 	s = strings.TrimSuffix(s, "\n")
 	return strings.TrimSuffix(s, "\r")
-}
-
-// localServer returns the base URL of the server cfg describes, on this
-// host, and with TLS, a client configuration that trusts exactly the
-// certificate the server serves from cfg's certificate file.
-func localServer(cfg *config.Config) (string, *tls.Config, error) {
-	host, port, err := net.SplitHostPort(cfg.Listen)
-	if err != nil {
-		return "", nil, err
-	}
-	if ip := net.ParseIP(host); host == "" || ip != nil && ip.IsUnspecified() {
-		host = "127.0.0.1"
-		if ip != nil && ip.To4() == nil {
-			host = "::1"
-		}
-	}
-	addr := net.JoinHostPort(host, port)
-	if cfg.TLS == nil {
-		return "http://" + addr, nil, nil
-	}
-	pemBytes, err := os.ReadFile(cfg.TLS.CertFile)
-	if err != nil {
-		return "", nil, err
-	}
-	block, _ := pem.Decode(pemBytes)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return "", nil, fmt.Errorf("%s holds no PEM certificate", cfg.TLS.CertFile)
-	}
-	leaf := block.Bytes
-	tc := &tls.Config{
-		// The server is addressed by its local address, which its
-		// certificate need not name; trust the configured certificate
-		// itself instead.
-		InsecureSkipVerify: true,
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 || !bytes.Equal(raw[0], leaf) {
-				return fmt.Errorf("the server's certificate is not the one in %s", cfg.TLS.CertFile)
-			}
-			return nil
-		},
-	}
-	return "https://" + addr, tc, nil
 }
 
 // call makes an admin API request and decodes its JSON response into out.

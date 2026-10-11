@@ -55,13 +55,7 @@ flint gc status -url https://registry.example -user admin -password-file -
 `-json` prints the report as JSON, and `run -detach` starts a run without waiting for it; `flint gc status` shows it.
 Interrupting `flint gc run` stops the waiting, not the run.
 
-Without `-url` or `FLINT_URL`, `flint gc` reads the server's configuration file (`-config`, default `/etc/flint/config.json`) and calls the server on its own host, which is how it works inside the container:
-
-```sh
-kubectl exec -i -n flint flint-0 -- flint gc run -user admin -password-file - < admin-password
-```
-
-When the configuration serves TLS, `flint gc` trusts exactly the certificate the server serves from its `tls.certFile`, since the certificate need not name the local address.
+`flint gc` needs `-url` or `FLINT_URL`, and verifies the server's TLS certificate as any HTTPS client does.
 
 `flint gc run` exits 0 when the run succeeded, and 1 otherwise.
 
@@ -95,7 +89,7 @@ A run ends in one of these states:
 | --- | --- |
 | `succeeded` | The run finished. |
 | `refused` | The run deleted nothing, because the metadata holds records whose references it cannot know; `refused` says which. See below. |
-| `failed` | Some blobs could not be deleted, or the run could not finish; `error` and `delete error` say why. What it deleted is listed. |
+| `failed` | Some blobs could not be deleted, or the run could not finish; `error` and `delete error` say why. The report counts the blobs it deleted, and the server log lists each. |
 | `cancelled` | flint shut down during the run. |
 
 ## Scheduling

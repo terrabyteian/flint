@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/gc"
 )
 
@@ -267,58 +266,9 @@ func TestGCUsage(t *testing.T) {
 		t.Errorf("flint gc = %d\n%s", code, stderr.String())
 	}
 	t.Setenv("FLINT_URL", "")
-	if code := gcCmd(context.Background(), []string{"status", "-config", filepath.Join(t.TempDir(), "missing.json")},
-		strings.NewReader(""), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "give -url, set FLINT_URL, or give -config") {
+	if code := gcCmd(context.Background(), []string{"status"},
+		strings.NewReader(""), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "give -url or set FLINT_URL") {
 		t.Errorf("flint gc status without a server = %d\n%s", code, stderr.String())
-	}
-}
-
-func TestLocalServer(t *testing.T) {
-	for listen, want := range map[string]string{
-		":5000":          "http://127.0.0.1:5000",
-		"0.0.0.0:80":     "http://127.0.0.1:80",
-		"[::]:5000":      "http://[::1]:5000",
-		"10.1.2.3:5000":  "http://10.1.2.3:5000",
-		"localhost:5000": "http://localhost:5000",
-	} {
-		got, tc, err := localServer(&config.Config{Listen: listen})
-		if err != nil || got != want || tc != nil {
-			t.Errorf("localServer(%q) = %q, %v, %v; want %q", listen, got, tc, err, want)
-		}
-	}
-
-	// With TLS, the client trusts exactly the configured certificate.
-	dir := t.TempDir()
-	certFile, keyFile, _ := writeTestCert(t, dir)
-	cfgPath := writeConfig(t, map[string]any{
-		"listen": "127.0.0.1:0", "dataDir": filepath.Join(dir, "data"),
-		"tls": map[string]any{"certFile": certFile, "keyFile": keyFile},
-	})
-	p := startFlint(t, "serve", "-config", cfgPath)
-	if p.addr == "" {
-		t.Fatalf("flint exited at startup:\n%s", p.output())
-	}
-	_, port, _ := strings.Cut(p.addr, ":")
-	got, tc, err := localServer(&config.Config{Listen: ":" + port, TLS: &config.TLS{CertFile: certFile, KeyFile: keyFile}})
-	if err != nil || got != "https://127.0.0.1:"+port {
-		t.Fatalf("localServer with TLS = %q, %v", got, err)
-	}
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tc}}
-	if code, _ := get(t, client, got+"/healthz"); code != http.StatusOK {
-		t.Errorf("GET /healthz with the pinned certificate = %d", code)
-	}
-	// Another certificate is refused.
-	otherCert, _, _ := writeTestCert(t, t.TempDir())
-	_, tc, err = localServer(&config.Config{Listen: ":" + port, TLS: &config.TLS{CertFile: otherCert}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client = &http.Client{Transport: &http.Transport{TLSClientConfig: tc}}
-	if _, err := client.Get(got + "/healthz"); err == nil || !strings.Contains(err.Error(), "is not the one in") {
-		t.Errorf("GET with another pinned certificate = %v", err)
-	}
-	if _, _, err := localServer(&config.Config{Listen: ":1", TLS: &config.TLS{CertFile: filepath.Join(dir, "missing")}}); err == nil {
-		t.Error("localServer with a missing certificate file succeeded")
 	}
 }
 

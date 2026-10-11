@@ -494,8 +494,8 @@ func (c *Collector) run(ctx context.Context, r *Report) *Report {
 	r.Phase = ""
 	r.Finished = c.now().UTC()
 	switch {
-	case err == nil && len(r.Errors) > 0:
-		r.State, r.Error = StateFailed, fmt.Sprintf("%d blobs could not be deleted", len(r.Errors))
+	case err == nil && r.Failed.Blobs > 0:
+		r.State, r.Error = StateFailed, fmt.Sprintf("%d blobs could not be deleted", r.Failed.Blobs)
 	case err == nil:
 		r.State = StateSucceeded
 	case errors.Is(err, errRefused):
@@ -520,7 +520,8 @@ func (c *Collector) run(ctx context.Context, r *Report) *Report {
 		"duration", final.Finished.Sub(final.Started).String(), "referenced", final.Referenced,
 		"stored_blobs", final.Stored.Blobs, "stored_bytes", final.Stored.Bytes,
 		"unreferenced_blobs", final.Unreferenced.Blobs, "in_grace_period_blobs", final.InGracePeriod.Blobs,
-		"kept_blobs", final.Kept.Blobs, "deleted_blobs", final.Deleted.Blobs, "deleted_bytes", final.Deleted.Bytes}
+		"kept_blobs", final.Kept.Blobs, "deleted_blobs", final.Deleted.Blobs, "deleted_bytes", final.Deleted.Bytes,
+		"failed_blobs", final.Failed.Blobs}
 	switch final.State {
 	case StateSucceeded:
 		c.log.Info("garbage collection finished", attrs...)
@@ -696,7 +697,7 @@ func (c *Collector) sweep(ctx context.Context, r *Report, round []blob.Info) (er
 			return ctx.Err()
 		default:
 			c.log.Error("garbage collection could not delete a blob", "digest", b.Digest.String(), "err", err)
-			c.update(r, func(r *Report) { r.addError(err.Error()) })
+			c.update(r, func(r *Report) { r.addError(b.Size, err.Error()) })
 		}
 	}
 	c.hook(StepDeleted)

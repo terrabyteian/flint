@@ -75,13 +75,16 @@ type Report struct {
 	// Deleted counts the blobs the run deleted, or for a dry run, would
 	// have deleted.
 	Deleted Count `json:"deleted"`
+	// Failed counts the blobs the run could not delete.
+	Failed Count `json:"failed"`
 	// PinnedViews is the largest number of pinned views a check read.
 	PinnedViews int `json:"pinnedViews"`
 
 	// Refused says why the run deleted nothing, when State is
 	// StateRefused.
 	Refused []string `json:"refused,omitempty"`
-	// Errors lists failures to delete blobs, up to maxErrors.
+	// Errors lists failures to delete blobs, up to maxErrors; Failed
+	// counts them all.
 	Errors []string `json:"errors,omitempty"`
 	// Error is why the run failed or was cancelled.
 	Error string `json:"error,omitempty"`
@@ -109,7 +112,8 @@ const (
 	maxListed = 1000
 )
 
-func (r *Report) addError(msg string) {
+func (r *Report) addError(size int64, msg string) {
+	r.Failed.add(size)
 	if len(r.Errors) < maxErrors {
 		r.Errors = append(r.Errors, msg)
 	}

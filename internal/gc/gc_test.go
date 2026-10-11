@@ -714,6 +714,29 @@ func TestDeleteFailure(t *testing.T) {
 	}
 }
 
+// TestManyDeleteFailures counts every blob it could not delete, beyond
+// the errors it lists.
+func TestManyDeleteFailures(t *testing.T) {
+	e := newTestEnv(t, nil)
+	n := maxErrors + 3
+	for i := range n {
+		e.put(fmt.Sprintf("stuck %d", i))
+	}
+	e.clock.advance(DefaultGracePeriod + time.Second)
+	e.fs.SetFault(func(op fsys.Op, name string) error {
+		if op == fsys.OpRemove {
+			return errors.New("injected remove failure")
+		}
+		return nil
+	})
+	r := e.run(false)
+	e.fs.SetFault(nil)
+	if r.State != StateFailed || r.Failed.Blobs != int64(n) || len(r.Errors) != maxErrors ||
+		r.Error != fmt.Sprintf("%d blobs could not be deleted", n) {
+		t.Fatalf("report = %+v", r)
+	}
+}
+
 // TestBlobGoneMeanwhile ignores a doomed blob that is already gone.
 func TestBlobGoneMeanwhile(t *testing.T) {
 	e := newTestEnv(t, nil)
