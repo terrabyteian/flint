@@ -48,7 +48,6 @@ Repositories and permission grants declared here are read-only through the API.
       "username": "admin",
       "passwordFile": "/etc/flint/admin/password"
     },
-    "tokenTTL": "5m",
     "permissions": [
       {
         "repositories": ["docker-local", "releases"],
@@ -82,7 +81,6 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `repositories` | array | `[]` | Repositories declared in configuration; see below. |
 | `auth.permissions` | array | `[]` | Permission grants; see below. |
 | `auth.bootstrapAdmin` | object | none | Create the first administrator at startup if none exists; see below. |
-| `auth.tokenTTL` | duration string | `"5m"` | Lifetime of the bearer tokens the Docker token endpoint issues, from `30s` to `1h`. |
 
 Durations are Go duration strings: a number and a unit, such as `"30s"`, `"2m"`, or `"1m30s"`.
 

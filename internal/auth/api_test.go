@@ -153,6 +153,41 @@ func TestAPIPasswords(t *testing.T) {
 		http.StatusNotFound, "unknown user")
 }
 
+// TestAPIAdminTokenNeedsPassword checks that even a token with the admin
+// role cannot change credentials or accounts, but keeps its other powers.
+func TestAPIAdminTokenNeedsPassword(t *testing.T) {
+	e := newEnv(t, testConfig)
+	e.addUser("root", "root-password", true)
+	e.addUser("bob", "bob-password", false)
+	tok := e.addToken("root", true, time.Time{})
+	as := func(method, path, body string) response {
+		return e.api(method, path, TokenUser, tok, body, nil)
+	}
+
+	e.wantStatus(as("GET", "/api/v1/users", ""), http.StatusOK, "admin token lists users")
+	for name, r := range map[string]response{
+		"sets its owner's password": as("PUT", "/api/v1/users/root/password", `{"password": "taken-over-pw"}`),
+		"sets another's password":   as("PUT", "/api/v1/users/bob/password", `{"password": "taken-over-pw"}`),
+		"creates a user":            as("POST", "/api/v1/users", `{"name": "mallory", "password": "mallory-password", "admin": true}`),
+		"promotes a user":           as("PATCH", "/api/v1/users/bob", `{"admin": true}`),
+		"changes groups":            as("PATCH", "/api/v1/users/bob", `{"groups": ["ci"]}`),
+		"adds a group member":       as("PUT", "/api/v1/groups/ci/members/bob", ""),
+		"removes a group member":    as("DELETE", "/api/v1/groups/ci/members/bob", ""),
+		"creates a token":           as("POST", "/api/v1/tokens", `{"name": "x"}`),
+	} {
+		e.wantStatus(r, http.StatusForbidden, "admin token "+name)
+	}
+
+	e.wantStatus(e.api("GET", "/api/v1/user", "root", "root-password", "", nil), http.StatusOK, "root's password unchanged")
+	e.wantStatus(e.api("GET", "/api/v1/user", "bob", "bob-password", "", nil), http.StatusOK, "bob's password unchanged")
+	var bob userJSON
+	e.wantStatus(e.api("GET", "/api/v1/users/bob", "root", "root-password", "", &bob), http.StatusOK, "get bob")
+	if bob.Admin || len(bob.Groups) != 0 {
+		t.Errorf("admin token changed bob: %+v", bob)
+	}
+	e.wantStatus(e.api("GET", "/api/v1/users/mallory", "root", "root-password", "", nil), http.StatusNotFound, "mallory not created")
+}
+
 func TestAPIGroups(t *testing.T) {
 	e := newEnv(t, testConfig)
 	e.addUser("root", "root-password", true)
@@ -233,9 +268,10 @@ func TestAPITokens(t *testing.T) {
 	// Without scopes, a token carries all of its owner's permissions.
 	e.clock.Add(time.Second)
 	var full tokenJSON
-	e.wantStatus(e.api("POST", "/api/v1/tokens", "carol", "carol-password", `{"name": "full", "expiresAt": "2027-01-01T00:00:00Z"}`, &full),
+	e.wantStatus(e.api("POST", "/api/v1/tokens", "carol", "carol-password", `{"name": "full", "expiresIn": "24h"}`, &full),
 		http.StatusCreated, "create full")
-	if !reflect.DeepEqual(full.Scopes, []scopeJSON{{[]string{"*"}, "admin"}}) || full.Expires == nil || full.Expires.Year() != 2027 {
+	if !reflect.DeepEqual(full.Scopes, []scopeJSON{{[]string{"*"}, "admin"}}) || full.Expires == nil ||
+		!full.Expires.Equal(e.clock.Now().Add(24*time.Hour)) {
 		t.Errorf("full token %+v", full)
 	}
 	e.clock.Add(time.Second)
@@ -246,18 +282,18 @@ func TestAPITokens(t *testing.T) {
 	}
 
 	for name, body := range map[string]string{
-		"no name":      `{}`,
-		"blank name":   `{"name": "  "}`,
-		"long name":    `{"name": "` + strings.Repeat("n", MaxTokenNameLen+1) + `"}`,
-		"past expiry":  `{"name": "x", "expiresAt": "2020-01-01T00:00:00Z"}`,
-		"both expiry":  `{"name": "x", "expiresIn": "1h", "expiresAt": "2030-01-01T00:00:00Z"}`,
-		"bad duration": `{"name": "x", "expiresIn": "soon"}`,
-		"neg duration": `{"name": "x", "expiresIn": "-1h"}`,
-		"empty scopes": `{"name": "x", "scopes": []}`,
-		"bad role":     `{"name": "x", "scopes": [{"repositories": ["a"], "role": "owner"}]}`,
-		"no repos":     `{"name": "x", "scopes": [{"repositories": [], "role": "read"}]}`,
-		"bad pattern":  `{"name": "x", "scopes": [{"repositories": ["A/B"], "role": "read"}]}`,
-		"admin token":  `{"name": "x", "admin": true}`,
+		"no name":       `{}`,
+		"blank name":    `{"name": "  "}`,
+		"long name":     `{"name": "` + strings.Repeat("n", MaxTokenNameLen+1) + `"}`,
+		"expiresAt":     `{"name": "x", "expiresAt": "2030-01-01T00:00:00Z"}`,
+		"zero duration": `{"name": "x", "expiresIn": "0s"}`,
+		"bad duration":  `{"name": "x", "expiresIn": "soon"}`,
+		"neg duration":  `{"name": "x", "expiresIn": "-1h"}`,
+		"empty scopes":  `{"name": "x", "scopes": []}`,
+		"bad role":      `{"name": "x", "scopes": [{"repositories": ["a"], "role": "owner"}]}`,
+		"no repos":      `{"name": "x", "scopes": [{"repositories": [], "role": "read"}]}`,
+		"bad pattern":   `{"name": "x", "scopes": [{"repositories": ["A/B"], "role": "read"}]}`,
+		"admin token":   `{"name": "x", "admin": true}`,
 	} {
 		e.wantStatus(e.api("POST", "/api/v1/tokens", "carol", "carol-password", body, nil), http.StatusBadRequest, name)
 	}

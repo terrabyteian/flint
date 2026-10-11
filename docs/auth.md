@@ -71,7 +71,7 @@ Registry requests use the Docker token authentication flow:
    containerd's OAuth 2 password grant, `POST /auth/token` with `grant_type=password`, works the same way.
 3. flint answers with a JSON Web Token, signed with Ed25519, that grants each requested action the client's role allows and leaves out the rest:
    `{"token": "...", "access_token": "...", "token_type": "Bearer", "expires_in": 300, "issued_at": "..."}`.
-   Tokens live for `auth.tokenTTL`, 5 minutes by default.
+   Tokens live for 5 minutes.
 4. The client retries with `Authorization: Bearer <token>`.
    A token that lacks an action the request needs gets `401` with `error="insufficient_scope"`; an expired or invalid one gets `error="invalid_token"`.
 
@@ -102,20 +102,20 @@ Request bodies are strict JSON: unknown fields are errors.
 | --- | --- | --- |
 | `GET /api/v1/user` | anyone | Describe the authenticated client. |
 | `GET /api/v1/users` | admin | List users. |
-| `POST /api/v1/users` | admin | Create a user. |
+| `POST /api/v1/users` | admin, with a password | Create a user. |
 | `GET /api/v1/users/{name}` | admin, or the user | Show a user. |
-| `PATCH /api/v1/users/{name}` | admin | Set the `admin` flag or the groups. |
+| `PATCH /api/v1/users/{name}` | admin, with a password | Set the `admin` flag or the groups. |
 | `DELETE /api/v1/users/{name}` | admin | Delete a user and the user's tokens. |
-| `PUT /api/v1/users/{name}/password` | admin, or the user with a password | Set a password. |
+| `PUT /api/v1/users/{name}/password` | admin or the user, with a password | Set a password. |
 | `GET /api/v1/groups` | admin | List groups and their members. |
-| `PUT /api/v1/groups/{group}/members/{name}` | admin | Add a user to a group. |
-| `DELETE /api/v1/groups/{group}/members/{name}` | admin | Remove a user from a group. |
+| `PUT /api/v1/groups/{group}/members/{name}` | admin, with a password | Add a user to a group. |
+| `DELETE /api/v1/groups/{group}/members/{name}` | admin, with a password | Remove a user from a group. |
 | `GET /api/v1/tokens` | anyone | List one's own tokens. |
 | `POST /api/v1/tokens` | anyone, with a password | Create a token for oneself. |
 | `DELETE /api/v1/tokens/{id}` | the owner, or admin | Revoke a token. |
 
 "admin" means the global admin role: an administrator authenticated with a password, or with a token created with `"admin": true`.
-Creating a token and changing one's own password need a password, so a leaked token cannot mint longer-lived tokens or take over its owner's account.
+Creating a token, creating or updating a user or its groups, and setting a password need a password, even for a token created with `"admin": true`, so a leaked token cannot mint longer-lived tokens or take over its owner's or anyone else's account.
 The last administrator cannot be deleted or demoted.
 
 ### Users
@@ -165,8 +165,7 @@ curl -u alice https://registry.example/api/v1/tokens -d '{
 | Field | Meaning |
 | --- | --- |
 | `name` | Required: 1 to 128 bytes, to recognize the token by. |
-| `expiresIn` | A duration such as `"720h"`; or |
-| `expiresAt` | an RFC 3339 time. Without either, the token does not expire. |
+| `expiresIn` | A positive duration such as `"720h"`. Without it, the token does not expire. |
 | `scopes` | Repository names or patterns and a role each. Default: all of the owner's repository permissions. |
 | `admin` | Let the token use its owner's global admin role. Default `false`; administrators only. |
 

@@ -79,7 +79,7 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 		Issuer:    Issuer,
 		Subject:   p.User,
 		Audience:  Issuer,
-		Expiry:    now.Add(s.tokenTTL).Unix(),
+		Expiry:    now.Add(bearerTTL).Unix(),
 		NotBefore: now.Unix(),
 		IssuedAt:  now.Unix(),
 		ID:        rand.Text(),
@@ -99,7 +99,7 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 		Token:       tok,
 		AccessToken: tok,
 		TokenType:   "Bearer",
-		ExpiresIn:   int(s.tokenTTL / time.Second),
+		ExpiresIn:   int(bearerTTL / time.Second),
 		IssuedAt:    now.UTC().Format(time.RFC3339),
 	})
 }

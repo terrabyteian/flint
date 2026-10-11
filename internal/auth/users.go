@@ -330,8 +330,6 @@ func (s *Service) createToken(ctx context.Context, owner *Principal, name string
 	switch {
 	case strings.TrimSpace(name) == "" || len(name) > MaxTokenNameLen:
 		return nil, "", invalidf("the token name must be 1 to %d bytes and not blank", MaxTokenNameLen)
-	case !expires.IsZero() && !expires.After(s.now()):
-		return nil, "", invalidf("the expiry time is in the past")
 	case admin && !owner.Admin:
 		return nil, "", invalidf("only an administrator can create a token with the admin role")
 	}

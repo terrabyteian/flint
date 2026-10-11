@@ -27,14 +27,7 @@ const (
 	DefaultListen          = ":5000"
 	DefaultLogLevel        = "info"
 	DefaultShutdownTimeout = 25 * time.Second
-	DefaultTokenTTL        = 5 * time.Minute
 	DefaultBootstrapAdmin  = "admin"
-)
-
-// Bounds of auth.tokenTTL.
-const (
-	MinTokenTTL = 30 * time.Second
-	MaxTokenTTL = time.Hour
 )
 
 // Config is the configuration file.
@@ -115,9 +108,6 @@ type Auth struct {
 	// BootstrapAdmin, if set, creates the first administrator when no
 	// administrator exists yet.
 	BootstrapAdmin *BootstrapAdmin `json:"bootstrapAdmin,omitempty"`
-	// TokenTTL is the lifetime of the bearer tokens the Docker token
-	// service issues. Default 5m; from 30s to 1h.
-	TokenTTL Duration `json:"tokenTTL,omitzero"`
 }
 
 // BootstrapAdmin names the first administrator and the file holding its
@@ -189,7 +179,6 @@ func Load(path string) (*Config, error) {
 // in defaults.
 func Parse(b []byte) (*Config, error) {
 	c := Config{ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout}}
-	c.Auth.TokenTTL = Duration{Duration: DefaultTokenTTL}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
@@ -395,11 +384,6 @@ func (c *Config) Validate() error {
 		if b.PasswordFile == "" {
 			v.addf("auth.bootstrapAdmin.passwordFile", "is required when auth.bootstrapAdmin is set")
 		}
-	}
-	if c.Auth.TokenTTL.invalid != "" {
-		v.addf("auth.tokenTTL", "%s", c.Auth.TokenTTL.invalid)
-	} else if d := c.Auth.TokenTTL.Duration; d < MinTokenTTL || d > MaxTokenTTL {
-		v.addf("auth.tokenTTL", "%s is outside the allowed range of %s to %s", d, MinTokenTTL, MaxTokenTTL)
 	}
 	return v.err()
 }

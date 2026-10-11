@@ -356,15 +356,6 @@ func TestJWTExpiry(t *testing.T) {
 	}
 }
 
-func TestTokenTTLConfig(t *testing.T) {
-	e := newEnv(t, `{"dataDir": "/data", "auth": {"tokenTTL": "90s"}}`)
-	e.addUser("bob", "bob-password", false)
-	e.serve()
-	if c := claimsOf(t, e.token("bob", "bob-password")); c.Expiry-c.IssuedAt != 90 {
-		t.Errorf("token lifetime %ds, want 90s", c.Expiry-c.IssuedAt)
-	}
-}
-
 // TestSigningKeyReused checks that a restarted service accepts tokens the
 // previous one issued.
 func TestSigningKeyReused(t *testing.T) {

@@ -15,9 +15,10 @@ import (
 // The admin API serves JSON under /api/v1/. Every request authenticates
 // with basic credentials (a password or an API token) or a bearer API
 // token; tokens from the Docker token service are not accepted. Managing
-// users and groups needs the global admin role. Creating an API token, or
-// changing one's own password, needs a password: a token cannot mint
-// further tokens or take over its owner's account.
+// users and groups needs the global admin role. Creating an API token,
+// creating or updating a user, and setting a password need a password,
+// even with an admin token: a token cannot mint further tokens or take
+// over its owner's or anyone else's account.
 
 const apiPrefix = "/api/v1"
 
@@ -28,16 +29,16 @@ func (s *Service) registerAPI(srv *server.Server) {
 	for pattern, h := range map[string]apiHandler{
 		"GET /api/v1/user":                             s.apiWhoami,
 		"GET /api/v1/users":                            s.admin(s.apiListUsers),
-		"POST /api/v1/users":                           s.admin(s.apiCreateUser),
+		"POST /api/v1/users":                           s.admin(s.withPassword(s.apiCreateUser)),
 		"GET /api/v1/users/{name}":                     s.apiGetUser,
-		"PATCH /api/v1/users/{name}":                   s.admin(s.apiUpdateUser),
+		"PATCH /api/v1/users/{name}":                   s.admin(s.withPassword(s.apiUpdateUser)),
 		"DELETE /api/v1/users/{name}":                  s.admin(s.apiDeleteUser),
-		"PUT /api/v1/users/{name}/password":            s.apiSetPassword,
+		"PUT /api/v1/users/{name}/password":            s.withPassword(s.apiSetPassword),
 		"GET /api/v1/groups":                           s.admin(s.apiListGroups),
-		"PUT /api/v1/groups/{group}/members/{name}":    s.admin(s.apiAddMember),
-		"DELETE /api/v1/groups/{group}/members/{name}": s.admin(s.apiRemoveMember),
+		"PUT /api/v1/groups/{group}/members/{name}":    s.admin(s.withPassword(s.apiAddMember)),
+		"DELETE /api/v1/groups/{group}/members/{name}": s.admin(s.withPassword(s.apiRemoveMember)),
 		"GET /api/v1/tokens":                           s.apiListTokens,
-		"POST /api/v1/tokens":                          s.apiCreateToken,
+		"POST /api/v1/tokens":                          s.withPassword(s.apiCreateToken),
 		"DELETE /api/v1/tokens/{id}":                   s.apiRevokeToken,
 		apiPrefix + "/":                                s.apiNotFound,
 	} {
@@ -86,6 +87,16 @@ func (s *Service) admin(h apiHandler) apiHandler {
 	return func(r *http.Request, p *Principal) (int, any, error) {
 		if !p.Admin {
 			return 0, nil, errForbidden
+		}
+		return h(r, p)
+	}
+}
+
+// withPassword restricts h to clients authenticated with a password.
+func (s *Service) withPassword(h apiHandler) apiHandler {
+	return func(r *http.Request, p *Principal) (int, any, error) {
+		if !p.Password {
+			return 0, nil, errNeedsPassword
 		}
 		return h(r, p)
 	}
@@ -254,15 +265,11 @@ func (s *Service) apiDeleteUser(r *http.Request, p *Principal) (int, any, error)
 }
 
 // apiSetPassword sets a user's password: an administrator's for anyone,
-// or a user's own when authenticated with the current password.
+// or a user's own.
 func (s *Service) apiSetPassword(r *http.Request, p *Principal) (int, any, error) {
 	name := r.PathValue("name")
-	switch {
-	case p.Admin:
-	case name != p.User:
+	if !p.Admin && name != p.User {
 		return 0, nil, errForbidden
-	case !p.Password:
-		return 0, nil, errNeedsPassword
 	}
 	var req struct {
 		Password string `json:"password"`
@@ -363,13 +370,9 @@ func (s *Service) apiListTokens(r *http.Request, p *Principal) (int, any, error)
 }
 
 func (s *Service) apiCreateToken(r *http.Request, p *Principal) (int, any, error) {
-	if !p.Password {
-		return 0, nil, errNeedsPassword
-	}
 	var req struct {
 		Name      string       `json:"name"`
 		ExpiresIn string       `json:"expiresIn"`
-		ExpiresAt *time.Time   `json:"expiresAt"`
 		Admin     bool         `json:"admin"`
 		Scopes    *[]scopeJSON `json:"scopes"`
 	}
@@ -377,12 +380,7 @@ func (s *Service) apiCreateToken(r *http.Request, p *Principal) (int, any, error
 		return 0, nil, err
 	}
 	var expires time.Time
-	switch {
-	case req.ExpiresAt != nil && req.ExpiresIn != "":
-		return 0, nil, invalidf("set expiresIn or expiresAt, not both")
-	case req.ExpiresAt != nil:
-		expires = *req.ExpiresAt
-	case req.ExpiresIn != "":
+	if req.ExpiresIn != "" {
 		d, err := time.ParseDuration(req.ExpiresIn)
 		if err != nil || d <= 0 {
 			return 0, nil, invalidf("expiresIn %q is not a positive duration such as \"720h\"", req.ExpiresIn)

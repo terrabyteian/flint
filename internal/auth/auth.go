@@ -77,6 +77,10 @@ const TokenPath = "/auth/token"
 // passwordCacheTTL is how long a verified password is remembered.
 const passwordCacheTTL = 5 * time.Minute
 
+// bearerTTL is the lifetime of the bearer tokens the Docker token service
+// issues.
+const bearerTTL = 5 * time.Minute
+
 // Options configures a Service.
 type Options struct {
 	// Store holds users and tokens. Required.
@@ -109,7 +113,6 @@ type Service struct {
 	log        *slog.Logger
 	now        func() time.Time
 	iterations int
-	tokenTTL   time.Duration
 
 	// mu serializes changes to users and tokens, so checks such as "the
 	// last administrator cannot be removed" hold across concurrent
@@ -156,12 +159,8 @@ func New(opts Options) (*Service, error) {
 		log:        opts.Logger,
 		now:        opts.Now,
 		iterations: opts.PasswordIterations,
-		tokenTTL:   config.DefaultTokenTTL,
 		verified:   newVerifiedCache(passwordCacheTTL, 10000),
 		hashing:    make(chan struct{}, runtime.GOMAXPROCS(0)),
-	}
-	if opts.Config != nil && opts.Config.Auth.TokenTTL.Duration > 0 {
-		s.tokenTTL = opts.Config.Auth.TokenTTL.Duration
 	}
 	if s.dummy, err = hashPassword("flint-unknown-user", s.iterations); err != nil {
 		return nil, err

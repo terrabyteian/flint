@@ -492,7 +492,7 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 ## Auth and permissions
 
 - **Identities.** Local users with passwords and groups, and OIDC login, in v1. LDAP is deferred. Passwords are hashed with PBKDF2-HMAC-SHA256 (`crypto/pbkdf2`) at a high iteration count, since bcrypt and Argon2 live outside the standard library.
-- **API tokens.** Random, high-entropy secrets, shown once and stored only as a SHA-256 hash. Tokens can expire, are revocable, and carry a subset of their owner's permissions, never more: on each use the owner's current role is capped by the token's scopes.
+- **API tokens.** Random, high-entropy secrets, shown once and stored only as a SHA-256 hash. Tokens can be given an expiry and carry a subset of their owner's permissions, never more: on each use the owner's current role is capped by the token's scopes.
 - **Docker clients.** A built-in bearer-token service implements the Docker token authentication flow, issuing short-lived JWTs scoped to repositories and actions (pull, push, delete). The JWTs are hand-written and signed with an Ed25519 key generated on first start and kept in the data directory. Each registry request also checks the subject's current permissions, so deleting a user or revoking a token takes effect before the JWT expires.
 - **PyPI clients.** HTTP basic auth with the `__token__` username convention and an API token as the password.
 - **Permissions.** Per-repository roles (`read` < `write` < `delete` < `admin`) are granted to users or groups. Grants can target a pattern such as `team-a-*`. One global `admin` role administers everything. Anonymous pull is a per-repository setting, off by default.
