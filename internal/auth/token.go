@@ -55,7 +55,7 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 		p = c.principal
 		scopes = r.URL.Query()["scope"]
 	}
-	if errors.Is(err, errBadCredentials) {
+	if errors.Is(err, ErrInvalidCredentials) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
 		writeRegistryError(w, http.StatusUnauthorized, "UNAUTHORIZED", "incorrect username, password, or token")
 		return

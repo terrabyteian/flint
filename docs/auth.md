@@ -61,8 +61,31 @@ A token created without scopes carries all of its owner's repository permissions
 A token uses its owner's global `admin` role only if it was created with `"admin": true`, which only an administrator can do.
 Deleting the owner, demoting an administrator, or revoking or expiring the token takes effect on the next request.
 
-Wherever a password is accepted, an API token is accepted too: with the owner's user name, or with the user name `__token__` as PyPI clients send it.
-API tokens are presented only as HTTP basic credentials.
+Wherever a password is accepted, an API token is accepted too, in any of these forms:
+
+| Form | Sent by |
+| --- | --- |
+| HTTP basic credentials with the owner's user name and the token | Docker and most clients with a user name and password |
+| HTTP basic credentials with the user name `__token__` and the token | PyPI clients |
+| `Authorization: Bearer <token>` | npm and other clients configured with a token |
+| `Authorization: <token>`, with no scheme | Cargo and others that send the token alone; `Bearer` may be added |
+| `X-NuGet-ApiKey: <token>` | NuGet pushes and deletes |
+
+flint tells an API token in a `Bearer` header apart from a token from the [Docker token endpoint](#docker-clients) by its `flint_` prefix.
+`X-NuGet-ApiKey` is used only when the request has no `Authorization` header, so a client that sends source credentials and a placeholder key authenticates with the source credentials.
+
+### Tokens from client login commands
+
+Some package clients log in by sending a user name and password through their own protocol and expect a token back, as npm's legacy `npm login` does.
+For those, flint verifies the password and answers with a new API token, which:
+
+- is owned by the user and carries all of the user's repository permissions, but not the global `admin` role;
+- is named after the client and the time of login, such as `npm login 2026-05-01T12:00:00Z`;
+- expires after `auth.loginTokenTTL` (default 90 days; see [configuration](configuration.md#fields));
+- is listed and revoked like any other token.
+
+An API token is not accepted in place of the password there, so a token cannot mint another.
+Each package format's documentation says whether its clients log in this way.
 
 ## Docker clients
 
@@ -88,7 +111,7 @@ Each request also checks the subject's current permissions, so a token for a del
 The signing key is generated on first start and kept in `<dataDir>/auth/token-signing.key`, readable only by flint's user.
 Tokens stay valid across restarts; deleting the file invalidates every issued token at the next start.
 
-Registry clients may also send basic credentials, a password or an API token, on every request instead of using the token endpoint.
+Registry clients may also send a password or an API token, in any of the [forms above](#api-tokens), on every request instead of using the token endpoint.
 Without permission, such a request gets `403 DENIED`.
 flint remembers a verified password for 5 minutes, keyed by a hash of the credentials and the stored password hash, so clients that send a password with every request do not pay for PBKDF2 each time.
 
@@ -97,10 +120,43 @@ docker login registry.example -u ci-bot              # password or API token
 echo "$TOKEN" | crane auth login registry.example -u ci-bot --password-stdin
 ```
 
+## Package clients
+
+Every route family accepts the same credentials, and answers a request without valid credentials with `401` in the style its clients expect:
+
+| Style | Challenge | Used by |
+| --- | --- | --- |
+| Docker | `WWW-Authenticate: Bearer realm=...,service="flint",scope=...` | The registry API at `/v2/`, as described above |
+| Basic | `WWW-Authenticate: Basic realm="flint"` | Clients that wait for a challenge before they send credentials, such as Maven and Gradle |
+| Cargo | `WWW-Authenticate: Cargo login_url="..."` | Cargo, which shows the user where to get a token |
+| Plain | none | npm, which then tells the user to log in |
+
+A client that presents a password or an API token without the permission a request needs gets `403`.
+Tokens from the Docker token endpoint are accepted only by the registry API, for which they are issued.
+Each package format's documentation says which style it uses.
+
+### Signed download URLs
+
+Some clients never send credentials for downloads named in the metadata they fetch.
+For those, a format puts signed URLs in the metadata it serves an authenticated client.
+A signed URL carries an expiry, 10 minutes after it was issued unless the format chooses otherwise, and the client that requested the metadata: its user and, if it used an API token, the token.
+Its signature is an HMAC-SHA256 over the URL's path, the expiry, and that client.
+It works without credentials until it expires, and only while that client may still read the repository: deleting the user, revoking or expiring the token, or removing the permission ends it at once.
+A signed URL allows downloads only.
+
+The signing key is generated on first start and kept in `<dataDir>/auth/url-signing.key`, readable only by flint's user.
+Deleting the file invalidates every signed URL at the next start.
+
+### Virtual repositories
+
+A virtual repository serves a merged view of its member repositories.
+Reading through it needs `read` on the virtual repository only, since the view is what its administrator composed: a client needs no role on the members.
+Publishing through it needs `write`, and deleting needs `delete`, on the member it publishes to (`publishTo`); a virtual repository without one refuses publishes.
+
 ## Admin API
 
 The admin API serves JSON under `/api/v1/`.
-Every request authenticates with HTTP basic credentials, a password or an API token; tokens from the Docker token endpoint are not accepted.
+Every request authenticates with a password or an API token, in any of the [forms above](#api-tokens); tokens from the Docker token endpoint are not accepted.
 Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`.
 Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user or token, or backups are not configured), `409` (the user exists, the change would remove the last administrator, or a backup is already running), or `413` (the body is over 64 KiB).
 Request bodies are strict JSON: unknown fields are errors.
@@ -201,7 +257,7 @@ The response, `201 Created`, is the only one that includes the token:
 
 | Metric | Meaning |
 | --- | --- |
-| `flint_auth_attempts_total{method, result}` | Credential checks by `method` (`password`, `token`, `jwt`) and `result` (`success`, `failure`). |
+| `flint_auth_attempts_total{method, result}` | Credential checks by `method` (`password`, `token`, `jwt`, or `url` for a signed URL) and `result` (`success`, `failure`). |
 | `flint_auth_tokens_issued_total` | Bearer tokens issued by the token endpoint. |
 
 Requests by an authenticated client carry `user` (and `token_id`, for an API token) in their log line.
