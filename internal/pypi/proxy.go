@@ -489,7 +489,7 @@ func (h *Handler) proxyMetadata(w http.ResponseWriter, r *http.Request, rp *repo
 func (h *Handler) fetchMetadata(ctx context.Context, actor string, rp *repository, project, filename, rawURL string, d blob.Digest) ([]byte, error) {
 	mk := metadataKey(rp.name, filename)
 	body, err := h.metaCalls.Do(ctx, string(mk)+"\x00"+project+"\x00"+d.String(), func(ctx context.Context) ([]byte, error) {
-		ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		ctx, cancel := upstream.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
 		p := rp.proxy
 		resp, err := p.client.GetURL(ctx, rawURL, nil)

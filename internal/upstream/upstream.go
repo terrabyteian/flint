@@ -355,6 +355,33 @@ func withWatchdog(ctx context.Context, t *time.Timer, d time.Duration) context.C
 	return context.WithValue(ctx, watchdogKey{}, &idleWatch{t, d})
 }
 
+// WithTimeout is context.WithTimeout for upstream requests: the returned
+// context ends with context.DeadlineExceeded d after it is made, except
+// that time a request waits for one of a Client's concurrency slots
+// (proxy.maxConcurrent) does not count: the timeout starts again once
+// the request holds a slot, since waiting for one is not the upstream's
+// silence.
+func WithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	inner, cancel := context.WithCancelCause(ctx)
+	t := time.AfterFunc(d, func() { cancel(context.DeadlineExceeded) })
+	return withWatchdog(&timeoutCtx{inner}, t, d), func() {
+		t.Stop()
+		cancel(nil)
+	}
+}
+
+// timeoutCtx is a WithTimeout context: it reports the end of its timeout
+// as context.DeadlineExceeded, as a context.WithTimeout context does.
+type timeoutCtx struct{ context.Context }
+
+func (c *timeoutCtx) Err() error {
+	err := c.Context.Err()
+	if err != nil && errors.Is(context.Cause(c.Context), context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
 // acquire waits for a request slot and returns its release.
 func (c *Client) acquire(ctx context.Context, op string) (func(), error) {
 	select {

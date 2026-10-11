@@ -455,7 +455,7 @@ func (h *Handler) proxyManifestByDigest(r *http.Request, rn *repoName, d blob.Di
 	}
 	actor := h.actor(r)
 	return h.manifestCalls.Do(r.Context(), rn.full+"@"+d.String(), func(ctx context.Context) (*proxied, error) {
-		ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		ctx, cancel := upstream.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
 		p := rn.cfg.proxy
 		um, err := p.client.GetManifest(ctx, p.upstreamName(rn.name), d.String())
@@ -499,7 +499,7 @@ func (h *Handler) proxyManifestByTag(r *http.Request, rn *repoName, tag string) 
 		if crec != nil {
 			timeout = revalidateTimeout
 		}
-		ctx, cancel := context.WithTimeout(ctx, timeout)
+		ctx, cancel := upstream.WithTimeout(ctx, timeout)
 		defer cancel()
 		fail := func(err error) (*proxied, error) {
 			if crec == nil || errors.Is(err, upstream.ErrNotFound) || errors.Is(err, upstream.ErrDenied) {
@@ -679,7 +679,7 @@ func writeListing(w http.ResponseWriter, l *listing) {
 // fetchListing fetches an upstream API path of rn and reads the body.
 func (h *Handler) fetchListing(ctx context.Context, rn *repoName, path string, q url.Values) ([]byte, http.Header, error) {
 	p := rn.cfg.proxy
-	ctx, cancel := context.WithTimeout(ctx, revalidateTimeout)
+	ctx, cancel := upstream.WithTimeout(ctx, revalidateTimeout)
 	defer cancel()
 	resp, err := p.client.Get(ctx, p.upstreamName(rn.name), path, q)
 	if err != nil {

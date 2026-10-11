@@ -311,8 +311,44 @@ func TestSlotWaitIsNotSilence(t *testing.T) {
 	if got := e.body(d); got != `{"v":1}` {
 		t.Fatalf("document = %q", got)
 	}
+
+	hold()
+	tctx, cancel := upstream.WithTimeout(ctx, silence)
+	defer cancel()
+	resp, err := c.GetURL(tctx, e.up.URL+"/file", nil)
+	if err != nil {
+		t.Fatalf("request with WithTimeout after waiting for a slot: %v", err)
+	}
+	resp.Body.Close()
+	if tctx.Err() != nil {
+		t.Fatalf("WithTimeout context ended while waiting for a slot: %v", tctx.Err())
+	}
 	if c.Offline() {
 		t.Error("waiting for a slot marked the upstream offline")
+	}
+}
+
+// TestWithTimeout checks that WithTimeout ends like context.WithTimeout
+// for an upstream that does not answer: as a deadline, which marks the
+// upstream unavailable, not as the caller giving up.
+func TestWithTimeout(t *testing.T) {
+	release := make(chan struct{})
+	up, _ := countingServer(t, func(w http.ResponseWriter, r *http.Request) { <-release })
+	defer close(release)
+	c := newClient(t, up.URL, upstream.Options{Attempts: 1})
+	tctx, cancel := upstream.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_, err := c.GetURL(tctx, up.URL+"/x", nil)
+	if !errors.Is(err, upstream.ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetURL past the timeout = %v, want ErrUnavailable and DeadlineExceeded", err)
+	}
+	if !errors.Is(tctx.Err(), context.DeadlineExceeded) || !c.Offline() {
+		t.Errorf("context error %v, offline %v; want DeadlineExceeded and offline", tctx.Err(), c.Offline())
+	}
+	cctx, cancel := upstream.WithTimeout(ctx, time.Minute)
+	cancel()
+	if !errors.Is(cctx.Err(), context.Canceled) {
+		t.Errorf("cancelled context error %v, want Canceled", cctx.Err())
 	}
 }
 
