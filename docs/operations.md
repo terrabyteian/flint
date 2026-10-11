@@ -134,6 +134,10 @@ Damage in an older file makes the queries that reach it fail, with the file and 
 The audit files belong to one metadata store.
 If the metadata store is restored from an older backup, the audit log is ahead of it and flint refuses to start; move `<dataDir>/audit/` aside, keeping it as the record of what happened before the restore.
 
+After rolling back to a flint version without the audit log, stop flint and delete `<dataDir>/meta/consumers/audit` before starting the older version.
+That version keeps honoring the audit log's checkpoint but never advances it, so it never deletes a write-ahead log segment, and disk use and startup time grow without bound.
+Upgrading again later registers the audit log anew, starting at the latest batch: changes made while rolled back are not in it, and flint logs a warning naming the missing batches.
+
 ### Metrics
 
 | Metric | Meaning |

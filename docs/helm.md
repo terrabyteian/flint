@@ -171,4 +171,5 @@ The chart does not schedule backups: [backups](backup.md#scheduling) shows a Cro
 
 `helm upgrade` replaces the pod; flint is unavailable from the moment the old pod stops until the new one is ready.
 If an upgrade leaves the pod failing, for example with a configuration flint rejects or an image tag that does not exist, upgrading again with corrected values or running `helm rollback` replaces the failing pod; the StatefulSet's `Parallel` pod management lets it do so without waiting for the pod to become ready.
+Rolling back to a version without the audit log also needs a manual step; see [audit log durability and recovery](operations.md#durability-and-recovery).
 `helm uninstall` leaves the data claim, `data-<statefulset>-0` such as `data-flint-0`, in place, so reinstalling with the same release name reuses the data.
