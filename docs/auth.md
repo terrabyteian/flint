@@ -81,7 +81,7 @@ Each request also checks the subject's current permissions, so a token for a del
 The signing key is generated on first start and kept in `<dataDir>/auth/token-signing.key`, readable only by flint's user.
 Tokens stay valid across restarts; deleting the file invalidates every issued token at the next start.
 
-Registry clients may also send basic credentials or an API token on every request instead of using the token endpoint.
+Registry clients may also send basic credentials, a password or an API token, on every request instead of using the token endpoint.
 Without permission, such a request gets `403 DENIED`.
 flint remembers a verified password for 5 minutes, keyed by a hash of the credentials and the stored password hash, so clients that send a password with every request do not pay for PBKDF2 each time.
 

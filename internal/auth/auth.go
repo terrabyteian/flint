@@ -38,7 +38,7 @@
 // directory. Authorize checks a request against a token's granted scope
 // and the subject's current permissions, so revoking a user or token takes
 // effect at once rather than when the JWT expires. Registry requests may
-// also present basic credentials or an API token directly.
+// also present basic credentials, a password or an API token, directly.
 package auth
 
 import (
