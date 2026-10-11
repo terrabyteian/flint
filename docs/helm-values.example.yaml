@@ -45,9 +45,13 @@ config:
       anonymousPull: true
       virtual:
         members: [pypi-local, pypi]
+    # npm packages: the registry URL is /npm/npm-local/ (docs/npm.md).
+    - name: npm-local
+      format: npm
+      type: hosted
   auth:
     permissions:
-      - repositories: ["docker-local", "releases", "pypi-local"]
+      - repositories: ["docker-local", "releases", "pypi-local", "npm-local"]
         role: write
         groups: ["ci"]
   # Delete the blobs nothing references any more once a day

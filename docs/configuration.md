@@ -132,6 +132,11 @@ Repositories and permission grants declared here are read-only through the API.
         ],
         "publishTo": "cargo-local"
       }
+    },
+    {
+      "name": "npm-local",
+      "format": "npm",
+      "type": "hosted"
     }
   ],
   "proxyCache": {
@@ -156,7 +161,7 @@ Repositories and permission grants declared here are read-only through the API.
     },
     "permissions": [
       {
-        "repositories": ["docker-local", "releases", "pypi-local", "files", "cargo-local"],
+        "repositories": ["docker-local", "releases", "pypi-local", "files", "cargo-local", "npm-local"],
         "role": "write",
         "groups": ["ci"]
       },
@@ -221,7 +226,7 @@ A bare IP address means that one address; IPv4-mapped IPv6 addresses match IPv4 
 
 ### Public URL
 
-Some package protocols put absolute URLs into the metadata clients store, such as the URLs in PyPI's JSON API, which tools record, the download and API URLs in a Cargo index's `config.json`, and later npm tarball URLs in lockfiles.
+Some package protocols put absolute URLs into the metadata clients store, such as the URLs in PyPI's JSON API, which tools record, the download and API URLs in a Cargo index's `config.json`, and npm tarball URLs, which lockfiles record.
 `publicURL` is the base of every absolute URL flint writes into served metadata, so those URLs stay the same however a client reached flint: through an ingress, a port forward, or an internal service name.
 It is an `http` or `https` URL without credentials, a query, or a fragment; it may have a path, when a reverse proxy serves flint under one and strips it before forwarding.
 Without it, absolute URLs are built from the scheme and host of each request, as seen through [trusted proxies](#trusted-proxies).
@@ -234,9 +239,9 @@ Cached upstream content is stored as the upstream sent it and rewritten when ser
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `name` | string | required | The repository's name, which clients address it by: the path prefix of its images, as in `host/docker-local/team/app`, of its index, as in `host/pypi/pypi-local/simple/` or `host/cargo/cargo-local/`, or of its files, as in `host/generic/files/tools/app.tar.gz`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique across formats. |
-| `format` | string | required | Package format: `oci` for container images and OCI artifacts, `pypi` for Python packages, `generic` for arbitrary files addressed by path, or `cargo` for Rust crates. |
-| `type` | string | required | Repository type: `hosted`, which clients publish to; `proxy`, a read-only cache of an upstream registry or index; or, for `pypi`, `generic`, and `cargo`, `virtual`, one view merged from other repositories. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
+| `name` | string | required | The repository's name, which clients address it by: the path prefix of its images, as in `host/docker-local/team/app`, of its index, as in `host/pypi/pypi-local/simple/` or `host/cargo/cargo-local/`, of its npm registry URL, as in `host/npm/npm-local/`, or of its files, as in `host/generic/files/tools/app.tar.gz`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique across formats. |
+| `format` | string | required | Package format: `oci` for container images and OCI artifacts, `pypi` for Python packages, `generic` for arbitrary files addressed by path, `cargo` for Rust crates, or `npm` for npm packages. |
+| `type` | string | required | Repository type: `hosted`, which clients publish to; `proxy`, a read-only cache of an upstream registry or index; or, for `pypi`, `generic`, and `cargo`, `virtual`, one view merged from other repositories. `npm` repositories are hosted. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
 | `immutableTags` | bool | `false` | Hosted OCI repositories only. Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
 | `helmIndex` | bool | `false` | Hosted OCI repositories only. Also serve the Helm charts pushed to the repository as a classic Helm chart repository at `/helm/<name>/`; see [Helm chart repositories](#helm-chart-repositories). |
@@ -368,6 +373,12 @@ Generic files repositories are served under `/generic/<repository>/`: a file at 
 Cargo repositories are served under `/cargo/<repository>/` over Cargo's sparse registry protocol: the index URL to give Cargo is `sparse+https://<host>/cargo/<repository>/`, and the web API, for publishing, yanking, downloading, and search, is under `/cargo/<repository>/api/v1/`.
 [Cargo](cargo.md) describes the URL layout, configuring Cargo, and how hosted, proxy, and virtual repositories behave.
 
+### npm repositories
+
+An npm repository's registry URL, the one to give npm, pnpm, Yarn, and Bun, is `/npm/<repository>/`; packuments, tarballs, dist-tags, and the rest of the npm registry API are below it.
+[npm](npm.md) describes configuring each client, publishing, dist-tags, deprecating, unpublishing, and `npm login`.
+Tarball URLs in packuments are absolute and use [`publicURL`](#public-url), since lockfiles record them.
+
 ### Proxy repositories
 
 This section describes OCI proxy repositories; [PyPI](pypi.md#proxy-repositories) and [Cargo](cargo.md#proxy-repositories) describe theirs, which follow the same rules for caching, outages, disk space, and size limits.
@@ -408,6 +419,7 @@ These authenticate themselves, as [authentication](auth.md) describes:
 | --- | --- |
 | `GET, POST /auth/token` | The Docker token endpoint: issues short-lived bearer tokens for registry requests. |
 | `/api/v1/...` | The admin API: users, groups, API tokens, [backups](backup.md), the [audit log](operations.md#audit-log), yanking and deleting PyPI files, and deleting crate versions. |
+| `PUT /npm/<repository>/-/user/org.couchdb.user:<user>` | npm's legacy login, which mints an API token for a user name and password; see [npm](npm.md#logging-in-with-npm-login). |
 
 ## Signals and shutdown
 
@@ -424,10 +436,11 @@ Requests to the OCI API carry the repository name in a `repository` attribute, a
 Requests to PyPI repositories carry it too, with the route `pypi.index`, `pypi.project`, `pypi.file`, `pypi.metadata`, `pypi.upload`, `pypi.json`, or `pypi.unknown`; the admin API's PyPI endpoints use `api.pypi.yank`, `api.pypi.unyank`, and `api.pypi.delete`.
 Requests to generic files repositories carry it as well, with the route `generic.file`, `generic.list`, `generic.upload`, `generic.delete`, or `generic.unknown`.
 Requests to Cargo repositories carry it too, with the route `cargo.config`, `cargo.index`, `cargo.download`, `cargo.publish`, `cargo.yank`, `cargo.unyank`, `cargo.search`, `cargo.owners`, or `cargo.unknown`; the admin API's Cargo endpoint uses `api.cargo.delete`.
+Requests to npm repositories carry it as well, and the package name in `package`, with the route `npm.root`, `npm.packument`, `npm.version`, `npm.tarball`, `npm.publish`, `npm.edit` (deprecating or unpublishing versions), `npm.unpublish`, `npm.dist-tags`, `npm.login`, `npm.whoami`, `npm.ping`, `npm.search`, `npm.audit`, `npm.keys`, `npm.attestations`, or `npm.unknown`.
 
 ## Metrics
 
-Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime, and [backup](backup.md#metrics) metrics, the OCI API, PyPI, generic files, and Cargo repositories export the metrics below. The `flint_proxy_*` metrics cover proxy repositories of every format.
+Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime, and [backup](backup.md#metrics) metrics, the OCI API, PyPI, generic files, Cargo, and npm repositories export the metrics below. The `flint_proxy_*` metrics cover proxy repositories of every format.
 
 | Metric | Meaning |
 | --- | --- |
@@ -438,6 +451,8 @@ Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime
 | `flint_pypi_upload_bytes_total{repository}` | Bytes of distribution files uploaded to hosted PyPI repositories. |
 | `flint_cargo_publishes_total{repository}` | Crate versions published to hosted Cargo repositories. |
 | `flint_cargo_publish_bytes_total{repository}` | Bytes of `.crate` files published to hosted Cargo repositories. |
+| `flint_npm_publishes_total{repository}` | Package versions published to hosted npm repositories. |
+| `flint_npm_publish_bytes_total{repository}` | Bytes of package tarballs published to hosted npm repositories. |
 | `flint_virtual_member_skips_total{repository,member}` | Members of virtual repositories left out of a response because they failed, such as a proxy whose upstream could not be reached with nothing cached. |
 | `flint_proxy_requests_total{repository,result}` | Pulls from proxy repositories, by result: `hit` (served from the cache), `revalidated` (served after the upstream confirmed a tag, listing, project page, generic file, or index file), `fetched` (fetched from the upstream and cached), `passthrough` (fetched without caching, under disk pressure, over the size limit, or for a PyPI file whose index entry has no sha256 digest, and Cargo searches), and `stale` (served from the cache because the upstream failed). |
 | `flint_proxy_upstream_errors_total{repository}` | Upstream requests that failed: unreachable, server errors, denied access, failed authentication, or content that did not match its digest. A blob fetch shared by several clients counts once. |

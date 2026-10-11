@@ -1,6 +1,6 @@
 apiVersion: v2
 name: flint
-description: Artifact registry for OCI images, Python packages, and Rust crates.
+description: Artifact registry for OCI images, Python packages, Rust crates, and npm packages.
 type: application
 # The release workflow sets version and appVersion from the release tag, so
 # a released chart deploys the image of the same release by default. These
@@ -18,3 +18,4 @@ keywords:
   - docker
   - pypi
   - cargo
+  - npm

@@ -46,7 +46,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 12 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 13 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -69,6 +69,9 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if v := c.Repositories[11].Virtual; v == nil || v.PublishTo != "cargo-local" || len(v.Members) != 2 || c.Repositories[11].AnonymousPull {
 		t.Errorf("unexpected Cargo virtual repository: %+v", c.Repositories[11])
+	}
+	if r := c.Repositories[12]; r.Format != FormatNPM || r.Type != TypeHosted {
+		t.Errorf("unexpected npm repository: %+v", r)
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
@@ -200,8 +203,10 @@ func TestValidation(t *testing.T) {
 			[]string{`repositories[1].name: "a" is already declared by repositories[0]`}},
 		{"repo missing format and type", `{"dataDir": "/d", "repositories": [{"name": "a"}]}`,
 			[]string{"repositories[0].format: is required", "repositories[0].type: is required"}},
-		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "npm", "type": "group"}]}`,
-			[]string{`repositories[0].format: "npm" is not supported`, `repositories[0].type: "group" is not supported`}},
+		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "maven", "type": "group"}]}`,
+			[]string{`repositories[0].format: "maven" is not supported`, `repositories[0].type: "group" is not supported`}},
+		{"npm proxy", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "npm", "type": "proxy", "proxy": {"url": "https://registry.npmjs.org"}}]}`,
+			[]string{`repositories[0].type: "proxy" is not supported for format npm; supported types: hosted`}},
 		{"oci virtual", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "oci", "type": "hosted"},
 			{"name": "a", "format": "oci", "type": "virtual", "virtual": {"members": ["h"]}}]}`,
 			[]string{`repositories[1].type: "virtual" is not supported for format oci`}},
@@ -212,6 +217,11 @@ func TestValidation(t *testing.T) {
 			{"name": "torch", "format": "pypi", "type": "proxy", "proxy": {"url": "https://download.pytorch.org/whl/cpu"}},
 			{"name": "pypi-all", "format": "pypi", "type": "virtual", "anonymousPull": true,
 			 "virtual": {"members": ["pypi-local", "pypi", "torch"], "dependencyConfusionProtection": false}}]}`, nil},
+		{"npm good", `{"dataDir": "/d", "repositories": [
+			{"name": "npm-local", "format": "npm", "type": "hosted", "anonymousPull": true}]}`, nil},
+		{"npm virtual", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "npm", "type": "hosted"},
+			{"name": "a", "format": "npm", "type": "virtual", "virtual": {"members": ["h"]}}]}`,
+			[]string{`repositories[1].type: "virtual" is not supported for format npm`}},
 		{"pypi virtual problems", `{"dataDir": "/d", "repositories": [
 			{"name": "h", "format": "pypi", "type": "hosted", "immutableTags": true, "helmIndex": true, "virtual": {"members": []}},
 			{"name": "o", "format": "oci", "type": "hosted"},
@@ -611,7 +621,7 @@ func TestFormatSettings(t *testing.T) {
 				v.addf(path, "is required")
 			}
 		}})
-	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "cargo", "test"}) {
+	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "cargo", "npm", "test"}) {
 		t.Errorf("Formats() = %q", got)
 	}
 	_, err := Parse([]byte(`{"dataDir": "/d", "repositories": [

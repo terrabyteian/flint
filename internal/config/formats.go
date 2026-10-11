@@ -42,6 +42,7 @@ var formats = []formatSpec{
 		},
 		check: checkGeneric},
 	{name: FormatCargo, types: []string{TypeHosted, TypeProxy, TypeVirtual}},
+	{name: FormatNPM, types: []string{TypeHosted}},
 }
 
 // Generic holds the settings of a generic files repository.

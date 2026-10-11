@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -24,9 +25,10 @@ import (
 // wiring: every format is served only under its own path, absolute URLs
 // in served metadata use publicURL, a virtual repository's member filters
 // keep an excluded upstream name out and its publishTo member receives
-// uploads, and after OCI, PyPI, generic files, auth, and
-// garbage-collection records are written, every key flint wrote is under
-// a prefix registered with the garbage collector.
+// uploads, npm's login mints a token npm can send as a bearer token, and
+// after OCI, PyPI, npm, generic files, auth, and garbage-collection
+// records are written, every key flint wrote is under a prefix registered
+// with the garbage collector.
 func TestRepositoryCore(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/dl/tool.sh" {
@@ -62,6 +64,7 @@ func TestRepositoryCore(t *testing.T) {
 		"repositories": [
 			{"name": "docker-local", "format": "oci", "type": "hosted"},
 			{"name": "pypi-local", "format": "pypi", "type": "hosted"},
+			{"name": "npm-local", "format": "npm", "type": "hosted"},
 			{"name": "pypi-remote", "format": "pypi", "type": "proxy", "proxy": {"url": "` + up.URL + `/simple/"}},
 			{"name": "pypi-all", "format": "pypi", "type": "virtual", "virtual": {"publishTo": "pypi-local",
 				"members": ["pypi-local", {"name": "pypi-remote", "exclude": ["acme-*"]}]}},
@@ -110,6 +113,53 @@ func TestRepositoryCore(t *testing.T) {
 	// A repository is served only under its own format's path.
 	expect("GET", "/pypi/docker-local/simple/", nil, "", http.StatusNotFound)
 	expect("GET", "/v2/pypi-local/app/tags/list", nil, "", http.StatusNotFound)
+	expect("GET", "/npm/pypi-local/pkg", nil, "", http.StatusNotFound)
+	expect("GET", "/pypi/npm-local/simple/", nil, "", http.StatusNotFound)
+
+	// npm records, published with a token from npm's legacy login, sent
+	// as a bearer token, as npm sends it. The tarball URL uses the public
+	// URL.
+	login := expect("PUT", "/npm/npm-local/-/user/org.couchdb.user:admin",
+		strings.NewReader(`{"name": "admin", "password": "admin-password-123"}`), "application/json", http.StatusCreated)
+	var minted struct{ Token string }
+	if err := json.Unmarshal(login.Body.Bytes(), &minted); err != nil || !strings.HasPrefix(minted.Token, "flint_") {
+		t.Fatalf("login: %s", login.Body)
+	}
+	bearer := func(method, path, body string, status int) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+minted.Token)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != status {
+			t.Fatalf("%s %s = %d %s, want %d", method, path, w.Code, w.Body, status)
+		}
+		return w
+	}
+	if w := bearer("GET", "/npm/npm-local/-/whoami", "", http.StatusOK); !strings.Contains(w.Body.String(), `"username":"admin"`) {
+		t.Errorf("whoami: %s", w.Body)
+	}
+	anon := httptest.NewRecorder()
+	h.ServeHTTP(anon, httptest.NewRequest("GET", "/npm/npm-local/-/whoami", nil))
+	if anon.Code != http.StatusUnauthorized || anon.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("anonymous whoami: %d %v", anon.Code, anon.Header())
+	}
+	for _, v := range []string{"1.0.0", "2.0.0"} {
+		bearer("PUT", "/npm/npm-local/@acme%2fpkg", npmPublishBody("@acme/pkg", v), http.StatusOK)
+	}
+	var packument struct {
+		Rev      string `json:"_rev"`
+		Versions map[string]struct {
+			Dist struct{ Tarball string } `json:"dist"`
+		} `json:"versions"`
+	}
+	if err := json.Unmarshal(bearer("GET", "/npm/npm-local/@acme%2fpkg?write=true", "", http.StatusOK).Body.Bytes(), &packument); err != nil {
+		t.Fatal(err)
+	}
+	if got := packument.Versions["1.0.0"].Dist.Tarball; got != "https://flint.example.com/npm/npm-local/@acme/pkg/-/pkg-1.0.0.tgz" {
+		t.Errorf("tarball URL %s", got)
+	}
+	bearer("DELETE", "/npm/npm-local/@acme/pkg/-/pkg-2.0.0.tgz/-rev/"+packument.Rev, "", http.StatusOK)
 
 	// An upload to the virtual repository goes to its publishTo member.
 	_, body, ct := pypiWheel("1.0", "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\n")
@@ -154,7 +204,7 @@ func TestRepositoryCore(t *testing.T) {
 	expect("GET", "/generic/docker-local/dir/a.txt", nil, "", http.StatusNotFound)
 	expect("GET", "/v2/files/dir/tags/list", nil, "", http.StatusNotFound)
 	// curl and wget get a Basic challenge.
-	anon := httptest.NewRecorder()
+	anon = httptest.NewRecorder()
 	h.ServeHTTP(anon, httptest.NewRequest("GET", "/generic/files/dir/a.txt", nil))
 	if anon.Code != http.StatusUnauthorized || anon.Header().Get("WWW-Authenticate") != `Basic realm="flint"` {
 		t.Errorf("anonymous generic download = %d, WWW-Authenticate %q", anon.Code, anon.Header().Get("WWW-Authenticate"))
@@ -171,10 +221,10 @@ func TestRepositoryCore(t *testing.T) {
 	// An API token works as a bearer token, as curl -H and scripts send it.
 	r := httptest.NewRequest("GET", "/generic/files/dir/a.txt", nil)
 	r.Header.Set("Authorization", "Bearer "+tok.Token)
-	bearer := httptest.NewRecorder()
-	h.ServeHTTP(bearer, r)
-	if bearer.Code != http.StatusOK || bearer.Body.String() != "a" {
-		t.Errorf("generic download with a bearer token = %d %s", bearer.Code, bearer.Body)
+	withToken := httptest.NewRecorder()
+	h.ServeHTTP(withToken, r)
+	if withToken.Code != http.StatusOK || withToken.Body.String() != "a" {
+		t.Errorf("generic download with a bearer token = %d %s", withToken.Code, withToken.Body)
 	}
 
 	// Garbage-collection records: a run's report.
@@ -182,4 +232,17 @@ func TestRepositoryCore(t *testing.T) {
 		t.Fatalf("gc run = %+v, %v", rep, err)
 	}
 	gctest.CheckStored(t, store, blobs, gcMarkers()...)
+}
+
+// npmPublishBody returns the body npm publish sends for a version of a
+// package.
+func npmPublishBody(name, version string) string {
+	tarball := []byte("tarball of " + name + "@" + version)
+	b, _ := json.Marshal(map[string]any{
+		"name": name, "dist-tags": map[string]string{"latest": version},
+		"versions": map[string]any{version: map[string]any{"name": name, "version": version}},
+		"_attachments": map[string]any{name + "-" + version + ".tgz": map[string]any{
+			"data": base64.StdEncoding.EncodeToString(tarball), "length": len(tarball)}},
+	})
+	return string(b)
 }

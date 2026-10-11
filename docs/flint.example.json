@@ -113,6 +113,11 @@
         ],
         "publishTo": "cargo-local"
       }
+    },
+    {
+      "name": "npm-local",
+      "format": "npm",
+      "type": "hosted"
     }
   ],
   "proxyCache": {
@@ -137,7 +142,7 @@
     },
     "permissions": [
       {
-        "repositories": ["docker-local", "releases", "pypi-local", "files", "cargo-local"],
+        "repositories": ["docker-local", "releases", "pypi-local", "files", "cargo-local", "npm-local"],
         "role": "write",
         "groups": ["ci"]
       },

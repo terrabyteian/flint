@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"github.com/terrabyteian/flint/internal/generic"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
+	"github.com/terrabyteian/flint/internal/npm"
 	"github.com/terrabyteian/flint/internal/oci"
 	"github.com/terrabyteian/flint/internal/pypi"
 	"github.com/terrabyteian/flint/internal/repo"
@@ -368,6 +370,24 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		return nil, err
 	}
 	crates.Register(srv)
+	npmRegistry, err := npm.New(npm.Options{
+		Meta:         store,
+		Blobs:        blobs,
+		Repositories: cfg.Repositories,
+		// npm sends API tokens as bearer tokens, and tells the user to
+		// log in when it gets a 401 without a challenge.
+		Authorizer: authz.Authorizer(auth.Challenge{Style: auth.ChallengePlain, WriteError: npm.WriteError}),
+		Login:      npmLogin(authz),
+		User:       principalUser,
+		Actor:      authz.Actor,
+		Logger:     logger,
+		Metrics:    reg,
+		Now:        now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	npmRegistry.Register(srv)
 
 	var backups *backup.Manager
 	if cfg.Backup.Directory != "" {
@@ -410,15 +430,34 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 // writes metadata: every key family flint writes is under a prefix one of
 // them registers. A format adds its marker here when it is wired in.
 func gcMarkers() []gc.Marker {
-	return []gc.Marker{oci.GCMarker(), pypi.GCMarker(), generic.GCMarker(), cargo.GCMarker(), upstream.Marks,
-		auth.GCMarker()}
+	return []gc.Marker{oci.GCMarker(), pypi.GCMarker(), generic.GCMarker(), cargo.GCMarker(), npm.GCMarker(),
+		upstream.Marks, auth.GCMarker()}
 }
 
 // blobReferences report the blobs every format package's records, and
 // the proxy cache the formats share, reference, for backups to check that
 // they hold them all.
 var blobReferences = []backup.References{oci.References, pypi.References, generic.References, cargo.References,
-	upstream.References}
+	npm.References, upstream.References}
+
+// npmLogin serves npm's legacy login with tokens minted by auth.
+func npmLogin(authz *auth.Service) func(*http.Request, string, string, string) (string, error) {
+	return func(r *http.Request, username, password, client string) (string, error) {
+		tok, err := authz.LoginToken(r.Context(), username, password, client)
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			return "", npm.ErrInvalidLogin
+		}
+		return tok, err
+	}
+}
+
+// principalUser names the user auth admitted a request as, or "".
+func principalUser(r *http.Request) string {
+	if p := auth.PrincipalOf(r); p != nil {
+		return p.User
+	}
+	return ""
+}
 
 // registerStoreMetrics exposes the metadata store's counters and health.
 func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {
