@@ -112,11 +112,14 @@ func TestAuthEndToEnd(t *testing.T) {
 		t.Fatalf("flint exited at startup:\n%s", p.output())
 	}
 	base := "http://" + p.addr
-	if !p.hasLog("created the bootstrap administrator") || !p.hasLog("generated the token-signing key") {
+	if !p.hasLog("created the bootstrap administrator") || !p.hasLog("generated the token-signing key") ||
+		!p.hasLog("generated the URL-signing key") {
 		t.Errorf("missing bootstrap logs:\n%s", p.output())
 	}
-	if info, err := os.Stat(filepath.Join(dataDir, "auth", "token-signing.key")); err != nil || info.Mode().Perm() != 0o600 {
-		t.Errorf("signing key: %v, %v", info, err)
+	for _, key := range []string{"token-signing.key", "url-signing.key"} {
+		if info, err := os.Stat(filepath.Join(dataDir, "auth", key)); err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v, %v", key, info, err)
+		}
 	}
 
 	var user struct{ Name string }
@@ -200,7 +203,7 @@ func TestAuthEndToEnd(t *testing.T) {
 		t.Fatalf("restart failed:\n%s", p.output())
 	}
 	base = "http://" + p.addr
-	if p.hasLog("created the bootstrap administrator") || p.hasLog("generated the token-signing key") {
+	if p.hasLog("created the bootstrap administrator") || p.hasLog("generated the token-signing key") || p.hasLog("generated the URL-signing key") {
 		t.Errorf("the restart bootstrapped again:\n%s", p.output())
 	}
 	if code := apiCall(t, "GET", base+"/api/v1/user", "admin", adminPassword, "", nil); code != 200 {

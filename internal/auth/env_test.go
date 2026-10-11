@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -49,6 +50,11 @@ func (c *clock) Add(d time.Duration) {
 //	GET /test/base             Authorize(repo "", no actions)
 //	GET /test/catalog          AuthorizeCatalog, listing the visible test repositories
 //	GET /test/{action}/{repo...} Authorize(repo, action), "pull,push" for several
+//	GET /style/{style}/...       the same, through an Authorizer with challenge style
+//	                             basic, cargo, cargo-url (a set LoginURL), plain, or custom (a set WriteError)
+//	GET /virtual/{style}/{action}/{virtual}/{publishTo}
+//	                             AuthorizeVirtual, publishTo "-" for none
+//	GET /signed/{repo}/{file...} VerifySignedURL(repo)
 type env struct {
 	t     *testing.T
 	svc   *Service
@@ -148,6 +154,58 @@ func (e *env) serve() *httptest.Server {
 			io.WriteString(w, "ok")
 		}
 	})
+	styles := map[string]*Authorizer{
+		"docker":    e.svc.Authorizer(Challenge{Style: ChallengeDocker}),
+		"basic":     e.svc.Authorizer(Challenge{Style: ChallengeBasic}),
+		"cargo":     e.svc.Authorizer(Challenge{Style: ChallengeCargo}),
+		"cargo-url": e.svc.Authorizer(Challenge{Style: ChallengeCargo, LoginURL: func(*http.Request) string { return `https://flint.example/me?a="b"` }}),
+		"plain":     e.svc.Authorizer(Challenge{Style: ChallengePlain}),
+		"custom": e.svc.Authorizer(Challenge{Style: ChallengePlain, WriteError: func(w http.ResponseWriter, _ *http.Request, status int, msg string) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]string{"error": msg})
+		}}),
+	}
+	styleOf := func(w http.ResponseWriter, r *http.Request) *Authorizer {
+		a := styles[r.PathValue("style")]
+		if a == nil {
+			http.NotFound(w, r)
+		}
+		return a
+	}
+	srv.HandleFunc("GET /style/{style}/base", func(w http.ResponseWriter, r *http.Request) {
+		if a := styleOf(w, r); a != nil && a.Authorize(w, r, "") {
+			io.WriteString(w, "ok "+a.Actor(r))
+		}
+	})
+	srv.HandleFunc("GET /style/{style}/{action}/{repo...}", func(w http.ResponseWriter, r *http.Request) {
+		if a := styleOf(w, r); a != nil && a.Authorize(w, r, r.PathValue("repo"), strings.Split(r.PathValue("action"), ",")...) {
+			io.WriteString(w, "ok "+a.Actor(r))
+		}
+	})
+	srv.HandleFunc("GET /virtual/{style}/{action}/{virtual}/{publishTo}", func(w http.ResponseWriter, r *http.Request) {
+		publishTo := r.PathValue("publishTo")
+		if publishTo == "-" {
+			publishTo = ""
+		}
+		if a := styleOf(w, r); a != nil && a.AuthorizeVirtual(w, r, r.PathValue("virtual"), publishTo, strings.Split(r.PathValue("action"), ",")...) {
+			io.WriteString(w, "ok "+a.Actor(r))
+		}
+	})
+	srv.HandleFunc("GET /signed/{repo}/{file...}", func(w http.ResponseWriter, r *http.Request) {
+		switch err := e.svc.VerifySignedURL(r, r.PathValue("repo")); {
+		case err == nil:
+			io.WriteString(w, "ok "+e.svc.Actor(r))
+		case errors.Is(err, ErrNotSigned):
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+		case errors.Is(err, ErrInvalidCredentials):
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+		case errors.Is(err, ErrDenied):
+			http.Error(w, err.Error(), http.StatusForbidden)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
 	e.srv = httptest.NewServer(srv.Handler())
 	e.t.Cleanup(e.srv.Close)
 	return e.srv
@@ -192,6 +250,7 @@ type request struct {
 	method, path string
 	user, pass   string // basic credentials, if user or pass is set
 	bearer       string
+	header       map[string]string // other request headers
 	body         string
 	form         map[string][]string
 }
@@ -234,6 +293,9 @@ func (e *env) do(req request) response {
 	}
 	if req.bearer != "" {
 		r.Header.Set("Authorization", "Bearer "+req.bearer)
+	}
+	for k, v := range req.header {
+		r.Header.Set(k, v)
 	}
 	resp, err := srv.Client().Do(r)
 	if err != nil {

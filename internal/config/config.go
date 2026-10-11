@@ -35,6 +35,9 @@ const (
 	// DefaultMinFreeSpace is the free space below which proxy
 	// repositories stop caching new content.
 	DefaultMinFreeSpace = "5%"
+	// DefaultLoginTokenTTL is how long an API token minted by a client's
+	// login command stays valid.
+	DefaultLoginTokenTTL = 90 * 24 * time.Hour
 )
 
 // Config is the configuration file.
@@ -164,6 +167,9 @@ type Auth struct {
 	// BootstrapAdmin, if set, creates the first administrator when no
 	// administrator exists yet.
 	BootstrapAdmin *BootstrapAdmin `json:"bootstrapAdmin,omitempty"`
+	// LoginTokenTTL is how long an API token minted by a package
+	// client's login command stays valid. Default 2160h (90 days).
+	LoginTokenTTL Duration `json:"loginTokenTTL,omitzero"`
 }
 
 // BootstrapAdmin names the first administrator and the file holding its
@@ -234,7 +240,10 @@ func Load(path string) (*Config, error) {
 // Parse decodes and validates a configuration file's contents, and fills
 // in defaults.
 func Parse(b []byte) (*Config, error) {
-	c := Config{ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout}}
+	c := Config{
+		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout},
+		Auth:            Auth{LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL}},
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
@@ -472,6 +481,12 @@ func (c *Config) Validate() error {
 		if b.PasswordFile == "" {
 			v.addf("auth.bootstrapAdmin.passwordFile", "is required when auth.bootstrapAdmin is set")
 		}
+	}
+	switch d := c.Auth.LoginTokenTTL; {
+	case d.invalid != "":
+		v.addf("auth.loginTokenTTL", "%s", d.invalid)
+	case d.Duration <= 0:
+		v.addf("auth.loginTokenTTL", "must be positive")
 	}
 	return v.err()
 }
