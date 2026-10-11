@@ -162,11 +162,14 @@ func TestFetchPathVerifies(t *testing.T) {
 			tc.expect.Compute = []string{upstream.MD5}
 			var res upstream.PathResult
 			var doneErr error
+			done := make(chan struct{})
 			fe, _ := f.FetchPath("k", "path/to/file", tc.expect, pathSource(tc.data, tc.size),
-				func(_ context.Context, r upstream.PathResult, err error) { res, doneErr = r, err })
+				func(_ context.Context, r upstream.PathResult, err error) { res, doneErr = r, err; close(done) })
 			var out bytes.Buffer
 			n, err := fe.Stream(ctx, &out)
 			fe.Release()
+			// done runs after Stream has returned.
+			<-done
 			want := blob.FromBytes(tc.data)
 			_, statErr := store.Stat(ctx, want)
 			if !tc.ok {
