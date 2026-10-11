@@ -325,12 +325,13 @@ func TestPoisonedStoreStaysReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, _, _, collector, err := newServer(context.Background(), cfg, slog.New(slog.DiscardHandler), m, store, blobs)
+	a, err := newServer(context.Background(), cfg, slog.New(slog.DiscardHandler), m, store, blobs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer collector.Close()
-	h := srv.Handler()
+	defer a.audit.Close()
+	defer a.gc.Close()
+	h := a.srv.Handler()
 	scrape := func() string {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))

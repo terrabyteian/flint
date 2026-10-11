@@ -274,6 +274,12 @@ func TestValidation(t *testing.T) {
 		{"gc bad durations", `{"dataDir": "/d", "gc": {"gracePeriod": "a day", "interval": 5}}`,
 			[]string{`gc.gracePeriod: "a day" is not a duration`, "gc.interval: 5 is not a duration string"}},
 		{"gc negative interval", `{"dataDir": "/d", "gc": {"interval": "-1h"}}`, []string{"gc.interval: must be positive"}},
+		{"audit retention good", `{"dataDir": "/d", "audit": {"retention": {"maxAge": "8760h", "maxSize": "10GiB"}}}`, nil},
+		{"audit retention bad", `{"dataDir": "/d", "audit": {"retention": {"maxAge": "1y", "maxSize": "huge"}}}`,
+			[]string{`audit.retention.maxAge: "1y" is not a duration`, `audit.retention.maxSize: "huge" is not a size`}},
+		{"audit retention out of range", `{"dataDir": "/d", "audit": {"retention": {"maxAge": "-1h", "maxSize": 0}}}`,
+			[]string{"audit.retention.maxAge: must not be negative", "audit.retention.maxSize: must be positive"}},
+		{"audit unknown field", `{"dataDir": "/d", "audit": {"maxAge": "1h"}}`, []string{`unknown field "maxAge"`}},
 		{"repo good", `{"dataDir": "/d", "repositories": [{"name": "my.repo_1-x", "format": "oci", "type": "hosted"}]}`, nil},
 		{"permission empty", `{"dataDir": "/d", "auth": {"permissions": [{}]}}`,
 			[]string{"auth.permissions[0].repositories: must name at least one", `auth.permissions[0].role: "" is not one of`,
@@ -330,6 +336,23 @@ func TestProxyDefaults(t *testing.T) {
 	d, _ := Parse([]byte(`{"dataDir": "/d"}`))
 	if got := d.ProxyCache.MinFreeSpace.Of(1000); got != 50 {
 		t.Errorf("default minFreeSpace of 1000 bytes = %d, want 50", got)
+	}
+}
+
+func TestAuditDefaults(t *testing.T) {
+	c, err := Parse([]byte(`{"dataDir": "/d"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Audit.Retention; r.MaxAge.Duration != 0 || r.MaxSize.Bytes != 0 {
+		t.Errorf("default audit retention = %+v, want none", r)
+	}
+	c, err = Parse([]byte(`{"dataDir": "/d", "audit": {"retention": {"maxAge": "720h", "maxSize": "1GiB"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Audit.Retention; r.MaxAge.Duration != 720*time.Hour || r.MaxSize.Bytes != 1<<30 {
+		t.Errorf("audit retention = %+v", r)
 	}
 }
 

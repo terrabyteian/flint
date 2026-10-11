@@ -478,7 +478,7 @@ func TestActor(t *testing.T) {
 		t.Errorf("origins = %+v", origins)
 	}
 	r := httptest.NewRequest("GET", "/", nil)
-	if got := clientActor(r); got != "anonymous" {
+	if got := clientActor(r); got != meta.ActorAnonymous {
 		t.Errorf("clientActor without server info = %q", got)
 	}
 }

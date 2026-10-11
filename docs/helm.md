@@ -29,7 +29,7 @@ cosign verify ghcr.io/terrabyteian/charts/flint:0.1.0 \
 
 - A **ConfigMap** holding `config.json`, rendered from the `config` value and mounted at `/etc/flint/config.json`. The pod restarts when it changes, because flint reads its configuration at startup.
 - A **StatefulSet** with one replica. flint locks its data directory, so the chart never runs two pods on one volume: an update stops the old pod before it starts the new one, which makes updates a short outage.
-- A **PersistentVolumeClaim** for `/var/lib/flint`, from the StatefulSet's claim template or `persistence.existingClaim`. Uninstalling the release keeps the claim; delete it yourself to delete the data.
+- A **PersistentVolumeClaim** for `/var/lib/flint`, from the StatefulSet's claim template or `persistence.existingClaim`. Uninstalling the release keeps the claim; delete it yourself to delete the data. The volume also holds the [audit log](operations.md#audit-log), kept forever unless `config.audit.retention` limits it.
 - A **Service** of type ClusterIP, NodePort, or LoadBalancer.
 - A **ServiceAccount** without an API token, since flint does not call the Kubernetes API.
 - Optionally a cert-manager **Certificate** and a **NetworkPolicy**.
@@ -171,4 +171,5 @@ The chart does not schedule backups: [backups](backup.md#scheduling) shows a Cro
 
 `helm upgrade` replaces the pod; flint is unavailable from the moment the old pod stops until the new one is ready.
 If an upgrade leaves the pod failing, for example with a configuration flint rejects or an image tag that does not exist, upgrading again with corrected values or running `helm rollback` replaces the failing pod; the StatefulSet's `Parallel` pod management lets it do so without waiting for the pod to become ready.
+Rolling back to a version without the audit log also needs a manual step; see [audit log durability and recovery](operations.md#durability-and-recovery).
 `helm uninstall` leaves the data claim, `data-<statefulset>-0` such as `data-flint-0`, in place, so reinstalling with the same release name reuses the data.

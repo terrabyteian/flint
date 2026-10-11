@@ -76,6 +76,12 @@ config:
   #   gracePeriod: 24h
   #   # Run garbage collection this long after the previous run started.
   #   interval: 24h
+  # The audit log of every change (docs/operations.md) is kept forever by
+  # default, on the data volume; retention bounds it by age, size, or both.
+  # audit:
+  #   retention:
+  #     maxAge: 8760h
+  #     maxSize: 10GiB
 
 # Secrets holding proxy repositories' upstream passwords or access tokens.
 # Each Secret's key "password" is mounted at

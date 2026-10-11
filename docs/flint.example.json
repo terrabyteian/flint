@@ -78,6 +78,11 @@
     "gracePeriod": "24h",
     "interval": "24h"
   },
+  "audit": {
+    "retention": {
+      "maxAge": "17520h"
+    }
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",

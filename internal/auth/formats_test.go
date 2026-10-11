@@ -179,7 +179,7 @@ func TestChallengeStyles(t *testing.T) {
 				t.Errorf("carol: %d %q", resp.status, resp.body)
 			}
 			// Anonymous pulls work where they are allowed.
-			if resp := e.do(request{path: "/style/" + tt.style + "/pull/public/app"}); resp.status != http.StatusOK || resp.body != "ok anonymous" {
+			if resp := e.do(request{path: "/style/" + tt.style + "/pull/public/app"}); resp.status != http.StatusOK || resp.body != "ok (anonymous)" {
 				t.Errorf("anonymous pull from public: %d %q", resp.status, resp.body)
 			}
 		})
@@ -462,7 +462,7 @@ func TestSignedURL(t *testing.T) {
 	}
 
 	// Anonymous signatures follow anonymous pull.
-	if resp := e.do(request{path: e.signedPath(nil, "/signed/public/f", 0)}); resp.status != http.StatusOK || resp.body != "ok anonymous" {
+	if resp := e.do(request{path: e.signedPath(nil, "/signed/public/f", 0)}); resp.status != http.StatusOK || resp.body != "ok (anonymous)" {
 		t.Errorf("anonymous, public: %d %q", resp.status, resp.body)
 	}
 	if resp := e.do(request{path: e.signedPath(anonymous, "/signed/docker-local/f", 0)}); resp.status != http.StatusForbidden {

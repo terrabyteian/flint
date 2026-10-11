@@ -90,10 +90,16 @@ type Record struct {
 	Version Seq // the sequence number of the batch that last wrote the key
 }
 
+// Built-in actors. Their parentheses keep them apart from user names.
+const (
+	ActorSystem    = "(system)"    // flint's own background work
+	ActorAnonymous = "(anonymous)" // an unauthenticated client
+)
+
 // Origin describes the actor, action, and target behind a batch.
 // It must not contain secrets: it is kept in the audit stream.
 type Origin struct {
-	Actor  string // user or token identity, or "system"
+	Actor  string // user or token identity, ActorSystem, or ActorAnonymous
 	Action string // e.g. "oci.manifest.push"
 	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
 }

@@ -197,6 +197,8 @@ Request bodies are strict JSON: unknown fields are errors.
 | `PUT, DELETE /api/v1/pypi/{repository}/projects/{project}/releases/{version}/yank` | `delete` role on the repository | Yank or unyank a release of a hosted PyPI repository; see [PyPI](pypi.md#yanking-and-deleting). |
 | `DELETE /api/v1/pypi/{repository}/projects/{project}/releases/{version}` | `delete` role on the repository | Delete a release's files. |
 | `DELETE /api/v1/pypi/{repository}/projects/{project}/files/{filename}` | `delete` role on the repository | Delete one file. |
+| `GET /api/v1/audit` | admin | Query the [audit log](operations.md#audit-log). |
+| `GET /api/v1/audit/export` | admin | Export the audit log as JSON lines. |
 
 [Garbage collection](garbage-collection.md) describes the garbage-collection reports, and `flint gc` calls the `/api/v1/gc` endpoints.
 

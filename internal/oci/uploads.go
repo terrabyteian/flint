@@ -180,7 +180,7 @@ func (h *Handler) openUpload(ctx context.Context, rn *repoName, id string) (blob
 func (h *Handler) forgetUpload(id string) {
 	var b meta.Batch
 	b.Delete(uploadKey(id))
-	b.SetOrigin(meta.Origin{Actor: "system", Action: "oci.upload.forget", Target: id})
+	b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: "oci.upload.forget", Target: id})
 	h.commit(context.Background(), &b)
 }
 

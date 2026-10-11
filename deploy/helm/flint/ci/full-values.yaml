@@ -61,6 +61,10 @@ config:
   gc:
     gracePeriod: 48h
     interval: 24h
+  audit:
+    retention:
+      maxAge: 8760h
+      maxSize: 10GiB
   auth:
     permissions:
       - repositories: ["docker-local", "releases", "pypi-local"]

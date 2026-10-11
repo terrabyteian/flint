@@ -92,7 +92,7 @@ The format packages translate protocol requests into blob and metadata operation
   meta/consumers/<name>        durable checkpoint of each registered log consumer
   auth/token-signing.key       Ed25519 key that signs the Docker token service's bearer tokens, generated on first start
   auth/url-signing.key         HMAC-SHA256 key that signs download URLs, generated on first start
-  audit/                       append-only audit stream of batch origins and touched keys, never values (M4)
+  audit/<seq>.audit            append-only audit stream of batch origins and touched keys, never values; segments named by first sequence number
   RESTORE-INCOMPLETE           present only while flint restore writes the directory; serve refuses to start while it exists
 ```
 
@@ -288,7 +288,7 @@ func (b *Batch) SetOrigin(o Origin)
 // Origin describes the actor, action, and target behind a batch.
 // It must not contain secrets: it is kept in the audit stream.
 type Origin struct {
-	Actor  string // user or token identity, or "system"
+	Actor  string // user or token identity, "(system)", or "(anonymous)"
 	Action string // e.g. "oci.manifest.push"
 	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
 }
@@ -442,7 +442,7 @@ type CatalogAuthorizer interface {
 
 Deletes ask for `delete`, which only admins hold.
 A cross-repository mount asks, with a response writer it discards, whether the caller may pull from the source; if not, it falls back to a normal upload.
-`oci.Options.Actor` names the principal recorded in batch origins for the audit log.
+`oci.Options.Actor` names the principal recorded in batch origins for the audit log: `internal/auth` records the principal it admitted in the request's context, and names it as the user, the user and API token, or `(anonymous)`.
 
 ## Interfaces for the M4 garbage collector
 
@@ -488,6 +488,7 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/blake2b` | BLAKE2b, hand-written, for the BLAKE2b-256 digests PyPI clients send and PyPI's JSON API reports. |
 | `internal/backup` | Consistent, incremental backup to a directory; verify and restore. |
 | `internal/flock` | Exclusive file locks on the data and backup directories. |
+| `internal/audit` | Audit log: a durable log consumer writing batch origins and touched keys to its own stream, and the admin API that reads it. |
 | `internal/ui` | Server-rendered UI templates and static assets. |
 | `deploy/helm/flint` | Helm chart. |
 
@@ -619,7 +620,7 @@ The format package decides what owning means and how members merge. For PyPI:
 - **Configuration.** One JSON file. Repositories and permissions declared in config are read-only through the API; repositories created through the API or UI are also allowed and live in the metadata store. Users and tokens are runtime data. The Helm chart renders YAML values to the JSON config.
 - **TLS.** Served from certificate files, reloaded when they change. flint is proxy-aware: forwarded headers are trusted only from a configured trusted-proxy list. Built-in ACME comes after v1.
 - **UI.** A small server-rendered UI (`html/template` plus hand-written JavaScript, no npm build chain) to browse repositories, tags, packages, layers, and signatures, and to manage one's own tokens. Administration is through the API and config.
-- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that writes one record per batch to its own append-only stream under `audit/`, never including operation values, so password hashes, token hashes, and other values never reach it (see the metadata store guarantees). The stream is retained separately (retention configurable, keep forever by default), so audit history never depends on log segment lifetime. OpenTelemetry is deferred.
+- **Observability.** A Prometheus metrics endpoint, structured JSON logs via `log/slog`, and liveness and readiness endpoints. An audit log of every change is derived from the write-ahead log's batch origins: the audit log is a durable log consumer that writes one record per batch to its own append-only stream under `audit/`, never including operation values, so password hashes, token hashes, and other values never reach it (see the metadata store guarantees). It writes and fsyncs records before checkpointing, so the write-ahead log keeps every batch whose record may not be durable, and after a crash it resumes after its last durable record without losing or repeating one. The stream is retained separately (retention configurable by age and size, keep forever by default, deleting whole segments), so audit history never depends on log segment lifetime. Administrators query it, filtered by time, actor, action, and target, and export it as JSON lines through the admin API. OpenTelemetry is deferred.
 - **Releases.** Static binaries for linux and darwin on amd64 and arm64; a multi-arch `FROM scratch` image and a Helm chart on `ghcr.io/terrabyteian`; cosign signatures and an SBOM produced in CI. The chart lives in this repository. flint's own image and chart stay on ghcr.io permanently, so a broken flint can always be redeployed without depending on itself.
 
 ## Cleanup and data safety

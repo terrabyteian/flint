@@ -76,6 +76,8 @@ type Config struct {
 	Backup Backup `json:"backup"`
 	// GC configures garbage collection.
 	GC GC `json:"gc"`
+	// Audit configures the audit log.
+	Audit Audit `json:"audit"`
 }
 
 // Backup configures where the admin API writes backups.
@@ -97,6 +99,26 @@ type GC struct {
 	// after the previous run started. Without it, garbage collection runs
 	// only when an administrator starts it.
 	Interval Duration `json:"interval,omitzero"`
+}
+
+// Audit configures the audit log, which records every change to the
+// metadata store under <dataDir>/audit.
+type Audit struct {
+	// Retention bounds how long records are kept. Without it, they are
+	// kept forever.
+	Retention AuditRetention `json:"retention"`
+}
+
+// AuditRetention bounds the audit log. Old records are deleted a whole
+// segment at a time, oldest first, and segments are sized and aged from
+// these limits so that the audit log stays close to them.
+type AuditRetention struct {
+	// MaxAge, if set, deletes records once they are older, such as
+	// "8760h". Default: no limit.
+	MaxAge Duration `json:"maxAge,omitzero"`
+	// MaxSize, if set, deletes the oldest records while the audit log is
+	// larger, such as "10GiB". Default: no limit.
+	MaxSize ByteSize `json:"maxSize,omitzero"`
 }
 
 // ProxyCache configures the cache that proxy repositories share.
@@ -527,6 +549,17 @@ func (c *Config) Validate() error {
 		v.addf("gc.interval", "%s", i.invalid)
 	case i.Duration < 0:
 		v.addf("gc.interval", "must be positive")
+	}
+	switch d := c.Audit.Retention.MaxAge; {
+	case d.invalid != "":
+		v.addf("audit.retention.maxAge", "%s", d.invalid)
+	case d.Duration < 0:
+		v.addf("audit.retention.maxAge", "must not be negative")
+	}
+	if s := c.Audit.Retention.MaxSize; s.invalid != "" {
+		v.addf("audit.retention.maxSize", "%s", s.invalid)
+	} else if s.set && s.Bytes <= 0 {
+		v.addf("audit.retention.maxSize", "must be positive")
 	}
 
 	for i, p := range c.Auth.Permissions {

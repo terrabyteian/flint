@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/terrabyteian/flint/internal/meta"
 )
 
 // parseChallenge parses a Bearer WWW-Authenticate challenge.
@@ -493,7 +495,7 @@ func TestPermit(t *testing.T) {
 		wantActor string
 	}{
 		{"anonymous on a private repository", nil, "docker-local", []string{"pull"}, http.StatusUnauthorized, ""},
-		{"anonymous pull with anonymousPull", nil, "public", []string{"pull"}, http.StatusOK, "anonymous"},
+		{"anonymous pull with anonymousPull", nil, "public", []string{"pull"}, http.StatusOK, meta.ActorAnonymous},
 		{"anonymous push with anonymousPull", nil, "public", []string{"pull", "push"}, http.StatusUnauthorized, ""},
 		{"password", func(r *http.Request) { r.SetBasicAuth("carol", "carol-password") }, "docker-local", []string{"pull", "push"}, http.StatusOK, "carol"},
 		{"__token__", func(r *http.Request) { r.SetBasicAuth(TokenUser, tok) }, "docker-local", []string{"pull", "push"}, http.StatusOK, "carol"},
