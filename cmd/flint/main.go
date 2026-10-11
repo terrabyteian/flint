@@ -19,6 +19,8 @@ const usage = `usage: flint <command> [flags]
 commands:
   serve      run the registry server (flint serve -config <file>)
   config     check a configuration file (flint config check <file>)
+  backup     back up a running server, or list and verify backups (flint backup help)
+  restore    restore a backup into a new data directory (flint restore <backup-dir> <data-dir>)
   version    print the flint version
 `
 
@@ -43,6 +45,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return serve(ctx, args[1:], stderr)
 	case "config":
 		return configCmd(args[1:], stdout, stderr)
+	case "backup", "restore":
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if args[0] == "backup" {
+			return backupCmd(ctx, args[1:], stdout, stderr)
+		}
+		return restoreCmd(ctx, args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "flint %s\n", version)
 		return 0

@@ -58,6 +58,8 @@ service.type=ExternalName
 imag.tag=typo
 bootstrapAdmin.enabled=true
 config.auth.bootstrapAdmin.passwordFile=/x
+config.backup.directory=/backups
+backup.enabled=true
 upstreamSecrets[0].name=Bad_Name,upstreamSecrets[0].existingSecret=x
 upstreamSecrets[0].name=dockerhub
 INVALID

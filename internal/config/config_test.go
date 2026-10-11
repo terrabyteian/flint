@@ -35,7 +35,8 @@ func TestExampleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.TLS == nil || c.TLS.CertFile != "/etc/flint/tls/tls.crt" || c.ShutdownTimeout.Duration != 25*time.Second {
+	if c.TLS == nil || c.TLS.CertFile != "/etc/flint/tls/tls.crt" || c.ShutdownTimeout.Duration != 25*time.Second ||
+		c.Backup.Directory != "/var/backups/flint" {
 		t.Errorf("unexpected config %+v", c)
 	}
 	wantProxies := []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16"), netip.MustParsePrefix("192.168.1.10/32")}
@@ -206,6 +207,15 @@ func TestValidation(t *testing.T) {
 			[]string{`proxyCache.minFreeSpace: "100%" is not a percentage`}},
 		{"bad min free size", `{"dataDir": "/d", "proxyCache": {"minFreeSpace": "some"}}`,
 			[]string{`proxyCache.minFreeSpace: "some" is not a size: use a percentage such as "5%"`}},
+		{"backup good", `{"dataDir": "/data", "backup": {"directory": "/data-backup"}}`, nil},
+		{"backup relative", `{"dataDir": "/data", "backup": {"directory": "backup"}}`,
+			[]string{`backup.directory: "backup" must be an absolute path`}},
+		{"backup inside data", `{"dataDir": "/data", "backup": {"directory": "/data/backup"}}`,
+			[]string{`backup.directory: "/data/backup" must be outside the data directory`}},
+		{"backup is data", `{"dataDir": "/data", "backup": {"directory": "/data/"}}`,
+			[]string{`backup.directory: "/data/" must be outside the data directory`}},
+		{"backup contains data", `{"dataDir": "/srv/data", "backup": {"directory": "/srv"}}`,
+			[]string{`backup.directory: "/srv" must be outside the data directory`}},
 		{"repo good", `{"dataDir": "/d", "repositories": [{"name": "my.repo_1-x", "format": "oci", "type": "hosted"}]}`, nil},
 		{"permission empty", `{"dataDir": "/d", "auth": {"permissions": [{}]}}`,
 			[]string{"auth.permissions[0].repositories: must name at least one", `auth.permissions[0].role: "" is not one of`,

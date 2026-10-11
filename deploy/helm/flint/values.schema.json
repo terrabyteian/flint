@@ -43,7 +43,7 @@
     },
     "config": {
       "type": "object",
-      "description": "flint's configuration, without listen, dataDir, and tls, which the chart sets."
+      "description": "flint's configuration, without listen, dataDir, tls, and backup, which the chart sets."
     },
     "bootstrapAdmin": {
       "type": "object",
@@ -57,6 +57,22 @@
         },
         "existingSecret": {
           "type": "string"
+        }
+      }
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "existingClaim": {
+          "type": "string"
+        },
+        "volume": {
+          "type": "object",
+          "description": "A Kubernetes volume source, such as nfs, used when existingClaim is empty."
         }
       }
     },

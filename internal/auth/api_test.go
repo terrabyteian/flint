@@ -468,3 +468,31 @@ func TestUnreadableUserRecord(t *testing.T) {
 	}
 	e.wantStatus(e.api("GET", "/api/v1/users", "root", "root-password", "", nil), http.StatusInternalServerError, "list")
 }
+
+func TestAdminHandler(t *testing.T) {
+	e := newEnv(t, testConfig)
+	e.addUser("root", "root-password", true)
+	e.addUser("bob", "bob-password", false)
+	adminTok := e.addToken("root", true, time.Time{})
+	plainTok := e.addToken("root", false, time.Time{})
+	for _, tc := range []struct {
+		user, pass string
+		status     int
+		body       string
+	}{
+		{"", "", http.StatusUnauthorized, `"authentication required"`},
+		{"root", "wrong", http.StatusUnauthorized, `"authentication required"`},
+		{"bob", "bob-password", http.StatusForbidden, `"this requires the admin role"`},
+		{TokenUser, plainTok, http.StatusForbidden, `"this requires the admin role"`},
+		{"root", "root-password", http.StatusOK, "admin root"},
+		{TokenUser, adminTok, http.StatusOK, "admin root (token "},
+	} {
+		resp := e.do(request{method: "POST", path: "/test/admin", user: tc.user, pass: tc.pass})
+		if resp.status != tc.status || !strings.Contains(resp.body, tc.body) {
+			t.Errorf("%s: %d %q, want %d containing %q", tc.user, resp.status, resp.body, tc.status, tc.body)
+		}
+		if resp.header.Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: Cache-Control %q", tc.user, resp.header.Get("Cache-Control"))
+		}
+	}
+}

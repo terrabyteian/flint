@@ -92,6 +92,7 @@ The format packages translate protocol requests into blob and metadata operation
   meta/consumers/<name>        durable checkpoint of each registered log consumer
   auth/token-signing.key       Ed25519 key that signs the Docker token service's bearer tokens, generated on first start
   audit/                       append-only audit stream of batch origins and touched keys, never values (M4)
+  RESTORE-INCOMPLETE           present only while flint restore writes the directory; serve refuses to start while it exists
 ```
 
 Paths contain no node identity, so a later HA deployment can reuse the layout unchanged.
@@ -289,6 +290,18 @@ type Origin struct {
 func Open(dir string, opts Options) (Store, error)
 ```
 
+For backups, three functions move a store's state in and out of the snapshot file format, so a backup's metadata is exactly what the store itself would load:
+
+```go
+// WriteSnapshot writes v to w in the snapshot file format.
+func WriteSnapshot(w io.Writer, v View) error
+// ReadSnapshot reads and validates a snapshot and returns an in-memory view of it.
+func ReadSnapshot(r io.Reader, name string) (View, error)
+// Restore creates a store in dir, which must not hold one, whose state is exactly v's,
+// record versions included: it writes v as the store's snapshot and starts an empty log after it.
+func Restore(dir string, v View, opts Options) error
+```
+
 Errors: `ErrConflict`, `ErrClosed`, `ErrUnknownConsumer`, `ErrUnknownOutcome` and `ErrPoisoned` (a failed log write or fsync), `ErrCompacted` (`ReadLog` asked for deleted segments), `ErrBatchTooLarge`, and `*CorruptionError` (matching `ErrCorrupt`), which names the file and offset of corruption found at startup or by `ReadLog`.
 
 ### `internal/blob`
@@ -375,7 +388,7 @@ func NewFS(dir string, opts Options) (Store, error)
 ```
 
 `ParseDigest` follows the OCI digest grammar: a well-formed digest with any algorithm other than sha256 is `ErrDigestUnsupported`, and anything else that is not `sha256:` plus 64 lowercase hex characters is `ErrDigestInvalid`.
-`FromBytes` computes a digest, and `Hex` and `IsZero` complete the type; digests are comparable with `==`.
+`FromBytes` computes a digest, and `Hex` and `IsZero` complete the type; digests are comparable with `==`, and marshal as text (JSON strings) in their string form.
 
 Errors: `ErrNotFound`, `ErrDigestMismatch`, `ErrDigestInvalid`, `ErrDigestUnsupported`, `ErrUploadUnknown`, `ErrUploadBusy` (the upload is open in another request), and `ErrUploadClosed` (the upload was already committed, suspended, or cancelled).
 Any failed `Commit` or `Suspend` discards the upload.
@@ -428,7 +441,7 @@ Packages are created when there is code for them; this is the target layout, not
 
 | Package | Responsibility |
 | --- | --- |
-| `cmd/flint` | The binary: `serve`, `backup`, `version`, and admin subcommands. Wiring only. |
+| `cmd/flint` | The binary: `serve`, `backup`, `restore`, `version`, and admin subcommands. Wiring only. |
 | `internal/meta` | Write-ahead-log metadata store, index, snapshots. |
 | `internal/blob` | Digest type, blob store interface, filesystem implementation (S3 later). |
 | `internal/config` | JSON config loading and validation. |
@@ -440,7 +453,8 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/upstream` | Shared upstream client: credentials, revalidation TTLs, offline fallback. |
 | `internal/metrics` | Prometheus text exposition. |
 | `internal/gc` | Online mark-and-sweep garbage collection. |
-| `internal/backup` | Consistent backup to a directory. |
+| `internal/backup` | Consistent, incremental backup to a directory; verify and restore. |
+| `internal/flock` | Exclusive file locks on the data and backup directories. |
 | `internal/ui` | Server-rendered UI templates and static assets. |
 | `deploy/helm/flint` | Helm chart. |
 
@@ -543,7 +557,12 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - **Garbage collection** is online mark-and-sweep with no read-only mode. Marking walks a metadata view and collects every referenced digest; sweeping removes blobs that are unmarked and older than a 24-hour grace period. The grace period protects blobs committed but not yet linked, such as in-flight uploads. The sweep uses a GC epoch counter (`gc\0epoch`): its start batch bumps the epoch and records the doomed set (`gc\0doomed\0<digest>`), and its end batch clears the doomed set. Every link batch, from an upload or a mount, reads the epoch and the digest's doomed entry from the same view, commits with a `Require` on that epoch, and fails with a retryable error if the digest is doomed in that view or the precondition fails; a mount then falls back to a normal upload. Two guarantees make a concurrent link and sweep unable to both succeed: the sweep deletes only doomed blobs that are unreferenced in a view taken after its start batch and in every view pinned with the garbage collector (such as a running backup's), and a link reads the epoch and the doomed entry from one view before its blob-existence check (`Upload.Commit` or the mount's source check), so a sweep that starts after that read makes its precondition fail and a sweep already running is caught by the doomed entry in that view. The garbage-collection task defines and tests the algorithms that meet these guarantees.
 - **Deletes** hide immediately in metadata; garbage collection reclaims space later.
 - **Retention policies** (for example, keep the last N tags matching a pattern, or delete untagged manifests older than X) are designed now and built shortly after v1. They are the only mechanism that deletes untagged manifests in hosted repositories.
-- **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup takes and pins its metadata view with the garbage collector in one step and holds it until it finishes copying, so the sweep's deletion check covers it and every blob its snapshot references is still present when it is copied.
+- **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup takes and pins its metadata view with the garbage collector in one step and holds it until it finishes copying, so the sweep's deletion check covers it and every blob its snapshot references is still present when it is copied. [backup.md](backup.md) is the operator's guide; the decisions behind it:
+  - **It runs in the server.** Only the live process can pin a view with the garbage collector, so a backup is started through the admin API (`POST /api/v1/backup`, global admin), which `flint backup` drives and waits on. The target is `backup.directory` from the configuration, never a path in the request, so an admin token cannot make the server write elsewhere. One backup runs at a time, and a `LOCK` file in the target keeps out another process.
+  - **The target is a content-addressed blob store** (`internal/blob`'s filesystem layout) shared by every backup in it, plus `backups/<id>/` holding the metadata snapshot (`meta.WriteSnapshot` of the pinned view), the list of blobs the backup needs, and `backup.json`. Copies go through blob store uploads, so each is verified against its digest and fsynced before it counts. `backup.json` records the digests of the other two files and is renamed into place, then its directory fsynced, only after everything else is durable, so an interrupted backup never looks complete. Nothing is deleted from the target, not even incomplete backups.
+  - **It copies every blob in the data directory**, not only those it can tell are referenced, so a backup never depends on every format package reporting its references correctly: every blob the view references was committed before the view was taken, so the blob walk finds it, and a blob that disappears during the walk was unreferenced. Each format package also reports the blobs its records reference (`oci.References`), and the backup fails if one is missing, unless an earlier backup in the target holds it.
+  - **Restore** (`flint restore`) writes a backup into a new, empty data directory with `meta.Restore`, re-verifying every blob as it copies it, behind a `RESTORE-INCOMPLETE` marker that `flint serve` refuses. The restored store keeps every record's version and continues the log after the backup's sequence number. `flint backup verify` checks a backup the same way without restoring it.
+  - **Secrets.** A backup holds the metadata, including password and API token hashes, but not the token-signing key: a restored server generates a new one, which only invalidates bearer tokens that live five minutes anyway, so backups never contain private key material. The configuration file and the files it names (TLS keys, the bootstrap password, upstream credentials) belong to the deployment and are not backed up either.
 
 ## Roadmap
 

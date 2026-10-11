@@ -102,7 +102,7 @@ echo "$TOKEN" | crane auth login registry.example -u ci-bot --password-stdin
 The admin API serves JSON under `/api/v1/`.
 Every request authenticates with HTTP basic credentials, a password or an API token; tokens from the Docker token endpoint are not accepted.
 Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`.
-Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user or token), `409` (the user exists, or the change would remove the last administrator), or `413` (the body is over 64 KiB).
+Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user or token, or backups are not configured), `409` (the user exists, the change would remove the last administrator, or a backup is already running), or `413` (the body is over 64 KiB).
 Request bodies are strict JSON: unknown fields are errors.
 
 | Request | Who | Does |
@@ -120,6 +120,8 @@ Request bodies are strict JSON: unknown fields are errors.
 | `GET /api/v1/tokens` | anyone | List one's own tokens. |
 | `POST /api/v1/tokens` | anyone, with a password | Create a token for oneself. |
 | `DELETE /api/v1/tokens/{id}` | the owner, or admin | Revoke a token. |
+| `GET /api/v1/backup` | admin | Report the running backup and the last ones; see [backups](backup.md#the-admin-api). |
+| `POST /api/v1/backup` | admin | Start a backup. |
 
 "admin" means the global admin role: an administrator authenticated with a password, or with a token created with `"admin": true`.
 Creating a token, creating or updating a user or its groups, and setting a password need a password, even for a token created with `"admin": true`, so a leaked token cannot mint longer-lived tokens or take over its owner's or anyone else's account.

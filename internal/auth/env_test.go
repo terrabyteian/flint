@@ -140,6 +140,9 @@ func (e *env) serve() *httptest.Server {
 		}
 		io.WriteString(w, strings.Join(names, " "))
 	})
+	srv.Handle("POST /test/admin", e.svc.AdminHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "admin "+e.svc.Actor(r))
+	})))
 	srv.HandleFunc("GET /test/{action}/{repo...}", func(w http.ResponseWriter, r *http.Request) {
 		if e.svc.Authorize(w, r, r.PathValue("repo"), strings.Split(r.PathValue("action"), ",")...) {
 			io.WriteString(w, "ok")

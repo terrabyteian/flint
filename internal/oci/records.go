@@ -1,12 +1,15 @@
 package oci
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/meta"
 )
 
 // Metadata keys. Every key starts with its owner's namespace, and parts are
@@ -269,4 +272,30 @@ func decodeUpload(b []byte) (*uploadRecord, error) {
 		return nil, err
 	}
 	return u, nil
+}
+
+// References calls fn, until it returns an error, with the digest of each
+// blob that v links into an OCI repository, hosted or proxy: every blob
+// link and every manifest, whose bytes are a blob too. A manifest is
+// stored only once everything it references is linked in its repository,
+// so these are all the blobs OCI repositories need. A digest linked in
+// several repositories is reported once for each.
+func References(v meta.View, fn func(blob.Digest) error) error {
+	var err error
+	for _, ns := range []string{nsBlob, nsManifest} {
+		v.Scan([]byte(ns), nil, func(k []byte, _ meta.Record) bool {
+			i := bytes.LastIndexByte(k, 0)
+			d, perr := blob.ParseDigest(string(k[i+1:]))
+			if perr != nil {
+				err = fmt.Errorf("oci: metadata key %q: %w", k, perr)
+				return false
+			}
+			err = fn(d)
+			return err == nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -119,6 +119,12 @@
 // fsynced, renamed into place, and the directory fsynced; then older
 // snapshots are deleted. Leftover temporary files are removed at startup.
 //
+// Backups use the same format: WriteSnapshot writes any view as a
+// snapshot, ReadSnapshot loads one into an in-memory view, and Restore
+// writes a view as a new store's snapshot followed by an empty log segment
+// that starts at the next sequence number, which recovery accepts like
+// any snapshot the store wrote itself.
+//
 // # Retention
 //
 // The retention floor is the minimum of the latest snapshot's sequence

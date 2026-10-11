@@ -66,6 +66,9 @@ Repositories and permission grants declared here are read-only through the API.
   "proxyCache": {
     "minFreeSpace": "5%"
   },
+  "backup": {
+    "directory": "/var/backups/flint"
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",
@@ -109,6 +112,7 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `repositories` | array | `[]` | Repositories declared in configuration; see below. |
 | `auth.permissions` | array | `[]` | Permission grants; see below. |
 | `auth.bootstrapAdmin` | object | none | Create the first administrator at startup if none exists; see below. |
+| `backup.directory` | string | none | Absolute path of the [backup](backup.md) directory, outside the data directory and not containing it. Without it, backups are disabled. |
 | `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
 
 Durations are Go duration strings: a number and a unit, such as `"30s"`, `"2m"`, or `"1m30s"`.
@@ -228,7 +232,7 @@ These authenticate themselves, as [authentication](auth.md) describes:
 | Endpoint | Meaning |
 | --- | --- |
 | `GET, POST /auth/token` | The Docker token endpoint: issues short-lived bearer tokens for registry requests. |
-| `/api/v1/...` | The admin API: users, groups, and API tokens. |
+| `/api/v1/...` | The admin API: users, groups, API tokens, and [backups](backup.md). |
 
 ## Signals and shutdown
 
@@ -245,7 +249,7 @@ Requests to the OCI API carry the repository name in a `repository` attribute, a
 
 ## Metrics
 
-Besides the HTTP, metadata store, and Go runtime metrics, the OCI API exports:
+Besides the HTTP, metadata store, Go runtime, and [backup](backup.md#metrics) metrics, the OCI API exports:
 
 | Metric | Meaning |
 | --- | --- |

@@ -77,10 +77,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- fail "tls.certManager.issuerRef.name is required" }}
 {{- end }}
 {{- end }}
-{{- range $field := list "listen" "dataDir" "tls" }}
+{{- range $field := list "listen" "dataDir" "tls" "backup" }}
 {{- if hasKey $.Values.config $field }}
-{{- fail (printf "config.%s is set by the chart; use containerPort, persistence, and tls instead" $field) }}
+{{- fail (printf "config.%s is set by the chart; use containerPort, persistence, tls, and backup instead" $field) }}
 {{- end }}
+{{- end }}
+{{- if and .Values.backup.enabled (not .Values.backup.existingClaim) (not .Values.backup.volume) }}
+{{- fail "backup.enabled needs backup.existingClaim or backup.volume" }}
 {{- end }}
 {{- if hasKey (.Values.config.auth | default dict) "bootstrapAdmin" }}
 {{- fail "config.auth.bootstrapAdmin is set by the chart; use bootstrapAdmin instead" }}
@@ -97,6 +100,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- $_ = set $config "dataDir" "/var/lib/flint" }}
 {{- if .Values.tls.enabled }}
 {{- $_ = set $config "tls" (dict "certFile" "/etc/flint/tls/tls.crt" "keyFile" "/etc/flint/tls/tls.key") }}
+{{- end }}
+{{- if .Values.backup.enabled }}
+{{- $_ = set $config "backup" (dict "directory" "/var/backups/flint") }}
 {{- end }}
 {{- if .Values.bootstrapAdmin.enabled }}
 {{- $auth := get $config "auth" | default dict }}

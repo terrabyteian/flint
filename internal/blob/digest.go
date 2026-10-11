@@ -80,6 +80,20 @@ func (d Digest) Hex() string {
 // IsZero reports whether d is the zero Digest.
 func (d Digest) IsZero() bool { return !d.set }
 
+// MarshalText returns the digest as String does, so a Digest encodes as a
+// JSON string.
+func (d Digest) MarshalText() ([]byte, error) { return []byte(d.String()), nil }
+
+// UnmarshalText parses a digest as ParseDigest does.
+func (d *Digest) UnmarshalText(b []byte) error {
+	v, err := ParseDigest(string(b))
+	if err != nil {
+		return err
+	}
+	*d = v
+	return nil
+}
+
 // validAlgorithm reports whether s matches the OCI algorithm grammar:
 // components of [a-z0-9]+ joined by single separators from [+._-].
 func validAlgorithm(s string) bool {

@@ -47,6 +47,9 @@
   "proxyCache": {
     "minFreeSpace": "5%"
   },
+  "backup": {
+    "directory": "/var/backups/flint"
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",

@@ -1,4 +1,5 @@
-# An existing TLS secret and claim, a NodePort service, and no preStop wait.
+# An existing TLS secret and claim, a backup volume on NFS, a NodePort
+# service, and no preStop wait.
 fullnameOverride: registry
 image:
   tag: v0.1.0
@@ -9,6 +10,12 @@ tls:
   existingSecret: registry-tls
 persistence:
   existingClaim: registry-data
+backup:
+  enabled: true
+  volume:
+    nfs:
+      server: nas.example.internal
+      path: /backups/flint
 lifecycle:
   preStopSleepSeconds: 0
 serviceAccount:

@@ -3,6 +3,7 @@ package blob
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -82,5 +83,25 @@ func TestDigestBasics(t *testing.T) {
 	}
 	if FromBytes([]byte("other")) == d {
 		t.Fatal("different contents produced equal digests")
+	}
+}
+
+func TestDigestJSON(t *testing.T) {
+	type doc struct {
+		D Digest `json:"d"`
+	}
+	d := FromBytes([]byte("x"))
+	b, err := json.Marshal(doc{d})
+	if err != nil || string(b) != `{"d":"`+d.String()+`"}` {
+		t.Fatalf("Marshal = %s, %v", b, err)
+	}
+	var got doc
+	if err := json.Unmarshal(b, &got); err != nil || got.D != d {
+		t.Fatalf("Unmarshal = %v, %v", got.D, err)
+	}
+	for _, in := range []string{`{"d":""}`, `{"d":"sha256:00"}`, `{"d":"md5:` + strings.Repeat("0", 32) + `"}`} {
+		if err := json.Unmarshal([]byte(in), &got); err == nil {
+			t.Errorf("Unmarshal(%s) succeeded", in)
+		}
 	}
 }

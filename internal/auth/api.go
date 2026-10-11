@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -53,24 +54,11 @@ type apiHandler func(r *http.Request, p *Principal) (int, any, error)
 // api authenticates a request, runs h, and writes its result.
 func (s *Service) api(h apiHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		c, err := s.authenticate(r, false)
-		if err == nil && c.kind == credNone {
-			err = errBadCredentials
-		}
-		if err != nil {
-			if errors.Is(err, errBadCredentials) {
-				w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
-				writeJSON(w, http.StatusUnauthorized, apiError{"authentication required"})
-				return
-			}
-			s.log.Error("authentication failed", "err", err)
-			writeJSON(w, http.StatusInternalServerError, apiError{"internal error"})
+		p, ok := s.apiAuthenticate(w, r)
+		if !ok {
 			return
 		}
-		logPrincipal(r.Context(), c.principal)
-		r.Body = http.MaxBytesReader(w, r.Body, maxAPIBody)
-		status, v, err := h(r, c.principal)
+		status, v, err := h(r, p)
 		if err != nil {
 			status, v = s.apiErrorResponse(err)
 		}
@@ -79,6 +67,47 @@ func (s *Service) api(h apiHandler) http.Handler {
 			return
 		}
 		writeJSON(w, status, v)
+	})
+}
+
+// apiAuthenticate authenticates an admin API request. If it fails, it
+// writes the response and reports false.
+func (s *Service) apiAuthenticate(w http.ResponseWriter, r *http.Request) (*Principal, bool) {
+	w.Header().Set("Cache-Control", "no-store")
+	c, err := s.authenticate(r, false)
+	if err == nil && c.kind == credNone {
+		err = errBadCredentials
+	}
+	if err != nil {
+		if errors.Is(err, errBadCredentials) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
+			writeJSON(w, http.StatusUnauthorized, apiError{"authentication required"})
+			return nil, false
+		}
+		s.log.Error("authentication failed", "err", err)
+		writeJSON(w, http.StatusInternalServerError, apiError{"internal error"})
+		return nil, false
+	}
+	logPrincipal(r.Context(), c.principal)
+	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBody)
+	return c.principal, true
+}
+
+// AdminHandler serves h as an admin API endpoint of another package: it
+// authenticates the request as the admin API does and requires the
+// global admin role, answering with the admin API's JSON errors. Within
+// h, Actor names the client.
+func (s *Service) AdminHandler(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, ok := s.apiAuthenticate(w, r)
+		if !ok {
+			return
+		}
+		if !p.Admin {
+			writeJSON(w, http.StatusForbidden, apiError{errForbidden.Error()})
+			return
+		}
+		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 	})
 }
 
