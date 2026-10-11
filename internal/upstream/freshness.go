@@ -43,6 +43,13 @@ func (f *Freshness) Confirm(key string) {
 	f.m[key] = f.now()
 }
 
+// Forget drops the confirmation of key.
+func (f *Freshness) Forget(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.m, key)
+}
+
 // Prune forgets confirmations older than window, the longest window any
 // caller trusts, so the map stays as small as the set of recently used
 // items.
