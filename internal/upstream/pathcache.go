@@ -45,6 +45,10 @@ import (
 // size limit, content is passed through without being cached, still
 // verified; nothing is deleted to make room except by the size limit's
 // eviction, which is opt-in.
+//
+// A format that reads content itself rather than serving it, such as a
+// record it verifies other content against or the documents of several
+// repositories it merges, uses Read and Doc, which cache as Serve does.
 type PathCache struct {
 	meta    meta.Store
 	blobs   blob.Store

@@ -53,6 +53,8 @@ Actions:
 | `npm.deprecate`, `npm.unpublish` | npm versions deprecated or undeprecated, or versions or a whole package unpublished. |
 | `maven.deploy`, `maven.delete` | A file, or a group's plugin prefixes, deployed to a hosted [Maven repository](maven.md), or a file or a version's files deleted. |
 | `maven.proxy.cache` | A Maven proxy repository cached a file or `maven-metadata.xml` for the client that fetched it. |
+| `go.proxy.cache` | A [Go proxy repository](go.md) cached a module version's file, a version list or query answer, or a checksum database record, for the client that fetched it. |
+| `go.proxy.pulled`, `go.proxy.evict` | `(system)`: a size-limited Go proxy repository saved its pull times or evicted content. |
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |

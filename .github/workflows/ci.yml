@@ -803,3 +803,83 @@ jobs:
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"
+
+  go:
+    name: Go modules end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          # The go command sends credentials only over HTTPS, so flint serves
+          # TLS with a certificate made for the test.
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
+            -addext subjectAltName=IP:127.0.0.1 -keyout "$RUNNER_TEMP/tls.key" -out "$RUNNER_TEMP/tls.crt"
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5443",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "tls": {"certFile": "$RUNNER_TEMP/tls.crt", "keyFile": "$RUNNER_TEMP/tls.key"},
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "goproxy", "format": "go", "type": "proxy",
+               "proxy": {"url": "https://proxy.golang.org", "revalidateAfter": "1s"}},
+              {"name": "goproxy-b", "format": "go", "type": "proxy",
+               "proxy": {"url": "https://proxy.golang.org", "revalidateAfter": "1s"}},
+              {"name": "go-all", "format": "go", "type": "virtual",
+               "virtual": {"members": [{"name": "goproxy", "exclude": ["golang.org/x/*"]}, "goproxy-b"]}}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [{"repositories": ["goproxy", "goproxy-b", "go-all"], "role": "read", "groups": ["ci"]}]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/flint.pid"
+          for _ in $(seq 50); do
+            curl -fsS --cacert "$RUNNER_TEMP/tls.crt" https://127.0.0.1:5443/readyz && break
+            sleep 0.2
+          done
+      - name: Create a CI user and API token
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          curl -fsS --cacert "$RUNNER_TEMP/tls.crt" -u "admin:$ADMIN_PASSWORD" https://127.0.0.1:5443/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          token=$(curl -fsS --cacert "$RUNNER_TEMP/tls.crt" -u "ci-bot:$bot_password" https://127.0.0.1:5443/api/v1/tokens \
+            -d '{"name": "e2e", "expiresIn": "2h"}' | jq -r .token)
+          echo "::add-mask::$token"
+          echo "E2E_TOKEN=$token" >>"$GITHUB_ENV"
+      - name: Build modules with the go command through the proxy and virtual repositories
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-go" SSL_CERT_FILE="$RUNNER_TEMP/tls.crt" \
+            scripts/e2e-go.sh online 127.0.0.1:5443 goproxy goproxy-b go-all
+      - name: Restart flint with its upstreams unreachable
+        run: |
+          pid=$(cat "$RUNNER_TEMP/flint.pid")
+          kill "$pid"
+          while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+          # Every upstream request now goes to a proxy that refuses connections.
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 NO_PROXY= \
+            "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >>"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS --cacert "$RUNNER_TEMP/tls.crt" https://127.0.0.1:5443/readyz && break
+            sleep 0.2
+          done
+      - name: Build again from the cache
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-go" SSL_CERT_FILE="$RUNNER_TEMP/tls.crt" \
+            scripts/e2e-go.sh offline 127.0.0.1:5443 goproxy goproxy-b go-all
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"

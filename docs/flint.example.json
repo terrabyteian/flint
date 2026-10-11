@@ -118,6 +118,38 @@
       "name": "npm-local",
       "format": "npm",
       "type": "hosted"
+    },
+    {
+      "name": "goproxy",
+      "format": "go",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://proxy.golang.org"
+      }
+    },
+    {
+      "name": "go-corp",
+      "format": "go",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://goproxy.corp.example.com",
+        "username": "flint",
+        "passwordFile": "/etc/flint/upstream/go-corp/password"
+      },
+      "go": {
+        "noSumCheck": ["corp.example.com/*"]
+      }
+    },
+    {
+      "name": "go-all",
+      "format": "go",
+      "type": "virtual",
+      "virtual": {
+        "members": [
+          {"name": "go-corp", "include": ["corp.example.com/*"]},
+          {"name": "goproxy", "exclude": ["corp.example.com/*"]}
+        ]
+      }
     }
   ],
   "proxyCache": {
@@ -147,7 +179,7 @@
         "groups": ["ci"]
       },
       {
-        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all"],
+        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all", "go-all"],
         "role": "read",
         "groups": ["ci"]
       },
