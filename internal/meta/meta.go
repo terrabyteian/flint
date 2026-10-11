@@ -94,7 +94,7 @@ type Record struct {
 // It must not contain secrets: it is kept in the audit stream.
 type Origin struct {
 	Actor  string // user or token identity, or "system"
-	Action string // e.g. "oci.tag.put"
+	Action string // e.g. "oci.manifest.push"
 	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
 }
 

@@ -98,10 +98,10 @@ A bare IP address means that one address; IPv4-mapped IPv6 addresses match IPv4 
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `name` | string | required | The repository's path prefix, as in `host/docker-local/team/app`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique. |
+| `name` | string | required | The repository's path prefix, as in `host/docker-local/team/app`: clients address images below it, never the repository itself. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique. |
 | `format` | string | required | Package format. Only `oci` is supported so far; `pypi` arrives with milestone M3. |
 | `type` | string | required | Repository type. Only `hosted` is supported so far; `proxy` and `virtual` arrive with later milestones. |
-| `immutableTags` | bool | `false` | Make a pushed tag permanent. |
+| `immutableTags` | bool | `false` | Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
 
 ### Permissions
@@ -118,6 +118,24 @@ Each grant gives one role on matching repositories to users and groups.
 Grants are validated now and enforced once authentication lands in milestone M1.
 
 ## Endpoints
+
+### OCI registry API
+
+Hosted OCI repositories are served at `/v2/` following the OCI Distribution Spec v1.1: blob pulls with range requests, monolithic, chunked, and streamed uploads, cross-repository mounts, manifests (OCI image manifests and indexes, Docker schema 2 manifests and manifest lists), the referrers API, paginated tag and catalog listings, and deletes.
+An image is addressed as `<host>/<repository>/<name>`, for example `registry.example.com/docker-local/team/app:1.0`, where `<repository>` is a configured hosted OCI repository and `<name>` is one or more path components.
+Blobs and manifests are visible only in the repository name they were pushed or mounted to.
+
+A manifest is accepted only when every blob and child manifest it references is already in the same repository name, with the size its descriptor gives; a manifest's `subject` may name a manifest not pushed yet.
+Docker image manifest schema 1 is refused.
+Deleting a tag removes only the tag; deleting a manifest by digest also removes the tags that point to it.
+Deletes hide content at once; the disk space is reclaimed by garbage collection, which arrives with milestone M4.
+
+An upload session expires 24 hours after it starts; flint checks for expired sessions hourly and removes their staged data.
+
+Authentication arrives later in milestone M1.
+Until then every request is allowed, so expose flint only to clients you trust.
+
+### Built-in endpoints
 
 These endpoints are always served, without authentication:
 
@@ -138,3 +156,14 @@ In Kubernetes, keep `terminationGracePeriodSeconds` longer than `shutdownTimeout
 flint writes structured JSON logs to standard error.
 Each request produces one line with the request ID (also returned in the `X-Request-Id` response header), method, path without the query string, route, status, response bytes, duration, client address, protocol, and user agent.
 Requests to `/healthz`, `/readyz`, and `/metrics` log at `debug` level, so probes and scrapes do not flood the log.
+Requests to the OCI API carry the repository name in a `repository` attribute, and their route is one of `oci.base`, `oci.catalog`, `oci.blob`, `oci.upload`, `oci.manifest`, `oci.tags`, `oci.referrers`, or `oci.unknown`.
+
+## Metrics
+
+Besides the HTTP, metadata store, and Go runtime metrics, the OCI API exports:
+
+| Metric | Meaning |
+| --- | --- |
+| `flint_oci_upload_bytes_total{repository}` | Blob bytes received in uploads. |
+| `flint_oci_manifest_pushes_total{repository}` | Manifests pushed. |
+| `flint_oci_link_retries_total` | Link batches retried because a concurrent change, such as a garbage-collection sweep starting, failed their precondition. |
