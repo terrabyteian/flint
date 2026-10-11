@@ -28,9 +28,12 @@ import (
 //   - A pull asks the members that may serve the image name (see
 //     repo.Virtual.Sources) in order, and the first that has what it asks
 //     for serves it, as a pull from that member would. With
-//     dependency-confusion protection, once a hosted member holds a
-//     manifest of the name, the proxy members are not asked about it, so
-//     an upstream image never shadows a first-party one.
+//     dependency-confusion protection, once a hosted member owns the name,
+//     holding a tag of it or a manifest of it without a subject, the
+//     proxy members are not asked about it, so an upstream image never
+//     shadows a first-party one. A referrer, such as a signature or an
+//     attestation, does not own the name, so attaching one to an upstream
+//     image through the virtual repository leaves the image pullable.
 //   - A manifest by tag follows the members' order, so the first member's
 //     tag wins. Content addressed by digest is the same whichever member
 //     serves it, so a manifest by digest or a blob is asked first of the
@@ -50,7 +53,9 @@ import (
 //     listing is remembered for the member's revalidation window, so an
 //     image a later member serves costs the proxies before it one upstream
 //     request per window, not one per pull.
-//   - Referrers of a manifest are served by the member that holds it.
+//   - Referrers of a manifest are the union of the referrers each member
+//     that holds it, or referrers of it, serves, the first member's
+//     winning where several have the same digest.
 //   - A member that fails, such as a proxy whose upstream cannot be
 //     reached with nothing cached, is skipped (see repo.First); a request
 //     fails only if no member answered.
@@ -300,14 +305,35 @@ func (h *Handler) virtualSources(r *http.Request, rn *repoName) ([]repo.Member, 
 }
 
 // sourcesOf returns the members of virtual repository rn that may serve
-// its image name; a hosted member owns the name once it holds a manifest
-// of it.
+// its image name; a hosted member owns the name once it holds a tag of it
+// or a manifest of it without a subject.
 func (h *Handler) sourcesOf(rn *repoName) []repo.Member {
 	v := h.view()
 	defer v.Release()
 	return rn.cfg.virtual.Sources(rn.name, func(hosted string) bool {
-		return nameExists(v, &repoName{repo: hosted, name: rn.name})
+		return ownsName(v, &repoName{repo: hosted, name: rn.name})
 	})
+}
+
+// ownsName reports whether rn holds a tag or a manifest without a
+// subject. A manifest with a subject, a referrer, does not own the name,
+// so a signature of an upstream image does not hide the image. A manifest
+// record that cannot be read owns it.
+func ownsName(v meta.View, rn *repoName) bool {
+	found := false
+	v.Scan(prefix(nsTag, rn), nil, func([]byte, meta.Record) bool {
+		found = true
+		return false
+	})
+	if found {
+		return true
+	}
+	v.Scan(prefix(nsManifest, rn), nil, func(_ []byte, rec meta.Record) bool {
+		m, err := decodeManifest(rec.Value)
+		found = err != nil || m.Subject.IsZero()
+		return !found
+	})
+	return found
 }
 
 // byDigest orders members for content addressed by digest: first those
@@ -558,63 +584,117 @@ func (h *Handler) memberTags(r *http.Request, mrn *repoName) ([]string, error) {
 }
 
 // virtualReferrers serves GET /v2/<name>/referrers/<digest> of a virtual
-// repository: the referrers the member that holds the manifest serves, or
-// none if no member holds it.
+// repository: the union of the referrers the members that hold the
+// manifest, or referrers of it, serve, or none if no member holds either.
+// A signature pushed through the virtual repository for an image a proxy
+// member serves is held by the publishTo member, so both are asked.
 func (h *Handler) virtualReferrers(w http.ResponseWriter, r *http.Request, rn *repoName, members []repo.Member, arg string) {
 	d, err := parseDigest(arg)
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	m, ok := h.subjectHolder(r, rn, members, d)
-	switch {
-	case ok && h.repos[m.Name].proxy != nil:
-		server.LogAttrs(r.Context(), slog.String("member", m.Name))
-		h.proxyListReferrers(w, r, h.member(rn, m.Name), arg)
-	case ok:
-		server.LogAttrs(r.Context(), slog.String("member", m.Name))
-		h.listReferrers(w, r, h.member(rn, m.Name), arg)
-	case r.Context().Err() != nil:
-	default:
-		if r.URL.Query().Get("artifactType") != "" {
-			w.Header().Set("OCI-Filters-Applied", "artifactType")
-		}
-		writeJSON(w, mtOCIIndex, struct {
-			SchemaVersion int        `json:"schemaVersion"`
-			MediaType     string     `json:"mediaType"`
-			Manifests     []struct{} `json:"manifests"`
-		}{2, mtOCIIndex, []struct{}{}})
+	answers, err := repo.Consult(r.Context(), rn.cfg.virtual, h.subjectHolders(r, rn, members, d), rn.name,
+		func(ctx context.Context, m repo.Member) ([]referrerEntry, error) {
+			return h.memberReferrers(r, h.member(rn, m.Name), arg)
+		}, isMiss)
+	if err != nil {
+		h.writeMemberError(w, r, err)
+		return
 	}
+	lists := make([][]referrerEntry, len(answers))
+	for i, a := range answers {
+		lists[i] = a.Value
+	}
+	filter := r.URL.Query().Get("artifactType")
+	refs := []json.RawMessage{}
+	for _, e := range repo.Merge(lists, func(e referrerEntry) string { return e.Digest }) {
+		if filter == "" || e.ArtifactType == filter {
+			refs = append(refs, e.raw)
+		}
+	}
+	if filter != "" {
+		w.Header().Set("OCI-Filters-Applied", "artifactType")
+	}
+	writeJSON(w, mtOCIIndex, struct {
+		SchemaVersion int               `json:"schemaVersion"`
+		MediaType     string            `json:"mediaType"`
+		Manifests     []json.RawMessage `json:"manifests"`
+	}{2, mtOCIIndex, refs})
 }
 
-// subjectHolder returns the member that holds manifest d under rn's image
-// name: the first of members that holds it, or referrers of it, already,
-// or else the first that can serve it.
-func (h *Handler) subjectHolder(r *http.Request, rn *repoName, members []repo.Member, d blob.Digest) (repo.Member, bool) {
+// referrerEntry is a descriptor in a referrers listing.
+type referrerEntry struct {
+	Digest       string `json:"digest"`
+	ArtifactType string `json:"artifactType"`
+	raw          json.RawMessage
+}
+
+// memberReferrers returns the descriptors of a member's referrers listing
+// of manifest arg, or errMiss if the member does not know the name.
+func (h *Handler) memberReferrers(r *http.Request, mrn *repoName, arg string) ([]referrerEntry, error) {
+	serve := serveFunc(h.listReferrers)
+	if mrn.cfg.proxy != nil {
+		serve = h.proxyListReferrers
+	}
+	mw := newMemberWriter(nil)
+	serve(mw, r, mrn, arg)
+	if err := mw.result(); err != nil {
+		return nil, err
+	}
+	var idx struct {
+		Manifests []json.RawMessage `json:"manifests"`
+	}
+	if err := json.Unmarshal(mw.body, &idx); err != nil {
+		return nil, fmt.Errorf("the referrers listing of %s is not valid JSON: %w", mrn.full, err)
+	}
+	out := make([]referrerEntry, 0, len(idx.Manifests))
+	for _, raw := range idx.Manifests {
+		e := referrerEntry{raw: raw}
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return nil, fmt.Errorf("the referrers listing of %s is not valid JSON: %w", mrn.full, err)
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// subjectHolders returns the members that hold manifest d under rn's
+// image name, or referrers of it, in the members' order; if none holds
+// the manifest itself, the first that can serve it is among them.
+func (h *Handler) subjectHolders(r *http.Request, rn *repoName, members []repo.Member, d blob.Digest) []repo.Member {
 	v := h.view()
+	holds := map[string]bool{}
+	subject := false
 	for _, m := range members {
 		mrn := h.member(rn, m.Name)
-		if _, ok := v.Get(manifestKey(mrn, d)); ok || hasReferrers(v, mrn, d) {
-			v.Release()
-			return m, true
+		_, ok := v.Get(manifestKey(mrn, d))
+		if ok || hasReferrers(v, mrn, d) {
+			holds[m.Name] = true
+			subject = subject || ok
 		}
 	}
 	v.Release()
-	head := r.Clone(r.Context())
-	head.Method = http.MethodHead
-	head.Header.Del("Accept") // the referrers request's, for the index it wants
-	a, ok, _ := repo.First(r.Context(), rn.cfg.virtual, h.byDigest(rn, members, func(meta.View, *repoName) bool { return false }), rn.name,
-		func(ctx context.Context, m repo.Member) (struct{}, error) {
-			mrn := h.member(rn, m.Name)
-			mw := newMemberWriter(nil)
-			if mrn.cfg.proxy != nil {
-				h.proxyGetManifest(mw, head, mrn, d.String())
-			} else {
-				h.getManifest(mw, head, mrn, d.String())
-			}
-			return struct{}{}, mw.result()
-		}, isMiss)
-	return a.Member, ok
+	if !subject {
+		head := r.Clone(r.Context())
+		head.Method = http.MethodHead
+		head.Header.Del("Accept") // the referrers request's, for the index it wants
+		a, ok, _ := repo.First(r.Context(), rn.cfg.virtual, h.byDigest(rn, members, func(meta.View, *repoName) bool { return false }), rn.name,
+			func(ctx context.Context, m repo.Member) (struct{}, error) {
+				mrn := h.member(rn, m.Name)
+				mw := newMemberWriter(nil)
+				if mrn.cfg.proxy != nil {
+					h.proxyGetManifest(mw, head, mrn, d.String())
+				} else {
+					h.getManifest(mw, head, mrn, d.String())
+				}
+				return struct{}{}, mw.result()
+			}, isMiss)
+		if ok {
+			holds[a.Member.Name] = true
+		}
+	}
+	return slices.DeleteFunc(slices.Clone(members), func(m repo.Member) bool { return !holds[m.Name] })
 }
 
 // hasReferrers reports whether rn holds a manifest whose subject is d.

@@ -177,6 +177,26 @@ func (ve *virtualEnv) tags(path string) ([]string, string) {
 	return tl.Tags, w.Header().Get("Link")
 }
 
+// referrers lists the digests in the referrers listing at path.
+func (ve *virtualEnv) referrers(path string) []string {
+	ve.t.Helper()
+	w := ve.do("GET", "/v2/"+path, nil, "Accept", mtOCIIndex)
+	want(ve.t, w, http.StatusOK, "")
+	var idx struct {
+		Manifests []struct {
+			Digest string `json:"digest"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &idx); err != nil || w.Header().Get("Content-Type") != mtOCIIndex {
+		ve.t.Fatalf("referrers %s: %s", w.Header().Get("Content-Type"), w.Body)
+	}
+	var out []string
+	for _, m := range idx.Manifests {
+		out = append(out, m.Digest)
+	}
+	return out
+}
+
 // errorMessage returns the message of an error response.
 func errorMessage(t *testing.T, w *httptest.ResponseRecorder) string {
 	t.Helper()
@@ -592,28 +612,10 @@ func TestVirtualReferrers(t *testing.T) {
 		"subject": desc(mtOCIManifest, subject.manifest)})
 	want(t, ve.pushImage("all/team/app", sig.digest.String(), sig), http.StatusCreated, "")
 
-	referrers := func(path string) []string {
-		t.Helper()
-		w := ve.do("GET", "/v2/"+path, nil, "Accept", mtOCIIndex)
-		want(t, w, http.StatusOK, "")
-		var idx struct {
-			Manifests []struct {
-				Digest string `json:"digest"`
-			} `json:"manifests"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &idx); err != nil || w.Header().Get("Content-Type") != mtOCIIndex {
-			t.Fatalf("referrers %s: %s", w.Header().Get("Content-Type"), w.Body)
-		}
-		var out []string
-		for _, m := range idx.Manifests {
-			out = append(out, m.Digest)
-		}
-		return out
-	}
-	if got := referrers("all/team/app/referrers/" + subject.digest.String()); !slices.Equal(got, []string{sig.digest.String()}) {
+	if got := ve.referrers("all/team/app/referrers/" + subject.digest.String()); !slices.Equal(got, []string{sig.digest.String()}) {
 		t.Errorf("hosted referrers = %v", got)
 	}
-	if got := referrers("all/team/app/referrers/" + blob.FromBytes([]byte("none")).String()); len(got) != 0 {
+	if got := ve.referrers("all/team/app/referrers/" + blob.FromBytes([]byte("none")).String()); len(got) != 0 {
 		t.Errorf("referrers of an unknown manifest = %v", got)
 	}
 
@@ -626,7 +628,7 @@ func TestVirtualReferrers(t *testing.T) {
 		"layers":  []any{},
 		"subject": map[string]any{"mediaType": mtOCIManifest, "digest": img.Digest, "size": len(img.Manifest)}})
 	sigDigest := ve.ghcr.PutManifest("org/tool", "", mtOCIManifest, sigBody)
-	if got := referrers("all/org/tool/referrers/" + img.Digest); !slices.Equal(got, []string{sigDigest}) {
+	if got := ve.referrers("all/org/tool/referrers/" + img.Digest); !slices.Equal(got, []string{sigDigest}) {
 		t.Errorf("proxy referrers = %v", got)
 	}
 	if ve.hub.Count("GET", "referrers") != 0 {
@@ -674,4 +676,53 @@ func TestVirtualPushReusesMemberBlobs(t *testing.T) {
 		"config": desc("application/vnd.oci.image.config.v1+json", cfg),
 		"layers": []any{desc(upstreamtest.MediaTypeLayer, missing)}})
 	want(t, ve.do("PUT", "/v2/all/library/alpine/manifests/broken", manifest, "Content-Type", mtOCIManifest), http.StatusBadRequest, codeManifestBlobUnknown)
+}
+
+// TestVirtualSignUpstreamImage checks the sequence of signing an upstream
+// image through a virtual repository, as cosign or oras attach do with
+// the referrers API: the signature lands in the publishTo member without
+// making it own the name, so the image is still pulled from the upstream,
+// by tag and by digest, and the referrers listing through the virtual
+// repository has the signature with the upstream's referrers.
+func TestVirtualSignUpstreamImage(t *testing.T) {
+	ve := newVirtualEnv(t)
+	ve.hub.Referrers = true
+	img := ve.hub.PutImage("library/nginx", "1.27", []byte("nginx layer"))
+	ve.pullImage("all/library/nginx", "1.27", img)
+
+	subject := map[string]any{"mediaType": upstreamtest.MediaTypeManifest, "digest": img.Digest, "size": len(img.Manifest)}
+	upstreamSig := ve.hub.PutManifest("library/nginx", "", mtOCIManifest, mustJSON(map[string]any{
+		"schemaVersion": 2, "mediaType": mtOCIManifest, "artifactType": "application/example.att",
+		"config":  map[string]any{"mediaType": "application/vnd.oci.empty.v1+json", "digest": ve.hub.PutBlob("library/nginx", []byte("{}")), "size": 2},
+		"layers":  []any{},
+		"subject": subject}))
+	sig := newImage("signature", map[string]any{"artifactType": "application/example.sig", "subject": subject})
+	w := ve.pushImage("all/library/nginx", sig.digest.String(), sig)
+	want(t, w, http.StatusCreated, "")
+	if w.Header().Get("OCI-Subject") != img.Digest {
+		t.Errorf("OCI-Subject = %q, want %s", w.Header().Get("OCI-Subject"), img.Digest)
+	}
+	want(t, ve.do("HEAD", "/v2/local/library/nginx/manifests/"+sig.digest.String(), nil), http.StatusOK, "")
+
+	ve.pullImage("all/library/nginx", "1.27", img)
+	ve.pullImage("all/library/nginx", img.Digest, img)
+	if got, _ := ve.tags("all/library/nginx/tags/list"); !slices.Equal(got, []string{"1.27"}) {
+		t.Errorf("tags = %v, want the upstream's", got)
+	}
+	got := ve.referrers("all/library/nginx/referrers/" + img.Digest)
+	if !slices.Equal(got, []string{sig.digest.String(), upstreamSig}) {
+		t.Errorf("referrers = %v, want the pushed signature, then the upstream's %s", got, upstreamSig)
+	}
+	w = ve.do("GET", "/v2/all/library/nginx/referrers/"+img.Digest+"?artifactType=application/example.sig", nil)
+	want(t, w, http.StatusOK, "")
+	if w.Header().Get("OCI-Filters-Applied") != "artifactType" || !strings.Contains(w.Body.String(), sig.digest.String()) ||
+		strings.Contains(w.Body.String(), upstreamSig) {
+		t.Errorf("filtered referrers %v: %s", w.Header(), w.Body)
+	}
+
+	// A first-party image of the name, which has no subject, makes the
+	// hosted member own it.
+	local := newImage("first-party", nil)
+	want(t, ve.pushImage("all/library/nginx", "custom", local), http.StatusCreated, "")
+	want(t, ve.do("GET", "/v2/all/library/nginx/manifests/1.27", nil), http.StatusNotFound, codeManifestUnknown)
 }
