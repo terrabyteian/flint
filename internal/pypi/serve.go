@@ -44,7 +44,11 @@ func (h *Handler) projectNames(v meta.View, rp *repository) []string {
 		}
 		pfx := key(ns, rp.name, "")
 		v.Scan(pfx, nil, func(k []byte, _ meta.Record) bool {
-			out = append(out, string(k[len(pfx):]))
+			project := string(k[len(pfx):])
+			if rp.typ == config.TypeHosted && !hasFiles(v, rp.name, project) {
+				return true // every file deleted: the project has no page
+			}
+			out = append(out, project)
 			return true
 		})
 	case config.TypeVirtual:
@@ -55,6 +59,16 @@ func (h *Handler) projectNames(v meta.View, rp *repository) []string {
 		}
 	}
 	return out
+}
+
+// hasFiles reports whether a hosted project has a live file.
+func hasFiles(v meta.View, repo, project string) bool {
+	found := false
+	v.Scan(indexPrefix(repo, project), nil, func([]byte, meta.Record) bool {
+		found = true
+		return false
+	})
+	return found
 }
 
 // serveProject serves GET /pypi/<repo>/simple/<project>/.

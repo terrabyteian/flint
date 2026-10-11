@@ -305,9 +305,13 @@ func TestYankAndDelete(t *testing.T) {
 	if w := e.upload("local", v1, v1.form(), false); w.Code != http.StatusConflict {
 		t.Errorf("re-uploading after a restart: %d", w.Code)
 	}
-	// Deleting every file leaves the project owned, but without a page.
+	// Deleting every file leaves the project owned, but without a page or
+	// a place in the root index.
 	admin("DELETE", "local/projects/pkg/files/"+v1s.filename, "")
 	e.get("/pypi/local/simple/pkg/", http.StatusNotFound)
+	if w := e.get("/pypi/local/simple/", http.StatusOK); strings.Contains(w.Body.String(), "pkg") {
+		t.Errorf("the root index lists a project without files:\n%s", w.Body)
+	}
 	if !e.has(projectKey("local", "pkg")) {
 		t.Error("the project record went away")
 	}
