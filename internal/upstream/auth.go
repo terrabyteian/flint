@@ -155,6 +155,9 @@ func (c *Client) fetchToken(ctx context.Context, ch challenge, scope string) (st
 	if c.base.Scheme == "https" && realm.Scheme != "https" {
 		return "", &Error{Op: op, Err: fmt.Errorf("%w: the token realm is not https", ErrAuth)}
 	}
+	if err := c.pol.check(realm); err != nil {
+		return "", &Error{Op: op, Err: fmt.Errorf("%w: %w", ErrAuth, err)}
+	}
 	q := realm.Query()
 	if svc := ch.params["service"]; svc != "" {
 		q.Set("service", svc)
@@ -177,7 +180,7 @@ func (c *Client) fetchToken(ctx context.Context, ch challenge, scope string) (st
 	}
 	resp, err := c.roundTrip(ctx, http.MethodGet, realm.String(), nil, auth)
 	if err != nil {
-		return "", &Error{Op: op, Err: fmt.Errorf("%w: %v", ErrUnavailable, err)}
+		return "", transportError(op, err)
 	}
 	defer drain(resp)
 	switch {

@@ -40,11 +40,12 @@ Actions:
 | `pypi.yank`, `pypi.unyank`, `pypi.delete` | A PyPI release yanked or unyanked, or a release's files or one file deleted. |
 | `pypi.proxy.cache` | A PyPI proxy repository cached a project listing or file for the client that fetched it. |
 | `pypi.proxy.pulled`, `pypi.proxy.evict` | `(system)`: a size-limited PyPI proxy repository saved its pull times or evicted content. |
+| `pypi.proxy.migrate` | `(system)`: project page records of an earlier version removed at startup, once pages moved to the proxy cache every format shares. |
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |
 
-Further package formats add their own actions under their own prefix.
+Further package formats add their own actions under their own prefix; their proxy repositories record `<format>.proxy.cache`, `<format>.proxy.pulled`, and `<format>.proxy.evict` like the ones above.
 
 The audit log starts with the first batch committed after it first starts, so changes made by a flint version without it are not in it.
 

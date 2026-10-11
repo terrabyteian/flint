@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // pagesTook filters the page requests from requests the index took.
@@ -361,6 +362,14 @@ func TestProxyMetadataFetchIsPerProject(t *testing.T) {
 	}))
 	defer srv.Close()
 	rp := e.h.repos["remote"]
+	// The links point at srv, which the repository must be allowed to
+	// fetch from.
+	client, err := upstream.New(upstream.Options{URL: rp.proxy.index, Logger: quiet,
+		Policy: upstream.Policy{AllowHosts: []string{strings.TrimPrefix(srv.URL, "http://")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp.proxy.client = client
 	ctx := context.Background()
 	fooDone := make(chan []byte)
 	go func() {

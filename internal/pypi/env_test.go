@@ -112,10 +112,11 @@ func (e *env) restart() {
 		{Name: "local", Format: config.FormatPyPI, Type: config.TypeHosted},
 		{Name: "team", Format: config.FormatPyPI, Type: config.TypeHosted},
 		{Name: "remote", Format: config.FormatPyPI, Type: config.TypeProxy,
-			Proxy: &config.Proxy{URL: e.up.URL + "/simple/", RevalidateAfter: config.Duration{Duration: testWindow}}},
+			Proxy: &config.Proxy{URL: e.up.URL + "/simple/", RevalidateAfter: config.Duration{Duration: testWindow},
+				AllowHosts: e.up.fileHosts()}},
 		{Name: "small", Format: config.FormatPyPI, Type: config.TypeProxy,
 			Proxy: &config.Proxy{URL: e.up.URL + "/simple", RevalidateAfter: config.Duration{Duration: testWindow},
-				SizeLimit: config.ByteSize{Bytes: 2500}}},
+				SizeLimit: config.ByteSize{Bytes: 2500}, AllowHosts: e.up.fileHosts()}},
 		{Name: "all", Format: config.FormatPyPI, Type: config.TypeVirtual, Virtual: &config.Virtual{Members: []string{"local", "remote"}}},
 		{Name: "open", Format: config.FormatPyPI, Type: config.TypeVirtual, AnonymousPull: true,
 			Virtual: &config.Virtual{Members: []string{"local", "remote"}, DependencyConfusionProtection: &off}},
@@ -393,6 +394,12 @@ func newIndex(t *testing.T) *index {
 	t.Cleanup(x.Close)
 	t.Cleanup(x.files.Close)
 	return x
+}
+
+// fileHosts returns the host of the files server, which proxy
+// repositories must be allowed to fetch from.
+func (x *index) fileHosts() []string {
+	return []string{strings.TrimPrefix(x.files.URL, "http://")}
 }
 
 func (x *index) add(project string, fs ...upFile) {
