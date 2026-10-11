@@ -154,7 +154,7 @@ Publishing a version that is already published fails with `409 Conflict`, and so
 Publish a new version instead.
 Of concurrent publishes of one version, exactly one succeeds.
 
-The version's manifest is stored as it was published, except for the fields flint sets when it serves it (`dist` and `deprecated`) and the readme, which is kept with the package and served in the packument: the package's readme is the latest version's, replaced by a publish that points `latest` at its version, so publishing an older line with `--tag` leaves it as it is.
+The version's manifest is stored as it was published, except for the fields flint sets when it serves it (`dist` and `deprecated`) and the readme, which is kept with the package and served in the packument: a publish that creates or moves `latest` replaces the package's readme with its version's, so publishing an older line with `--tag` leaves it as it is. Moving `latest` with `npm dist-tag` or unpublishing the latest version also leaves the readme as it was.
 `_npmUser` records the user who published the version, which `npm view` and `npm search` show.
 
 A repository owns a package from its first publish, and keeps owning it after every version is unpublished.
