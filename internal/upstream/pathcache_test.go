@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -286,6 +287,17 @@ func TestPathCacheFromResponse(t *testing.T) {
 		e.files.put("/"+p, data)
 		e.expect[p] = upstream.Expect{Size: -1, FromResponse: fromHeader}
 	}
+	// none.pom's verifier asks for a sidecar first, as a Maven proxy's
+	// does when the upstream sends no checksum header.
+	e.expect["none.pom"] = upstream.Expect{Size: -1, FromResponse: func(ctx context.Context, h http.Header) (upstream.Sums, error) {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, e.files.URL+"/none.pom.sha1", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		resp.Body.Close()
+		return fromHeader(ctx, h)
+	}}
 	e.files.headers["/good.pom"] = http.Header{"X-Checksum-Sha1": {hex.EncodeToString(s1[:])}}
 	e.files.headers["/bad.pom"] = http.Header{"X-Checksum-Sha1": {strings.Repeat("0", 40)}}
 	e.files.headers["/malformed.pom"] = http.Header{"X-Checksum-Sha1": {"zz"}}
@@ -302,8 +314,12 @@ func TestPathCacheFromResponse(t *testing.T) {
 	if status, _, _ := e.fetch(http.MethodGet, "/remote/malformed.pom"); status != http.StatusBadGateway {
 		t.Errorf("a failing FromResponse: %d, want 502", status)
 	}
+	e.files.took()
 	e.want("/remote/none.pom", http.StatusOK, string(data))
 	e.settle()
+	if got := e.files.took(); !slices.Equal(got, []string{"GET /none.pom", "GET /none.pom.sha1", "GET /none.pom"}) {
+		t.Errorf("upstream requests for unverifiable content %q; want its sidecar asked for once", got)
+	}
 	for _, p := range []string{"bad.pom", "none.pom", "malformed.pom"} {
 		if rec, _ := e.pc.Lookup(e.repos["remote"], p); rec != nil {
 			t.Errorf("%s was cached", p)
@@ -317,7 +333,11 @@ func TestPathCacheFromResponse(t *testing.T) {
 	if _, b, err := e.fetch(http.MethodGet, "/remote/bad.pom"); err == nil || len(b) >= len(data) {
 		t.Errorf("a pass-through that does not match its announced digest: %d bytes, %v; want it cut off", len(b), err)
 	}
+	e.files.took()
 	e.want("/remote/none.pom", http.StatusOK, string(data))
+	if got := e.files.took(); !slices.Equal(got, []string{"GET /none.pom", "GET /none.pom.sha1"}) {
+		t.Errorf("upstream requests for unverifiable content passed through %q", got)
+	}
 }
 
 func TestPathCacheNegative(t *testing.T) {

@@ -171,3 +171,34 @@ func TestVirtualSnapshotsAndPlugins(t *testing.T) {
 		[]byte(`<metadata><plugins><plugin><prefix>evil</prefix><artifactId>evil-maven-plugin</artifactId></plugin></plugins></metadata>`))
 	e.get("/maven/all/com/acme/plugins/maven-metadata.xml", http.StatusNotFound)
 }
+
+// TestVirtualGroupPlugins checks that a member whose filters admit a
+// group's artifacts, but not the group's own name, serves the group's
+// plugin prefixes, ahead of a later member's entry for the same prefix.
+func TestVirtualGroupPlugins(t *testing.T) {
+	e := newEnv(t)
+	// "scoped" consults mixed for com.acme.* only, which does not match
+	// com.acme itself.
+	e.put("/maven/mixed/com/acme/maven-metadata.xml",
+		[]byte(`<metadata><plugins><plugin><prefix>acme</prefix><artifactId>acme-maven-plugin</artifactId></plugin></plugins></metadata>`),
+		http.StatusCreated)
+	e.up.put("/maven2/com/acme/maven-metadata.xml",
+		[]byte(`<metadata><plugins><plugin><prefix>acme</prefix><artifactId>evil-maven-plugin</artifactId></plugin></plugins></metadata>`))
+	gm, err := parseMetadata([]byte(e.get("/maven/scoped/com/acme/maven-metadata.xml", http.StatusOK).body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ps := metadataPlugins(gm); len(ps) != 2 || ps[0].ArtifactID != "acme-maven-plugin" || ps[1].ArtifactID != "evil-maven-plugin" {
+		t.Errorf("plugins %+v; want the hosted member's first", ps)
+	}
+
+	// A proxy whose filters exclude the group's artifacts is not asked
+	// for its prefixes.
+	e.up.put("/maven2/com/acme/tools/maven-metadata.xml",
+		[]byte(`<metadata><plugins><plugin><prefix>tools</prefix><artifactId>tools-maven-plugin</artifactId></plugin></plugins></metadata>`))
+	e.up.took()
+	e.get("/maven/all/com/acme/tools/maven-metadata.xml", http.StatusNotFound)
+	if got := e.up.took(); len(got) != 0 {
+		t.Errorf("a proxy whose filters exclude the group was asked: %q", got)
+	}
+}

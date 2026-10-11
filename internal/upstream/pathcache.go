@@ -286,7 +286,7 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 		return
 	}
 	if pc.space != nil && pc.space.Pressure() {
-		pc.passThroughVerified(w, r, rp, rt)
+		pc.passThroughVerified(w, r, rp, rt, true)
 		return
 	}
 	var release func()
@@ -339,7 +339,7 @@ func (pc *PathCache) serveImmutable(w http.ResponseWriter, r *http.Request, rp *
 	defer fe.Release()
 	size, err := fe.Wait(ctx)
 	if errors.Is(err, errPassThrough) || errors.Is(err, ErrUnverifiable) {
-		pc.passThroughVerified(w, r, rp, rt)
+		pc.passThroughVerified(w, r, rp, rt, !errors.Is(err, ErrUnverifiable))
 		return
 	}
 	if err != nil {
@@ -463,8 +463,11 @@ const maxCheckInMemory = 64 << 20
 // sent only once the content has matched. Content with an Expect.Check
 // is held in memory, up to maxCheckInMemory, and checked before any of
 // it is sent. Content the upstream offers nothing to verify against
-// (ErrUnverifiable) is passed through as it is.
-func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request, rp *PathRepo, rt *Route) {
+// (ErrUnverifiable) is passed through as it is. fromResponse says whether
+// rt.Expect.FromResponse is still to be asked; it is false once a fetch
+// has found the content unverifiable, so the upstream is not asked for
+// its digests twice.
+func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request, rp *PathRepo, rt *Route, fromResponse bool) {
 	ctx := r.Context()
 	resp, err := rp.Client.GetURL(ctx, rt.URL, rt.Header)
 	if err == nil && resp.StatusCode != http.StatusOK {
@@ -481,14 +484,17 @@ func (pc *PathCache) passThroughVerified(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	defer resp.Body.Close()
-	expect, err := rt.Expect.withResponse(ctx, resp.Header)
-	if errors.Is(err, ErrUnverifiable) {
-		expect, err = &rt.Expect, nil
-	}
-	if err != nil {
-		pc.m.UpstreamErrors.With(rp.Name).Inc()
-		pc.fail(w, r, rp, rt, err)
-		return
+	expect := &rt.Expect
+	if fromResponse {
+		expect, err = rt.Expect.withResponse(ctx, resp.Header)
+		if errors.Is(err, ErrUnverifiable) {
+			expect, err = &rt.Expect, nil
+		}
+		if err != nil {
+			pc.m.UpstreamErrors.With(rp.Name).Inc()
+			pc.fail(w, r, rp, rt, err)
+			return
+		}
 	}
 	size := resp.ContentLength
 	if rt.Expect.Size >= 0 {

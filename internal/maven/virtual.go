@@ -247,15 +247,30 @@ func (h *Handler) virtualDocument(ctx context.Context, actor string, rp *reposit
 	if n >= 3 && IsSnapshot(dir[n-1]) {
 		return h.virtualSnapshotDocument(ctx, actor, rp, dir, path)
 	}
-	// Members are consulted as the artifact the directory names admits
-	// them; plugin entries of a group-level document are admitted one by
-	// one, by their own names.
+	// The directory names an artifact, whose versions come from the
+	// members that may serve it, and a group, whose plugin entries are
+	// admitted one by one by their own names. So every hosted member is
+	// consulted, and so is each proxy whose filters admit the group's
+	// artifacts and do not exclude the artifact, unless a hosted member
+	// owns the artifact.
 	group := strings.Join(dir, ".")
-	members := rp.virtual.Members
 	var ga string
+	versioned := map[string]bool{}
+	owned := false
 	if n >= 2 {
 		ga = strings.Join(dir[:n-1], ".") + ":" + dir[n-1]
-		members = h.sources(rp, ga)
+		for _, m := range h.sources(rp, ga) {
+			versioned[m.Name] = true
+		}
+		v := h.meta.View()
+		owned = rp.virtual.Protect && hostedOwner(v, rp, ga)
+		v.Release()
+	}
+	var members []repo.Member
+	for _, m := range rp.virtual.Members {
+		if versioned[m.Name] || m.Hosted || !owned && rp.virtual.Admits(m, group+":*") && !rp.virtual.Excludes(m, ga) {
+			members = append(members, m)
+		}
 	}
 	answers, err := repo.Consult(ctx, rp.virtual, members, ga, func(ctx context.Context, m repo.Member) (*contribution, error) {
 		if m.Hosted {
@@ -285,7 +300,7 @@ func (h *Handler) virtualDocument(ctx context.Context, actor string, rp *reposit
 	v := h.meta.View()
 	defer v.Release()
 	for _, a := range answers {
-		if n >= 2 {
+		if versioned[a.Member.Name] {
 			lists = append(lists, a.Value.versions)
 			updated = laterOf(updated, a.Value.updated)
 		}
