@@ -174,7 +174,8 @@ func TestVirtualSnapshotsAndPlugins(t *testing.T) {
 
 // TestVirtualGroupPlugins checks that a member whose filters admit a
 // group's artifacts, but not the group's own name, serves the group's
-// plugin prefixes, ahead of a later member's entry for the same prefix.
+// plugin prefixes, and that a later member's entry for the same prefix
+// is dropped, whatever its artifactId.
 func TestVirtualGroupPlugins(t *testing.T) {
 	e := newEnv(t)
 	// "scoped" consults mixed for com.acme.* only, which does not match
@@ -183,13 +184,15 @@ func TestVirtualGroupPlugins(t *testing.T) {
 		[]byte(`<metadata><plugins><plugin><prefix>acme</prefix><artifactId>acme-maven-plugin</artifactId></plugin></plugins></metadata>`),
 		http.StatusCreated)
 	e.up.put("/maven2/com/acme/maven-metadata.xml",
-		[]byte(`<metadata><plugins><plugin><prefix>acme</prefix><artifactId>evil-maven-plugin</artifactId></plugin></plugins></metadata>`))
+		[]byte(`<metadata><plugins><plugin><prefix>acme</prefix><artifactId>aaa-maven-plugin</artifactId></plugin>`+
+			`<plugin><prefix>up</prefix><artifactId>up-maven-plugin</artifactId></plugin></plugins></metadata>`))
 	gm, err := parseMetadata([]byte(e.get("/maven/scoped/com/acme/maven-metadata.xml", http.StatusOK).body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ps := metadataPlugins(gm); len(ps) != 2 || ps[0].ArtifactID != "acme-maven-plugin" || ps[1].ArtifactID != "evil-maven-plugin" {
-		t.Errorf("plugins %+v; want the hosted member's first", ps)
+	if ps := metadataPlugins(gm); len(ps) != 2 || ps[0].ArtifactID != "acme-maven-plugin" || ps[0].Prefix != "acme" ||
+		ps[1].ArtifactID != "up-maven-plugin" {
+		t.Errorf("plugins %+v; want prefix acme to resolve to the hosted member's plugin alone", ps)
 	}
 
 	// A proxy whose filters exclude the group's artifacts is not asked

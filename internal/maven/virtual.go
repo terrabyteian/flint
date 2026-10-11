@@ -21,8 +21,8 @@ import (
 //
 //   - Artifact-level maven-metadata.xml merges the versions of the
 //     members, and latest and release are computed from the merged list.
-//     Group-level plugin entries merge by artifactId, the first member's
-//     winning, each admitted by the member's filters as
+//     Group-level plugin entries merge by artifactId and by prefix, the
+//     first member's winning, each admitted by the member's filters as
 //     groupId:artifactId.
 //   - A file, and a snapshot version's metadata, come from the first
 //     member that has the version: a hosted member that lists it, or else
@@ -319,6 +319,7 @@ func (h *Handler) virtualDocument(ctx context.Context, actor string, rp *reposit
 	}
 	vs := repo.Merge(lists, func(e versionEntry) string { return e.Version })
 	ps := repo.Merge(pluginLists, func(p plugin) string { return p.ArtifactID })
+	ps = repo.Merge([][]plugin{ps}, func(p plugin) string { return p.Prefix })
 	if len(vs) == 0 && len(ps) == 0 {
 		return nil, nil
 	}
