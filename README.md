@@ -3,8 +3,7 @@
 flint is a self-hosted artifact registry, built from scratch.
 It serves container images and OCI artifacts, and Python packages, from hosted repositories and caching proxies of upstream registries such as Docker Hub, ghcr.io, and PyPI.
 
-> **Status: pre-alpha.** flint does not serve anything yet.
-> The binary only prints its version.
+> **Status: pre-alpha.** `flint serve` runs the server with health, readiness, and metrics endpoints, but no registry API yet.
 > See the [roadmap](docs/design.md#roadmap) for what comes next.
 
 ## Goals
@@ -30,7 +29,11 @@ flint needs the Go version named in [`go.mod`](go.mod).
 ```sh
 CGO_ENABLED=0 go build -ldflags "-X main.version=v0.0.0" -o flint ./cmd/flint
 ./flint version
+echo '{"dataDir": "/tmp/flint-data"}' > /tmp/flint.json
+./flint serve -config /tmp/flint.json    # plain HTTP on :5000
 ```
+
+[docs/configuration.md](docs/configuration.md) describes the configuration file.
 
 Releases publish a multi-arch `FROM scratch` image to `ghcr.io/terrabyteian/flint` and static binaries, signed with cosign; see [releasing](docs/releasing.md) for how to cut and verify one.
 

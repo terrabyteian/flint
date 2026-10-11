@@ -1,22 +1,23 @@
 // Command flint is the flint artifact registry server and admin tool.
-//
-// Only the version subcommand exists so far; every other subcommand
-// reports that it is not implemented yet.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 // version is the release version, injected at build time with
 // -ldflags "-X main.version=v1.2.3".
 var version = "dev"
 
-const usage = `usage: flint <command>
+const usage = `usage: flint <command> [flags]
 
 commands:
+  serve      run the registry server (flint serve -config <file>)
   version    print the flint version
 `
 
@@ -31,11 +32,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "serve":
+		// The first SIGINT or SIGTERM starts a graceful shutdown; once it
+		// has, the default handling is restored, so a second one kills
+		// the process at once.
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		context.AfterFunc(ctx, stop)
+		return serve(ctx, args[1:], stderr)
 	case "version":
 		fmt.Fprintf(stdout, "flint %s\n", version)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "flint: subcommand %q is not implemented\n\n%s", args[0], usage)
+		fmt.Fprintf(stderr, "flint: unknown command %q\n\n%s", args[0], usage)
 		return 2
 	}
 }

@@ -93,6 +93,6 @@ docker run --rm flint:dev version
 ```
 
 The image runs as the non-root user `65532:65532`, contains only the `flint` binary at `/flint` and CA certificates for TLS to upstream registries, and keeps its data in `/var/lib/flint`, which should be a persistent volume.
-Its default command is `flint serve`.
+Its default command is `flint serve`, which reads its configuration from `/etc/flint/config.json` (see [configuration](configuration.md)).
 
 CI builds the image for both architectures on every pull request without pushing it, and runs `flint version` in the amd64 image.
