@@ -88,6 +88,31 @@
         "url": "https://github.com/acme/tool/releases/download/",
         "allowHosts": ["release-assets.githubusercontent.com", "objects.githubusercontent.com"]
       }
+    },
+    {
+      "name": "cargo-local",
+      "format": "cargo",
+      "type": "hosted"
+    },
+    {
+      "name": "crates-io",
+      "format": "cargo",
+      "type": "proxy",
+      "proxy": {
+        "url": "sparse+https://index.crates.io/"
+      }
+    },
+    {
+      "name": "cargo-all",
+      "format": "cargo",
+      "type": "virtual",
+      "virtual": {
+        "members": [
+          "cargo-local",
+          {"name": "crates-io", "exclude": ["acme-*"]}
+        ],
+        "publishTo": "cargo-local"
+      }
     }
   ],
   "proxyCache": {
@@ -112,12 +137,12 @@
     },
     "permissions": [
       {
-        "repositories": ["docker-local", "releases", "pypi-local", "files"],
+        "repositories": ["docker-local", "releases", "pypi-local", "files", "cargo-local"],
         "role": "write",
         "groups": ["ci"]
       },
       {
-        "repositories": ["dockerhub", "ghcr", "pypi"],
+        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all"],
         "role": "read",
         "groups": ["ci"]
       },

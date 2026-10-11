@@ -46,7 +46,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 9 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 12 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -62,7 +62,13 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if g := c.Repositories[8].Generic; c.Repositories[7].Format != FormatGeneric || g == nil || !g.Immutable ||
 		len(c.Repositories[8].Proxy.AllowHosts) != 2 {
-		t.Errorf("unexpected generic repositories: %+v", c.Repositories[7:])
+		t.Errorf("unexpected generic repositories: %+v", c.Repositories[7:9])
+	}
+	if p := c.Repositories[10].Proxy; c.Repositories[9].Format != FormatCargo || p == nil || CargoIndexURL(p.URL) != "https://index.crates.io/" {
+		t.Errorf("unexpected Cargo repositories: %+v", c.Repositories[9:11])
+	}
+	if v := c.Repositories[11].Virtual; v == nil || v.PublishTo != "cargo-local" || len(v.Members) != 2 || c.Repositories[11].AnonymousPull {
+		t.Errorf("unexpected Cargo virtual repository: %+v", c.Repositories[11])
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
@@ -280,6 +286,23 @@ func TestValidation(t *testing.T) {
 			{"name": "b", "format": "pypi", "type": "proxy", "proxy": {"url": "pypi.org"}}]}`,
 			[]string{`repositories[0].proxy.url: "https://pypi.org/simple?x=1" must not have a query`,
 				`repositories[1].proxy.url: "pypi.org" must be an http or https URL`}},
+		{"cargo good", `{"dataDir": "/d", "repositories": [
+			{"name": "cargo-local", "format": "cargo", "type": "hosted"},
+			{"name": "crates-io", "format": "cargo", "type": "proxy", "anonymousPull": true,
+			 "proxy": {"url": "sparse+https://index.crates.io/", "sizeLimit": "100GiB"}},
+			{"name": "inner", "format": "cargo", "type": "proxy", "proxy": {"url": "https://flint.example/cargo/crates/"}},
+			{"name": "cargo-all", "format": "cargo", "type": "virtual",
+			 "virtual": {"members": ["cargo-local", {"name": "crates-io", "exclude": ["acme-*"]}], "publishTo": "cargo-local"}}]}`, nil},
+		{"cargo problems", `{"dataDir": "/d", "repositories": [
+			{"name": "a", "format": "cargo", "type": "proxy", "proxy": {"url": "sparse+index.crates.io"}},
+			{"name": "b", "format": "cargo", "type": "proxy", "proxy": {"url": "git+https://github.com/rust-lang/crates.io-index"}},
+			{"name": "c", "format": "cargo", "type": "hosted", "immutableTags": true},
+			{"name": "d", "format": "cargo", "type": "virtual", "virtual": {"members": ["a", "p"]}},
+			{"name": "p", "format": "pypi", "type": "hosted"}]}`,
+			[]string{`repositories[0].proxy.url: "sparse+index.crates.io" must be an http or https URL`,
+				`repositories[1].proxy.url: "git+https://github.com/rust-lang/crates.io-index" must be an http or https URL`,
+				`repositories[2].immutableTags: is only allowed for a hosted OCI repository`,
+				`repositories[3].virtual.members[1]: "p" is a pypi repository, not cargo`}},
 		{"proxy good", `{"dataDir": "/d", "proxyCache": {"minFreeSpace": "20GiB"}, "repositories": [{"name": "dockerhub", "format": "oci", "type": "proxy",
 			"anonymousPull": true, "proxy": {"url": "https://registry-1.docker.io", "username": "me", "passwordFile": "/run/pw",
 			"revalidateAfter": "1m", "sizeLimit": "500GiB"}}]}`, nil},
@@ -523,6 +546,19 @@ func TestPyPIIndexURL(t *testing.T) {
 	}
 }
 
+func TestCargoIndexURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"sparse+https://index.crates.io/":     "https://index.crates.io/",
+		"https://index.crates.io":             "https://index.crates.io/",
+		"sparse+http://flint:5000/cargo/c":    "http://flint:5000/cargo/c/",
+		"https://flint.example/cargo/crates/": "https://flint.example/cargo/crates/",
+	} {
+		if got := CargoIndexURL(in); got != want {
+			t.Errorf("CargoIndexURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestPublicBase(t *testing.T) {
 	for in, want := range map[string]string{
 		"":                              "",
@@ -575,7 +611,7 @@ func TestFormatSettings(t *testing.T) {
 				v.addf(path, "is required")
 			}
 		}})
-	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "test"}) {
+	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "cargo", "test"}) {
 		t.Errorf("Formats() = %q", got)
 	}
 	_, err := Parse([]byte(`{"dataDir": "/d", "repositories": [

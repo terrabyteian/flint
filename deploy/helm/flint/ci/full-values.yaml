@@ -76,6 +76,25 @@ config:
       virtual:
         members: [files, {name: tool-releases, exclude: ["internal/*"]}]
         publishTo: files
+    - name: cargo-local
+      format: cargo
+      type: hosted
+    - name: crates-io
+      format: cargo
+      type: proxy
+      anonymousPull: true
+      proxy:
+        url: sparse+https://index.crates.io/
+        sizeLimit: 200GiB
+    - name: cargo-all
+      format: cargo
+      type: virtual
+      virtual:
+        members:
+          - cargo-local
+          - name: crates-io
+            exclude: ["acme-*"]
+        publishTo: cargo-local
   proxyCache:
     minFreeSpace: 20GiB
   gc:

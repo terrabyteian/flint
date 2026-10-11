@@ -162,6 +162,49 @@ func TestBasicChallenge(t *testing.T) {
 	}
 }
 
+// TestCargoChallenge checks that a Cargo challenge is answered with the
+// password as the Authorization header, as Cargo sends its token, and
+// that once accepted it is sent at once.
+func TestCargoChallenge(t *testing.T) {
+	pwFile := filepath.Join(t.TempDir(), "password")
+	os.WriteFile(pwFile, []byte("flint_token\n"), 0o600)
+	var authz []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		authz = append(authz, r.Header.Get("Authorization"))
+		mu.Unlock()
+		if r.Header.Get("Authorization") != "flint_token" {
+			w.Header().Set("WWW-Authenticate", `Cargo login_url="https://registry.example/me"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		io.WriteString(w, "{}")
+	}))
+	defer srv.Close()
+	c := newClient(t, srv.URL, upstream.Options{Username: "token", PasswordFile: pwFile})
+	for range 2 {
+		resp, err := c.GetURL(ctx, srv.URL+"/config.json", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if !slices.Equal(authz, []string{"", "flint_token", "flint_token"}) {
+		t.Errorf("Authorization headers sent: %q", authz)
+	}
+	anon := newClient(t, srv.URL, upstream.Options{})
+	if _, err := anon.GetURL(ctx, srv.URL+"/config.json", nil); !errors.Is(err, upstream.ErrDenied) {
+		t.Errorf("anonymous against Cargo: %v, want ErrDenied", err)
+	}
+	if err := os.WriteFile(pwFile, []byte("wrong"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetURL(ctx, srv.URL+"/config.json", nil); !errors.Is(err, upstream.ErrAuth) {
+		t.Errorf("a wrong token against Cargo: %v, want ErrAuth", err)
+	}
+}
+
 func TestInsecureRealmRefused(t *testing.T) {
 	var tokenRequests atomic.Int32
 	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +250,18 @@ func TestStatusErrors(t *testing.T) {
 	}
 	if c.Offline() {
 		t.Error("a 400 marked the upstream offline")
+	}
+	reg.SetStatus(func(r *http.Request) int {
+		if strings.Contains(r.URL.Path, "/manifests/") {
+			return http.StatusUnavailableForLegalReasons
+		}
+		return 0
+	})
+	if _, err := c.GetManifest(ctx, "a", "v1"); !errors.Is(err, upstream.ErrNotFound) || errors.Is(err, upstream.ErrGone) {
+		t.Errorf("451: %v, want ErrNotFound", err)
+	}
+	if c.Offline() {
+		t.Error("a 451 marked the upstream offline")
 	}
 }
 

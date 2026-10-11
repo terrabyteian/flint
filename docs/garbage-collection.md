@@ -19,7 +19,10 @@ A blob is **referenced**, and kept, while any of these records points at it, in 
 - a PyPI file or core-metadata file that a proxy repository cached, until the cache evicts it;
 - a PyPI project page that a proxy repository cached, until a newer copy replaces it;
 - a generic file in a hosted repository, until the file is deleted or replaced;
-- a generic file that a proxy repository cached, until the cache evicts it or, for a file it revalidates, a newer copy replaces it.
+- a generic file that a proxy repository cached, until the cache evicts it or, for a file it revalidates, a newer copy replaces it;
+- a crate version in a hosted Cargo repository, yanked or not, which references its `.crate` file, until the version is deleted;
+- a `.crate` file that a Cargo proxy repository cached, until the cache evicts it;
+- a Cargo index file, or an upstream's `config.json`, that a proxy repository cached, until a newer copy replaces it.
 
 Everything else in the blob store is **unreferenced**.
 Garbage collection deletes an unreferenced blob once its grace period is over: by default 24 hours after the blob was stored.

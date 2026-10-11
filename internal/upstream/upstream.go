@@ -5,7 +5,9 @@
 // authentication handshake: a request answered with a 401 Bearer
 // challenge is retried with a token from the challenge's realm, fetched
 // anonymously or with the configured credentials and cached until it
-// expires; a Basic challenge is answered with the credentials directly.
+// expires; a Basic challenge is answered with the credentials directly,
+// and a Cargo challenge with the password, a token, as the Authorization
+// header, as Cargo sends it.
 // Transient failures (network errors, 429, 500, 502, 503, and 504) are
 // retried with exponential backoff. A request that still fails, or whose
 // authentication fails, marks the upstream offline for a short time, so
@@ -162,6 +164,7 @@ type Client struct {
 	tokens        map[string]token // by scope
 	offlineUntil  time.Time
 	basicAccepted atomic.Bool // the upstream accepted basic credentials
+	tokenAccepted atomic.Bool // the upstream accepted the password as a Cargo token
 }
 
 // token is a bearer token and when it stops being used.
@@ -488,14 +491,17 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 	auth := ""
 	if tok, ok := c.cachedToken(scope); ok && own {
 		auth = "Bearer " + tok
-	} else if own && c.username != "" && c.basicAccepted.Load() {
-		// The upstream took basic credentials before: send them at once
+	} else if own && c.username != "" && (c.basicAccepted.Load() || c.tokenAccepted.Load()) {
+		// The upstream took the credentials before: send them at once
 		// rather than waiting for its challenge.
 		pw, err := c.password()
 		if err != nil {
 			return nil, &Error{Op: op, Err: err}
 		}
-		auth = "Basic " + basicAuth(c.username, pw)
+		auth = pw
+		if c.basicAccepted.Load() {
+			auth = "Basic " + basicAuth(c.username, pw)
+		}
 	}
 	resp, err := c.roundTrip(ctx, method, u.String(), header, auth)
 	if err != nil {
@@ -521,7 +527,7 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 			return nil, err
 		}
 		auth = "Bearer " + tok
-	case "basic":
+	case "basic", "cargo":
 		if c.username == "" {
 			return nil, &Error{Op: op, Status: http.StatusUnauthorized, Err: fmt.Errorf("%w: the upstream needs credentials", ErrDenied)}
 		}
@@ -529,19 +535,26 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 		if err != nil {
 			return nil, &Error{Op: op, Err: err}
 		}
-		auth = "Basic " + basicAuth(c.username, pw)
+		auth = pw // a Cargo registry takes its token as the header itself
+		if ch.scheme == "basic" {
+			auth = "Basic " + basicAuth(c.username, pw)
+		}
 	}
 	resp, err = c.roundTrip(ctx, method, u.String(), header, auth)
 	if err != nil {
 		return nil, transportError(op, err)
 	}
-	if ch.scheme == "basic" && resp.StatusCode == http.StatusUnauthorized {
+	accepted := &c.basicAccepted
+	if ch.scheme == "cargo" {
+		accepted = &c.tokenAccepted
+	}
+	if ch.scheme != "bearer" && resp.StatusCode == http.StatusUnauthorized {
 		drain(resp)
-		c.basicAccepted.Store(false)
+		accepted.Store(false)
 		return nil, &Error{Op: op, Status: http.StatusUnauthorized, Err: fmt.Errorf("%w: the upstream refused the credentials", ErrAuth)}
 	}
-	if ch.scheme == "basic" {
-		c.basicAccepted.Store(true)
+	if ch.scheme != "bearer" {
+		accepted.Store(true)
 	}
 	return resp, nil
 }
@@ -602,6 +615,10 @@ func statusError(op string, resp *http.Response) error {
 		e.Err = ErrNotFound
 	case http.StatusGone:
 		e.Err = ErrGone
+	case http.StatusUnavailableForLegalReasons:
+		// Taken down, as a registry does with content it may not serve:
+		// an answer about the content, like a 404.
+		e.Err = ErrNotFound
 	case http.StatusUnauthorized, http.StatusForbidden:
 		e.Err = ErrDenied
 	default:

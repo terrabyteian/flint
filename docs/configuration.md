@@ -107,6 +107,31 @@ Repositories and permission grants declared here are read-only through the API.
         "url": "https://github.com/acme/tool/releases/download/",
         "allowHosts": ["release-assets.githubusercontent.com", "objects.githubusercontent.com"]
       }
+    },
+    {
+      "name": "cargo-local",
+      "format": "cargo",
+      "type": "hosted"
+    },
+    {
+      "name": "crates-io",
+      "format": "cargo",
+      "type": "proxy",
+      "proxy": {
+        "url": "sparse+https://index.crates.io/"
+      }
+    },
+    {
+      "name": "cargo-all",
+      "format": "cargo",
+      "type": "virtual",
+      "virtual": {
+        "members": [
+          "cargo-local",
+          {"name": "crates-io", "exclude": ["acme-*"]}
+        ],
+        "publishTo": "cargo-local"
+      }
     }
   ],
   "proxyCache": {
@@ -131,12 +156,12 @@ Repositories and permission grants declared here are read-only through the API.
     },
     "permissions": [
       {
-        "repositories": ["docker-local", "releases", "pypi-local", "files"],
+        "repositories": ["docker-local", "releases", "pypi-local", "files", "cargo-local"],
         "role": "write",
         "groups": ["ci"]
       },
       {
-        "repositories": ["dockerhub", "ghcr", "pypi"],
+        "repositories": ["dockerhub", "ghcr", "pypi", "crates-io", "cargo-all"],
         "role": "read",
         "groups": ["ci"]
       },
@@ -196,7 +221,7 @@ A bare IP address means that one address; IPv4-mapped IPv6 addresses match IPv4 
 
 ### Public URL
 
-Some package protocols put absolute URLs into the metadata clients store, such as the URLs in PyPI's JSON API, which tools record, and later npm tarball URLs in lockfiles.
+Some package protocols put absolute URLs into the metadata clients store, such as the URLs in PyPI's JSON API, which tools record, the download and API URLs in a Cargo index's `config.json`, and later npm tarball URLs in lockfiles.
 `publicURL` is the base of every absolute URL flint writes into served metadata, so those URLs stay the same however a client reached flint: through an ingress, a port forward, or an internal service name.
 It is an `http` or `https` URL without credentials, a query, or a fragment; it may have a path, when a reverse proxy serves flint under one and strips it before forwarding.
 Without it, absolute URLs are built from the scheme and host of each request, as seen through [trusted proxies](#trusted-proxies).
@@ -209,9 +234,9 @@ Cached upstream content is stored as the upstream sent it and rewritten when ser
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `name` | string | required | The repository's name, which clients address it by: the path prefix of its images, as in `host/docker-local/team/app`, of its PyPI index, as in `host/pypi/pypi-local/simple/`, or of its files, as in `host/generic/files/tools/app.tar.gz`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique across formats. |
-| `format` | string | required | Package format: `oci` for container images and OCI artifacts, `pypi` for Python packages, or `generic` for arbitrary files addressed by path. |
-| `type` | string | required | Repository type: `hosted`, which clients publish to; `proxy`, a read-only cache of an upstream registry or index; or, for `pypi` and `generic`, `virtual`, one view merged from other repositories. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
+| `name` | string | required | The repository's name, which clients address it by: the path prefix of its images, as in `host/docker-local/team/app`, of its index, as in `host/pypi/pypi-local/simple/` or `host/cargo/cargo-local/`, or of its files, as in `host/generic/files/tools/app.tar.gz`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique across formats. |
+| `format` | string | required | Package format: `oci` for container images and OCI artifacts, `pypi` for Python packages, `generic` for arbitrary files addressed by path, or `cargo` for Rust crates. |
+| `type` | string | required | Repository type: `hosted`, which clients publish to; `proxy`, a read-only cache of an upstream registry or index; or, for `pypi`, `generic`, and `cargo`, `virtual`, one view merged from other repositories. A repository of format `<format>` is served under `/<format>/<name>/`, except OCI's, which are under `/v2/`; another format's path does not find it. |
 | `immutableTags` | bool | `false` | Hosted OCI repositories only. Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
 | `helmIndex` | bool | `false` | Hosted OCI repositories only. Also serve the Helm charts pushed to the repository as a classic Helm chart repository at `/helm/<name>/`; see [Helm chart repositories](#helm-chart-repositories). |
@@ -221,14 +246,14 @@ Cached upstream content is stored as the upstream sent it and rewritten when ser
 
 ### Proxy repository settings
 
-A proxy repository caches one upstream: a registry such as Docker Hub, ghcr.io, or quay.io, a Python package index such as pypi.org, or, for generic files, any web server. [Proxy repositories](#proxy-repositories) describes how an OCI proxy serves pulls, [PyPI](pypi.md#proxy-repositories) how a PyPI proxy does, and [generic files](generic.md#proxy-repositories) how a generic one does.
+A proxy repository caches one upstream: a registry such as Docker Hub, ghcr.io, or quay.io, a Python package index such as pypi.org, a Cargo sparse index such as crates.io's, or, for generic files, any web server. [Proxy repositories](#proxy-repositories) describes how an OCI proxy serves pulls, and [PyPI](pypi.md#proxy-repositories), [generic files](generic.md#proxy-repositories), and [Cargo](cargo.md#proxy-repositories) how theirs do.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `proxy.url` | string | required | For `oci`, the upstream registry's base URL, without a path, such as `"https://registry-1.docker.io"` or `"https://ghcr.io"`; for Docker Hub (`registry-1.docker.io`), a single-component image name gets the `library/` prefix, as Docker clients add it: `dockerhub/nginx` pulls `library/nginx`. For `pypi`, the upstream's simple index URL, the one you would give pip as `--index-url`, such as `"https://pypi.org/simple/"` or `"https://download.pytorch.org/whl/cpu"`; a URL without a path gets `/simple/`, so `"https://pypi.org"` works too. For `generic`, any base URL, such as `"https://github.com/acme/tool/releases/download/"`: a request for `<path>` fetches `<url>/<path>`. |
-| `proxy.username` | string | none | User name for the upstream, such as a Docker Hub account for its higher pull limits. Requires `passwordFile`. See the warning below. |
+| `proxy.url` | string | required | For `oci`, the upstream registry's base URL, without a path, such as `"https://registry-1.docker.io"` or `"https://ghcr.io"`; for Docker Hub (`registry-1.docker.io`), a single-component image name gets the `library/` prefix, as Docker clients add it: `dockerhub/nginx` pulls `library/nginx`. For `pypi`, the upstream's simple index URL, the one you would give pip as `--index-url`, such as `"https://pypi.org/simple/"` or `"https://download.pytorch.org/whl/cpu"`; a URL without a path gets `/simple/`, so `"https://pypi.org"` works too. For `generic`, any base URL, such as `"https://github.com/acme/tool/releases/download/"`: a request for `<path>` fetches `<url>/<path>`. For `cargo`, the upstream's sparse index URL, as you would give Cargo, such as `"sparse+https://index.crates.io/"`; the `sparse+` prefix is optional. |
+| `proxy.username` | string | none | User name for the upstream, such as a Docker Hub account for its higher pull limits. Requires `passwordFile`. A Cargo registry that challenges for a token gets the password file's token alone, as Cargo sends it; set any user name. See the warning below. |
 | `proxy.passwordFile` | string | none | Absolute path of a file holding the upstream password or access token, such as a mounted Kubernetes Secret. One trailing newline is ignored. flint reads it at startup, failing to start if it cannot, and again whenever it authenticates to the upstream, so a rotated secret takes effect without a restart. It is never logged. Requires `username`. |
-| `proxy.revalidateAfter` | duration | `"5m"` | How long a cached tag, tag listing, referrers listing, or document, such as a PyPI project page or a generic file without `generic.immutable`, is served before the upstream is asked again. Must be positive. |
+| `proxy.revalidateAfter` | duration | `"5m"` | How long a cached tag, tag listing, referrers listing, or document, such as a PyPI project page, a generic file without `generic.immutable`, or a Cargo index file, is served before the upstream is asked again. Must be positive. |
 | `proxy.sizeLimit` | size | none | Cap the content cached in this repository. Over the cap, the least recently pulled content is evicted. Without it, everything is cached forever. For `generic`, only with `generic.immutable`, since only files cached forever count against it. |
 | `proxy.maxConcurrent` | integer | `64` | Requests the repository may have in flight to its upstream at once, each from when it is sent until its response has been read; further requests wait, and the wait does not count against their timeouts or mark the upstream unavailable. Keeps a burst of client requests, such as a large install, from turning into a rate-limit ban. |
 | `proxy.allowHosts` | array of strings | none | Hosts besides the upstream's own that the repository may fetch from when upstream content or a redirect points at them: a host name or IP address, optionally with a port (`"cdn.example.com"`, `"10.0.0.7:9000"`), or `"*.example.com"` for every subdomain of `example.com`. See [the fetch policy](#upstream-fetch-policy). |
@@ -244,13 +269,14 @@ A proxy repository fetches only from its upstream's host and the hosts its forma
 - **OCI** registries may redirect blob downloads to, and name their token service on, any host, as the distribution protocol allows, so every public host is allowed.
 - **PyPI** indexes link their files: the index's own host, `files.pythonhosted.org` for `pypi.org`, and `test-files.pythonhosted.org` for `test.pypi.org`.
 - **Generic** proxies fetch only from the upstream's own host. A download site that redirects to another host, as GitHub release downloads redirect to `release-assets.githubusercontent.com` (and, for older releases, `objects.githubusercontent.com`), needs that host in `proxy.allowHosts`.
+- **Cargo** indexes name where their crates are downloaded and their web API in `config.json`: the index's own host, and `static.crates.io` and `crates.io` for `index.crates.io`.
 - `proxy.allowHosts` adds further hosts.
 
 Redirects are followed only to allowed hosts. flint refuses to connect to loopback, link-local, private, shared (`100.64.0.0/10`), and unspecified (`0.0.0.0/8`) addresses, and to IPv6 addresses that embed one (NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), except for the host of `proxy.url` and the hosts in `proxy.allowHosts`, which the configuration names: the check runs on the address a name resolves to when flint connects, so upstream content, a redirect, or a token challenge can never steer flint at a service inside its network. A refused fetch is answered `502`. Credentials are only ever sent to the host of `proxy.url`. The `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment variables apply to upstream requests; with a proxy configured, flint connects to the proxy, which then decides where requests go.
 
 ### Virtual repository settings
 
-A virtual repository serves one index merged from an ordered list of hosted and proxy repositories of its format, so clients need a single URL. `pypi` and `generic` have virtual repositories; [PyPI](pypi.md#virtual-repositories) describes how they merge, and [generic files](generic.md#virtual-repositories) how a generic one serves each path from the first member that has it.
+A virtual repository serves one index merged from an ordered list of hosted and proxy repositories of its format, so clients need a single URL. `pypi`, `generic`, and `cargo` have virtual repositories; [PyPI](pypi.md#virtual-repositories) and [Cargo](cargo.md#virtual-repositories) describe how they merge, and [generic files](generic.md#virtual-repositories) how a generic one serves each path from the first member that has it.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -259,9 +285,9 @@ A virtual repository serves one index merged from an ordered list of hosted and 
 | `virtual.members[].include` | array of strings | all names | Package names, or patterns in which `*` matches any run of characters, that the member is consulted for. Without it, the member is consulted for every name. |
 | `virtual.members[].exclude` | array of strings | none | Package names or patterns the member is never consulted for, even if `include` matches them. |
 | `virtual.publishTo` | string | none | A hosted member that receives what clients publish to the virtual repository, so one URL serves both installing and publishing. A publish of a package whose name the member's `include` and `exclude` filters do not admit is refused with `403`, naming the member and the filter, since the virtual repository would not serve it. Without it, the virtual repository refuses uploads. |
-| `virtual.dependencyConfusionProtection` | bool | `true` | Once a hosted member owns a package name, never serve that name from a proxy member, so a package published upstream under the same name can never replace or mix with the first-party one. A hosted repository owns a name from the first upload of a file of it, also after every file is deleted. Only a hosted member whose filters admit a name can own it. |
+| `virtual.dependencyConfusionProtection` | bool | `true` | Once a hosted member owns a package name, never serve that name from a proxy member, so a package published upstream under the same name can never replace or mix with the first-party one. A hosted repository owns a name from the first upload of a file of it, or the first publish of a crate, also after everything is deleted. Only a hosted member whose filters admit a name can own it. |
 
-Filters are compared with package names after the format's normalization, as clients may spell a name several ways: for PyPI, case and runs of `-`, `_`, and `.` do not matter, so `Acme_*` and `acme-*` are the same filter. For generic files, a filter matches a file's path, exactly, such as `"internal/*"`. A pattern is 1 to 256 printable characters other than space.
+Filters are compared with package names after the format's normalization, as clients may spell a name several ways: for PyPI, case and runs of `-`, `_`, and `.` do not matter, so `Acme_*` and `acme-*` are the same filter; for Cargo, case does not matter and `-` and `_` are equal. For generic files, a filter matches a file's path, exactly, such as `"internal/*"`. A pattern is 1 to 256 printable characters other than space.
 
 > **Recommendation: exclude your internal names from proxy members.**
 > Dependency-confusion protection covers a name only once a hosted member owns it. Until your first upload of a new internal package, or while the hosted member that has it is left out by its filters, a public package of the same name would be served from a proxy member. An `exclude` pattern for every internal prefix or scope on each proxy member, such as `"exclude": ["acme-*"]`, keeps those names out of the upstream for good.
@@ -337,9 +363,14 @@ PyPI repositories are served under `/pypi/<repository>/`: the simple index at `/
 Generic files repositories are served under `/generic/<repository>/`: a file at `/generic/<repository>/<path>`, uploaded with `PUT` and downloaded with `GET`, and a listing of a directory at a path ending in `/`.
 [Generic files](generic.md) describes the URL layout, configuring curl and wget, and how hosted, proxy, and virtual repositories behave.
 
+### Cargo repositories
+
+Cargo repositories are served under `/cargo/<repository>/` over Cargo's sparse registry protocol: the index URL to give Cargo is `sparse+https://<host>/cargo/<repository>/`, and the web API, for publishing, yanking, downloading, and search, is under `/cargo/<repository>/api/v1/`.
+[Cargo](cargo.md) describes the URL layout, configuring Cargo, and how hosted, proxy, and virtual repositories behave.
+
 ### Proxy repositories
 
-This section describes OCI proxy repositories; [PyPI](pypi.md#proxy-repositories) describes PyPI ones, which follow the same rules for caching, outages, disk space, and size limits.
+This section describes OCI proxy repositories; [PyPI](pypi.md#proxy-repositories) and [Cargo](cargo.md#proxy-repositories) describe theirs, which follow the same rules for caching, outages, disk space, and size limits.
 
 A proxy repository serves pulls of its upstream's images, such as `registry.example.com/dockerhub/library/nginx:1.27` for Docker Hub's `nginx:1.27`, and caches what it serves in the same content-addressed store as hosted repositories, so each blob is stored once however many repositories use it.
 
@@ -376,7 +407,7 @@ These authenticate themselves, as [authentication](auth.md) describes:
 | Endpoint | Meaning |
 | --- | --- |
 | `GET, POST /auth/token` | The Docker token endpoint: issues short-lived bearer tokens for registry requests. |
-| `/api/v1/...` | The admin API: users, groups, API tokens, [backups](backup.md), the [audit log](operations.md#audit-log), and yanking and deleting PyPI files. |
+| `/api/v1/...` | The admin API: users, groups, API tokens, [backups](backup.md), the [audit log](operations.md#audit-log), yanking and deleting PyPI files, and deleting crate versions. |
 
 ## Signals and shutdown
 
@@ -392,10 +423,11 @@ Requests to `/healthz`, `/readyz`, and `/metrics` log at `debug` level, so probe
 Requests to the OCI API carry the repository name in a `repository` attribute, and their route is one of `oci.base`, `oci.catalog`, `oci.blob`, `oci.upload`, `oci.manifest`, `oci.tags`, `oci.referrers`, or `oci.unknown`.
 Requests to PyPI repositories carry it too, with the route `pypi.index`, `pypi.project`, `pypi.file`, `pypi.metadata`, `pypi.upload`, `pypi.json`, or `pypi.unknown`; the admin API's PyPI endpoints use `api.pypi.yank`, `api.pypi.unyank`, and `api.pypi.delete`.
 Requests to generic files repositories carry it as well, with the route `generic.file`, `generic.list`, `generic.upload`, `generic.delete`, or `generic.unknown`.
+Requests to Cargo repositories carry it too, with the route `cargo.config`, `cargo.index`, `cargo.download`, `cargo.publish`, `cargo.yank`, `cargo.unyank`, `cargo.search`, `cargo.owners`, or `cargo.unknown`; the admin API's Cargo endpoint uses `api.cargo.delete`.
 
 ## Metrics
 
-Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime, and [backup](backup.md#metrics) metrics, the OCI API, PyPI, and generic files repositories export the metrics below. The `flint_proxy_*` metrics cover proxy repositories of every format.
+Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime, and [backup](backup.md#metrics) metrics, the OCI API, PyPI, generic files, and Cargo repositories export the metrics below. The `flint_proxy_*` metrics cover proxy repositories of every format.
 
 | Metric | Meaning |
 | --- | --- |
@@ -404,8 +436,10 @@ Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime
 | `flint_oci_link_retries_total` | Link batches retried because a concurrent change, such as a garbage-collection sweep starting, failed their precondition. |
 | `flint_pypi_uploads_total{repository}` | Distribution files uploaded to hosted PyPI repositories. |
 | `flint_pypi_upload_bytes_total{repository}` | Bytes of distribution files uploaded to hosted PyPI repositories. |
+| `flint_cargo_publishes_total{repository}` | Crate versions published to hosted Cargo repositories. |
+| `flint_cargo_publish_bytes_total{repository}` | Bytes of `.crate` files published to hosted Cargo repositories. |
 | `flint_virtual_member_skips_total{repository,member}` | Members of virtual repositories left out of a response because they failed, such as a proxy whose upstream could not be reached with nothing cached. |
-| `flint_proxy_requests_total{repository,result}` | Pulls from proxy repositories, by result: `hit` (served from the cache), `revalidated` (served after the upstream confirmed a tag, listing, project page, or generic file), `fetched` (fetched from the upstream and cached), `passthrough` (fetched without caching, under disk pressure, over the size limit, or for a PyPI file whose index entry has no sha256 digest), and `stale` (served from the cache because the upstream failed). |
+| `flint_proxy_requests_total{repository,result}` | Pulls from proxy repositories, by result: `hit` (served from the cache), `revalidated` (served after the upstream confirmed a tag, listing, project page, generic file, or index file), `fetched` (fetched from the upstream and cached), `passthrough` (fetched without caching, under disk pressure, over the size limit, or for a PyPI file whose index entry has no sha256 digest, and Cargo searches), and `stale` (served from the cache because the upstream failed). |
 | `flint_proxy_upstream_errors_total{repository}` | Upstream requests that failed: unreachable, server errors, denied access, failed authentication, or content that did not match its digest. A blob fetch shared by several clients counts once. |
 | `flint_proxy_upstream_bytes_total{repository}` | Bytes fetched from upstream registries, indexes, and web servers. |
 | `flint_proxy_fetches_in_flight` | Blobs and files being fetched from upstreams. |

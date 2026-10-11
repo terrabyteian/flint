@@ -75,6 +75,22 @@ config:
   #     url: https://github.com/acme/tool/releases/download/
   #     # GitHub redirects release downloads to these hosts.
   #     allowHosts: [release-assets.githubusercontent.com, objects.githubusercontent.com]
+  # # Cargo: a hosted repository, a crates.io proxy, and a virtual registry
+  # # merging them, which cargo publish can publish to (docs/cargo.md).
+  # - name: cargo-local
+  #   format: cargo
+  #   type: hosted
+  # - name: crates-io
+  #   format: cargo
+  #   type: proxy
+  #   proxy:
+  #     url: sparse+https://index.crates.io/
+  # - name: cargo-all
+  #   format: cargo
+  #   type: virtual
+  #   virtual:
+  #     members: [cargo-local, crates-io]
+  #     publishTo: cargo-local
   auth:
     permissions: []
   # proxyCache:

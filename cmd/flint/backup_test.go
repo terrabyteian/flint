@@ -274,68 +274,88 @@ func TestBackupEndToEnd(t *testing.T) {
 	}
 }
 
-// TestBackupChecksPyPIBlobs checks that a backup fails when a blob a
-// PyPI repository links is missing from the data directory.
-func TestBackupChecksPyPIBlobs(t *testing.T) {
+// TestBackupChecksFormatBlobs checks that a backup fails when a blob a
+// PyPI or Cargo repository links is missing from the data directory.
+func TestBackupChecksFormatBlobs(t *testing.T) {
 	defer func(d time.Duration) { backupPollInterval = d }(backupPollInterval)
 	backupPollInterval = 20 * time.Millisecond
 
-	dir := t.TempDir()
-	dataDir, backupDir := filepath.Join(dir, "data"), filepath.Join(dir, "backups")
-	adminPassword := "admin-" + rand.Text()
-	pwFile := filepath.Join(dir, "admin-password")
-	os.WriteFile(pwFile, []byte(adminPassword+"\n"), 0o600)
-	p := startFlint(t, "serve", "-config", writeConfig(t, map[string]any{
-		"listen":       "127.0.0.1:0",
-		"dataDir":      dataDir,
-		"backup":       map[string]any{"directory": backupDir},
-		"repositories": []any{map[string]any{"name": "pypi-local", "format": "pypi", "type": "hosted"}},
-		"auth":         map[string]any{"bootstrapAdmin": map[string]any{"passwordFile": pwFile}},
-	}))
-	if p.addr == "" {
-		t.Fatalf("flint exited at startup:\n%s", p.output())
-	}
-	base := "http://" + p.addr
+	for _, tc := range []struct {
+		format string
+		// publish publishes to repository <format>-local and returns the
+		// bytes of a blob it links.
+		publish func(t *testing.T, base, adminPassword string) []byte
+	}{
+		{"pypi", func(t *testing.T, base, adminPassword string) []byte {
+			var whl bytes.Buffer
+			zw := zip.NewWriter(&whl)
+			w, _ := zw.Create("pkg-1.0.dist-info/METADATA")
+			io.WriteString(w, "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\n\n"+rand.Text())
+			zw.Close()
+			var body bytes.Buffer
+			mw := multipart.NewWriter(&body)
+			for k, v := range map[string]string{":action": "file_upload", "name": "pkg", "version": "1.0", "filetype": "bdist_wheel"} {
+				mw.WriteField(k, v)
+			}
+			fw, _ := mw.CreateFormFile("content", "pkg-1.0-py3-none-any.whl")
+			fw.Write(whl.Bytes())
+			mw.Close()
+			if code, out, _ := registryDo(t, "POST", base+"/pypi/pypi-local/legacy/", "admin", adminPassword, body.Bytes(), mw.FormDataContentType()); code != http.StatusOK {
+				t.Fatalf("upload: %d %s", code, out)
+			}
+			return whl.Bytes()
+		}},
+		{"cargo", func(t *testing.T, base, adminPassword string) []byte {
+			crate, body := cargoCrate("1.0.0")
+			if code, out, _ := registryDo(t, "PUT", base+"/cargo/cargo-local/api/v1/crates/new", "admin", adminPassword, body, ""); code != http.StatusOK {
+				t.Fatalf("publish: %d %s", code, out)
+			}
+			return crate
+		}},
+	} {
+		t.Run(tc.format, func(t *testing.T) {
+			dir := t.TempDir()
+			dataDir, backupDir := filepath.Join(dir, "data"), filepath.Join(dir, "backups")
+			adminPassword := "admin-" + rand.Text()
+			pwFile := filepath.Join(dir, "admin-password")
+			os.WriteFile(pwFile, []byte(adminPassword+"\n"), 0o600)
+			p := startFlint(t, "serve", "-config", writeConfig(t, map[string]any{
+				"listen":       "127.0.0.1:0",
+				"dataDir":      dataDir,
+				"backup":       map[string]any{"directory": backupDir},
+				"repositories": []any{map[string]any{"name": tc.format + "-local", "format": tc.format, "type": "hosted"}},
+				"auth":         map[string]any{"bootstrapAdmin": map[string]any{"passwordFile": pwFile}},
+			}))
+			if p.addr == "" {
+				t.Fatalf("flint exited at startup:\n%s", p.output())
+			}
+			base := "http://" + p.addr
+			linked := tc.publish(t, base, adminPassword)
 
-	var whl bytes.Buffer
-	zw := zip.NewWriter(&whl)
-	w, _ := zw.Create("pkg-1.0.dist-info/METADATA")
-	io.WriteString(w, "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0\n\n"+rand.Text())
-	zw.Close()
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	for k, v := range map[string]string{":action": "file_upload", "name": "pkg", "version": "1.0", "filetype": "bdist_wheel"} {
-		mw.WriteField(k, v)
-	}
-	fw, _ := mw.CreateFormFile("content", "pkg-1.0-py3-none-any.whl")
-	fw.Write(whl.Bytes())
-	mw.Close()
-	if code, out, _ := registryDo(t, "POST", base+"/pypi/pypi-local/legacy/", "admin", adminPassword, body.Bytes(), mw.FormDataContentType()); code != http.StatusOK {
-		t.Fatalf("upload: %d %s", code, out)
-	}
+			var tok struct{ Token string }
+			if code := apiCall(t, "POST", base+"/api/v1/tokens", "admin", adminPassword, `{"name": "backup", "admin": true}`, &tok); code != 201 {
+				t.Fatalf("creating the backup token: %d", code)
+			}
+			tokenFile := filepath.Join(dir, "backup-token")
+			os.WriteFile(tokenFile, []byte(tok.Token+"\n"), 0o600)
 
-	var tok struct{ Token string }
-	if code := apiCall(t, "POST", base+"/api/v1/tokens", "admin", adminPassword, `{"name": "backup", "admin": true}`, &tok); code != 201 {
-		t.Fatalf("creating the backup token: %d", code)
-	}
-	tokenFile := filepath.Join(dir, "backup-token")
-	os.WriteFile(tokenFile, []byte(tok.Token+"\n"), 0o600)
-
-	lost := digestOf(whl.Bytes())
-	hex := strings.TrimPrefix(lost, "sha256:")
-	removed := false
-	filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && d.Name() == hex {
-			removed = os.Remove(path) == nil
-		}
-		return nil
-	})
-	if !removed {
-		t.Fatal("the wheel's blob is not in the data directory")
-	}
-	code, out, errOut := runCLI(t, "backup", "-url", base, "-password-file", tokenFile)
-	if code == 0 || !strings.Contains(out+errOut, lost) {
-		t.Fatalf("flint backup with a PyPI blob missing = %d\n%s%s", code, out, errOut)
+			lost := digestOf(linked)
+			hex := strings.TrimPrefix(lost, "sha256:")
+			removed := false
+			filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() && d.Name() == hex {
+					removed = os.Remove(path) == nil
+				}
+				return nil
+			})
+			if !removed {
+				t.Fatal("the linked blob is not in the data directory")
+			}
+			code, out, errOut := runCLI(t, "backup", "-url", base, "-password-file", tokenFile)
+			if code == 0 || !strings.Contains(out+errOut, lost) {
+				t.Fatalf("flint backup with a %s blob missing = %d\n%s%s", tc.format, code, out, errOut)
+			}
+		})
 	}
 }
 

@@ -44,6 +44,10 @@ Actions:
 | `generic.upload`, `generic.delete` | A file uploaded to, or deleted from, a hosted [generic files repository](generic.md); in an immutable repository, a delete leaves a tombstone. |
 | `generic.proxy.cache` | A generic files proxy repository cached a file, or a newer copy of one it revalidates, for the client that fetched it. |
 | `generic.proxy.pulled`, `generic.proxy.evict` | `(system)`: a size-limited generic files proxy repository saved its pull times or evicted files. |
+| `cargo.publish` | A crate version published to a hosted [Cargo repository](cargo.md). |
+| `cargo.yank`, `cargo.unyank`, `cargo.delete` | A crate version yanked, unyanked, or deleted. |
+| `cargo.proxy.cache` | A Cargo proxy repository cached an index file, its upstream's `config.json`, or a `.crate` file for the client that fetched it. |
+| `cargo.proxy.pulled`, `cargo.proxy.evict` | `(system)`: a size-limited Cargo proxy repository saved its pull times or evicted `.crate` files. |
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |

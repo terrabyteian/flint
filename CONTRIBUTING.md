@@ -26,7 +26,7 @@ flint builds with the Go standard library and nothing else.
 - `golang.org/x/...` modules count as external and are not allowed either.
 - If you need something the standard library lacks, write it in flint, with tests.
 
-Tools that never ship in the binary are fine in CI: real clients such as docker, crane, oras, pip, uv, and twine, and the OCI distribution conformance suite.
+Tools that never ship in the binary are fine in CI: real clients such as docker, crane, oras, pip, uv, twine, and cargo, and the OCI distribution conformance suite.
 
 ## Tests
 
@@ -61,6 +61,7 @@ The `proxy` job runs [`scripts/e2e-proxy.sh`](scripts/e2e-proxy.sh), which pulls
 The `helm` job runs [`scripts/e2e-helm.sh`](scripts/e2e-helm.sh) with Helm 3 and Helm 4, which pushes charts with `helm push` and uses them through the [classic Helm repository view](docs/helm-repository.md).
 The `pypi` job runs [`scripts/e2e-pypi.sh`](scripts/e2e-pypi.sh), which publishes packages with twine and uv publish and installs them, and real projects from pypi.org, with pip and uv through hosted, proxy, and virtual PyPI repositories, then installs again after restarting flint with its upstream unreachable.
 The `generic` job runs [`scripts/e2e-generic.sh`](scripts/e2e-generic.sh), which uploads, downloads, and lists files with curl and wget in hosted and virtual generic files repositories, and downloads flint's own release binaries through proxy repositories of its GitHub releases, checking them against their published checksums, then downloads again after restarting flint with its upstreams unreachable.
+The `cargo` job runs [`scripts/e2e-cargo.sh`](scripts/e2e-cargo.sh), which publishes crates with `cargo publish`, yanks and searches them, and builds crates depending on them and on crates.io through hosted, proxy, and virtual Cargo repositories, then builds again after restarting flint with its upstream unreachable.
 
 ## Pull requests
 

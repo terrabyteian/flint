@@ -178,8 +178,10 @@ Illustrative v1 key space:
 | `pypi\0metadata\0<repo>\0<filename>` | core-metadata file a proxy repository cached | `internal/pypi` |
 | `pypi\0pulled\0file\0<repo>\0<filename>` | last pull of a file cached by a size-limited proxy repository (also `...\0metadata\0...`) | `internal/pypi` |
 | `generic\0file\0<repo>\0<path>` | hosted file record (blob digest, size, content type, upload time); kept as a tombstone, without a digest, after delete in an immutable repository | `internal/generic` |
-| `cache\0doc\0<repo>\0<key>` | document a proxy repository cached, such as a PyPI project page or a generic file that is revalidated (`<key>` is the format's name for it): blob digest of the upstream's bytes, upstream ETag and Last-Modified, content type, URL, fetch time | `internal/upstream` |
-| `cache\0file\0<repo>\0<path>` | immutable file a path-addressed proxy repository cached, such as a generic file with `generic.immutable`: blob digest, size, content type, the other digests verified or computed | `internal/upstream` |
+| `cargo\0crate\0<repo>\0<normalized name>` | hosted crate (name as first published); kept forever, so the repository keeps owning the name and its spelling, and rewritten by every change to the crate, so its version is the index file's ETag | `internal/cargo` |
+| `cargo\0version\0<repo>\0<normalized name>\0<version>` | hosted crate version (index line with its yank state, `.crate` digest and size, publish time, description), by the version without build metadata; kept as a tombstone after delete | `internal/cargo` |
+| `cache\0doc\0<repo>\0<key>` | document a proxy repository cached, such as a PyPI project page, a generic file that is revalidated, or a Cargo index file (`<key>` is the format's name for it): blob digest of the upstream's bytes, upstream ETag and Last-Modified, content type, URL, fetch time | `internal/upstream` |
+| `cache\0file\0<repo>\0<path>` | immutable file a path-addressed proxy repository cached, such as a generic file with `generic.immutable` or a Cargo `.crate` file: blob digest, size, content type, the other digests verified or computed | `internal/upstream` |
 | `cache\0pulled\0file\0<repo>\0<path>` | last pull of a file cached by a size-limited path-addressed proxy repository | `internal/upstream` |
 | `gc\0epoch` | GC epoch counter, incremented by each sweep round's start batch | `internal/gc` |
 | `gc\0doomed\0<digest>` | doomed set of the sweep round in progress; cleared when the round ends, and at startup | `internal/gc` |
@@ -465,7 +467,7 @@ type Marker map[string]MarkFunc
 func Guard(v meta.View, b *meta.Batch, ds ...blob.Digest) error
 ```
 
-- **Registration.** `flint serve` gives the collector the `Marker` of every package that writes metadata (`oci.GCMarker`, `pypi.GCMarker`, `generic.GCMarker`, `upstream.Marks` for the proxy cache the formats share, `auth.GCMarker`; later formats add theirs). No prefix may start with another. The collector knows no format's encodings: it only calls the functions.
+- **Registration.** `flint serve` gives the collector the `Marker` of every package that writes metadata (`oci.GCMarker`, `pypi.GCMarker`, `generic.GCMarker`, `cargo.GCMarker`, `upstream.Marks` for the proxy cache the formats share, `auth.GCMarker`; later formats add theirs). No prefix may start with another. The collector knows no format's encodings: it only calls the functions.
 - **Unknown records stop deletion.** Marking scans the keys under the registered prefixes, and also the keys between them. A live key under no registered prefix, or a record its function cannot read, makes the run refuse to delete anything and report the key family (the key up to its second separator, such as `pypi\0file\0`), so a format that forgot to register can never lose data.
 - **Proof in tests.** A format's tests write every kind of record the format can, then call `gctest.CheckMarked` or `gctest.CheckStored`, which fail on any key or record the format's marker does not cover.
 - **Links.** A batch that makes a blob visible calls `Guard` with a view it read before its blob-existence check, and fails with a retryable error on `ErrDoomed`. A record that references a blob without linking it, such as a manifest listing its layers, instead requires, at the version it read, a record that references the blob and was written under the same rules, such as the layer's link.
@@ -486,6 +488,7 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/oci` | OCI distribution API: hosted and proxy repositories, referrers. |
 | `internal/pypi` | PyPI simple API, JSON API, uploads: hosted, proxy, and virtual repositories. |
 | `internal/generic` | Generic files by path, with uploads, downloads, deletes, and listings: hosted, proxy, and virtual repositories. |
+| `internal/cargo` | Cargo sparse index and registry web API: hosted, proxy, and virtual repositories. |
 | `internal/upstream` | Shared upstream client and caching-proxy pieces: credentials, retries, offline fallback, the fetch policy and concurrency cap, revalidation windows, the shared fetcher with its verifier hook, the document cache, the path-cache engine, the negative cache, free-space watcher, size limits, and proxy metrics. |
 | `internal/hostpattern` | The `proxy.allowHosts` host patterns, parsed alike by configuration validation and the upstream fetch policy. |
 | `internal/metrics` | Prometheus text exposition. |
@@ -501,8 +504,8 @@ Everything is under `internal/` until a stable public Go API is a deliberate dec
 
 ## Repository types
 
-OCI, PyPI, and generic files have hosted and caching-proxy repositories, and PyPI and generic files virtual repositories; the formats that follow build on the same [repository model](#repository-model).
-Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, a per-repository index URL for PyPI, and a per-repository base URL for generic files.
+OCI, PyPI, generic files, and Cargo have hosted and caching-proxy repositories, and PyPI, generic files, and Cargo virtual repositories; the formats that follow build on the same [repository model](#repository-model).
+Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, a per-repository index URL for PyPI and Cargo, and a per-repository base URL for generic files.
 For OCI, the first path component of a repository name is the configured repository and the rest, at least one component, is an image name below it: `docker-local/team/app` is image `team/app` in repository `docker-local`, served at `/v2/docker-local/team/app/...`.
 Repository names are unique across formats, so permissions and metrics name a repository unambiguously.
 
@@ -532,6 +535,20 @@ Generic files repositories serve arbitrary files by path for curl, wget, and scr
 
 A path is one or more `/`-separated segments, none empty, `.`, or `..`, of at most 1024 bytes of UTF-8 without control characters, compared exactly. Every download carries `Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff`, so uploaded content never runs as a page of flint's origin.
 
+For Cargo, each repository is a sparse registry at `/cargo/<repo>/`, its index URL `sparse+https://<host>/cargo/<repo>/`:
+
+| URL | Serves |
+| --- | --- |
+| `/cargo/<repo>/config.json` | index configuration: `dl` and `api` at the repository's own URLs, and `auth-required` unless the repository allows anonymous pulls |
+| `/cargo/<repo>/1/<name>`, `2/<name>`, `3/<c>/<name>`, `<ab>/<cd>/<name>` | a crate's index file, by its lowercase name |
+| `/cargo/<repo>/api/v1/crates/new` | publish; hosted repositories, and virtual repositories with `publishTo` |
+| `/cargo/<repo>/api/v1/crates/<name>/<version>/yank`, `/unyank` | yank and unyank, which need `write` |
+| `/cargo/<repo>/api/v1/crates/<name>/<version>/download` | `.crate` file, `config.json`'s `dl` |
+| `/cargo/<repo>/api/v1/crates` | search |
+
+`config.json`'s URLs use `publicURL`, or else the request's scheme and host; index lines carry no URLs.
+The admin API deletes versions at `/api/v1/cargo/<repo>/crates/<name>/<version>`.
+
 ### Hosted
 
 Clients push and pull first-party artifacts.
@@ -542,6 +559,12 @@ The upload batch requires the file record and the name record to be absent, and 
 A tombstone keeps only the project, version, and deletion time, no digest, so garbage collection reclaims the file's bytes.
 Generic files follow the [immutable-name rule](#repository-model) for path-shaped formats: uploading the very same content to a path again succeeds without a change, different content is refused with `409`, and a deleted path keeps a tombstone without a digest and is never usable again. The upload batch requires the path's record unchanged (`repo.Publish`), so of concurrent uploads to one path, all with identical content succeed and of different content exactly one does. An upload's `Content-Digest` (`sha-256`, RFC 9530) or `X-Checksum-Sha256` is verified when its blob commits, so content that does not match is never linked. A repository with `generic.allowOverwrite` opts out: an upload with `write` replaces a file, and a delete removes its record without a tombstone, for scratch areas and "latest build" directories. A file's content type is the one given at upload, unless absent or a form type (which curl and wget send by default), else the one its extension implies, recorded at upload so it never changes with the host's MIME tables.
 Hosted PyPI uploads verify the sha256, MD5, and BLAKE2b-256 digests the client sends, and store the file's core metadata (a wheel's `METADATA`, a source distribution's `PKG-INFO`) as its own blob, served as the PEP 658 metadata file where it is reliable.
+Cargo crate names follow crates.io's rules (ASCII letters, digits, `-`, and `_`, starting with a letter, at most 64 characters) and are compared lowercase with `-` and `_` equal: a `cargo\0crate` record, kept forever, claims each normalized name for the spelling first published, and a name differing only in case or in `-` versus `_` is refused.
+A version is published once, ignoring build metadata, and never again after it is deleted; the publish batch requires the version record absent and the crate record absent or unchanged.
+flint checks that the `.crate` file is a gzip-compressed tar archive whose entries are under `<name>-<version>/` and include its `Cargo.toml`, and builds the index line from the publish request's JSON, as the Cargo reference specifies, so it never parses TOML; the line's `cksum` is the `.crate` file's sha256, its blob digest.
+Yanking changes only the line's `yanked` field.
+A dependency on crates.io keeps naming crates.io's index in a hosted repository.
+Every change to a crate rewrites its crate record, whose version is the index file's ETag, so `If-None-Match` answers `304` until the crate changes.
 Deletes are admin-only, hide the artifact immediately, and leave space reclamation to garbage collection.
 
 Hosted repositories **never auto-delete untagged manifests.**
@@ -568,14 +591,14 @@ OCI virtual repositories, which put several registries behind one path, are plan
 
 Every format's proxy is built on the shared proxy core in `internal/upstream`, which guarantees:
 
-- **Upstream outcomes.** Content the upstream answers is not found (`404` or `410`) or denied is answered `404` (`410` where the protocol distinguishes it), even if cached; what is cached for the name stays cached. An upstream that cannot be reached, or whose answer cannot be used, has the cached copy served. A refusal of flint's own credentials counts as the upstream being unreachable.
+- **Upstream outcomes.** Content the upstream answers is not found (`404`, `410`, or `451`) or denied is answered `404` (`410` where the protocol distinguishes it), even if cached; what is cached for the name stays cached. An upstream that cannot be reached, or whose answer cannot be used, has the cached copy served. A refusal of flint's own credentials counts as the upstream being unreachable.
 - **Documents.** Mutable upstream documents (package listings, version lists, index files) are kept in the blob store under a `cache\0doc` record, never only in memory, and streamed into it as they arrive. A document is served for the repository's revalidation window after the upstream last confirmed it, then revalidated with a conditional request (`If-None-Match`, `If-Modified-Since`); a `304` only refreshes the confirmation, which is kept in memory, and because the ETag is durable the first revalidation after a restart is a `304`, not a refetch. A document the format cannot read never replaces the cached one. Upstream bytes are stored verbatim: a document that must be rewritten (links pointing at flint) or filtered is derived when served, the derived copy is cached in memory by the stored copy's digest and the derivation within a size budget, and a document larger than a quarter of the budget is streamed through the rewriter instead of being held. Replacing a stored copy only relinks the record; garbage collection reclaims the old blob. A document that cannot be stored, such as under disk pressure, is served from memory but not marked confirmed.
 - **Verification.** Content fetched by path, whose sha256 digest is not known in advance, is hashed while it is staged, and the format's verifier (sha512, sha1, md5, a git blob id, the Go `h1:` tree hash computed from the staged zip, or any other check of the staged bytes) runs before the content is committed and before any client receives its final byte. Content that fails never enters the blob store or the cache; this extends the OCI proxy's digest guarantee to every format, which matters because cached content is kept forever. Other digests a format serves are computed in the same pass, never by reading a blob again.
 - **Path-addressed proxies.** One engine serves the formats whose clients name content by path: the format classifies each request as immutable (fetched once, verified, cached forever under a `cache\0file` record with its digest, size, content type, and other digests), mutable (a document, as above), or pass-through (never cached).
 - **A proxy serves only what its own upstream vouched for.** Path-addressed and PyPI proxies serve only bytes their own upstream sent them: content is fetched and recorded for the repository even when the same bytes are stored for another, since a digest is not a secret. The OCI proxy links a blob already stored for another repository only after its upstream confirms with `HEAD` that it serves that digest, and size, under the requested name.
 - **Negative caching.** A path-addressed proxy remembers an upstream not-found answer in memory for a minute per repository, so build tools probing for content that does not exist cost one upstream request per window.
 - **Upstream concurrency.** Each proxy repository has at most `proxy.maxConcurrent` (default 64) requests in flight to its upstream, each until its response has been read; further requests wait, so a burst of client requests cannot turn into a rate-limit ban.
-- **Fetch policy.** A proxy repository fetches only from its upstream's host and the hosts its format allows for that upstream (any public host for OCI blob redirects and token services, as the distribution protocol allows; `files.pythonhosted.org` for pypi.org), plus `proxy.allowHosts`; redirects are followed only to allowed hosts. flint refuses to connect to loopback, link-local, private, shared (`100.64.0.0/10`), and unspecified (`0.0.0.0/8`) addresses, and to IPv6 addresses embedding one (NAT64, 6to4), for any host except those the configuration names (the upstream URL's host and `proxy.allowHosts`); the check runs on the resolved address at dial time, so upstream metadata can never steer flint at internal services. Credentials are sent only to the configured upstream host. Anyone who may read a proxy repository can read what its upstream account can read.
+- **Fetch policy.** A proxy repository fetches only from its upstream's host and the hosts its format allows for that upstream (any public host for OCI blob redirects and token services, as the distribution protocol allows; `files.pythonhosted.org` for pypi.org; `static.crates.io` and `crates.io` for crates.io's index), plus `proxy.allowHosts`; redirects are followed only to allowed hosts. flint refuses to connect to loopback, link-local, private, shared (`100.64.0.0/10`), and unspecified (`0.0.0.0/8`) addresses, and to IPv6 addresses embedding one (NAT64, 6to4), for any host except those the configuration names (the upstream URL's host and `proxy.allowHosts`); the check runs on the resolved address at dial time, so upstream metadata can never steer flint at internal services. Credentials are sent only to the configured upstream host: HTTP basic credentials, a bearer token from the OCI token handshake, or, to a Cargo registry's challenge, the password as Cargo sends a token. Anyone who may read a proxy repository can read what its upstream account can read.
 - **Disk pressure and size limits** apply to every format: content that would bring the free space below `proxyCache.minFreeSpace`, or does not fit a repository's opt-in `sizeLimit`, is passed through, still verified, and the size limit evicts the least recently pulled items by deleting their records, with pull times saved in periodic batches.
 
 How the OCI proxy meets these rules (M2):
@@ -602,10 +625,17 @@ How the generic files proxy meets the same rules, as the first user of the path-
 - **`generic.immutable`.** For release download sites, each file is immutable path-cache content (`cache\0file\0<repo>\0<path>`): fetched once through the shared fetcher, cached forever, never revalidated. Only these files count against a size limit, so the configuration refuses `sizeLimit` without `generic.immutable`.
 - **Fetch policy.** The format allows no hosts beyond the upstream's own, so a download site that redirects elsewhere, as GitHub release downloads do, needs that host in `proxy.allowHosts`.
 
+How the Cargo proxy meets the same rules, with the same shared pieces:
+
+- **Index files are documents.** An index file is fetched from the configured sparse index URL and kept by the shared document cache under `cache\0doc\0<repo>\0<index path>`, verbatim, and served verbatim: index lines carry no URLs, and a dependency without a `registry` means the registry serving the line, which is then flint. An index file whose lines flint cannot read never replaces the cached one; lines of another crate are ignored when flint reads a file to resolve a download.
+- **`config.json` is flint's own**, naming the proxy repository's URLs; the upstream's is a document too, `cache\0doc\0<repo>\0config.json`, read for its `dl` template, which flint expands as Cargo does, and its `api`, to which search is passed through.
+- **`.crate` files are immutable** and fetched through the shared path-cache engine, cached under `cache\0file\0<repo>\0crates/<name>/<version>` and verified against the `cksum` of the index line that lists them, the fetcher's sha256 check, before they are cached and before a client receives their last byte. As for PyPI, a proxy repository serves only bytes its own upstream sent it.
+- **Disk pressure and size limits** use the shared engine: `.crate` files count against a size limit, index files do not.
+
 ### Virtual
 
 A virtual repository serves one merged view over an ordered list of hosted and proxy repositories of its format, so clients need a single URL.
-v1 has virtual repositories for PyPI and generic files, and OCI and the other first-wave formats build on the same model.
+v1 has virtual repositories for PyPI, generic files, and Cargo, and OCI and the other first-wave formats build on the same model.
 The rules are format-agnostic and live in `internal/repo`; each format decides what owning a name means, how names are normalized, and how members' answers merge.
 
 - **Members and filters.** Each member may carry `include` and `exclude` package-name patterns, in which `*` matches any run of characters, as in permission grants. A member is consulted for a name only if the name matches one of its include patterns (any name when it has none) and none of its exclude patterns. Names and patterns are compared after the format's normalization (PEP 503 for PyPI; the exact name for npm, `groupId:artifactId` for Maven, the module path for Go, lowercase with `-` and `_` equal for Cargo).
@@ -625,11 +655,18 @@ For generic files:
 - The name is the file's path, compared exactly, and filters match whole paths. A hosted member owns a path while it holds a file or a tombstone there.
 - A file is served by the first member, of those `Sources` gives for its path, that has it: a proxy member is asked only after the members before it lack the path, and one that fails is skipped as above. A directory listing merges the hosted members' listings, each filtered, the first member's entry winning.
 
+For Cargo:
+
+- A hosted repository owns a crate name, in any spelling that normalizes to it, from its first publish; the `cargo\0crate` record is kept forever, so deleting every version does not hand the name back to the upstream.
+- A crate's index file merges the lines of the members that may serve it by version, ignoring build metadata, the first member's line winning, and the version's `.crate` file is downloaded from that member.
+- A hosted crate's dependency whose `registry` names the index a proxy member caches (for crates.io, its git index URL or its sparse index URL) is served with `registry` removed, which means the virtual repository itself, so the whole dependency graph resolves through the virtual repository even without source replacement.
+- Search lists the hosted members' matches, then the proxy members' answers, each crate once, as the filters and dependency-confusion protection admit it.
+
 ## Repository model
 
 - **URL layout.** Every format but OCI serves a repository at `/<format>/<repo>/`, such as `/pypi/<repo>/` and later `/npm/<repo>/`, `/maven/<repo>/`, `/go/<repo>/`, `/cargo/<repo>/`, and `/generic/<repo>/`. OCI stays at `/v2/<repo>/...`, which its protocol fixes. A request whose format segment does not match the repository's format is a `404`. The format segment keeps repository names from colliding with flint's own paths (`/v2/`, `/api/`, `/auth/`, `/metrics`, `/healthz`, `/readyz`, `/.well-known/`, the UI) and lets the server dispatch without a lookup. Repository names stay one namespace across formats, so a permission grant addresses one name.
 - **Formats and settings.** The configuration accepts a format once flint serves it, with the repository types that format supports. A format with settings of its own has a settings object named after it, such as `"maven": {...}`, allowed only on repositories of that format and validated as strictly as the rest of the file.
-- **Public URL.** An optional top-level `publicURL` is the base of every absolute URL flint writes into the metadata it serves (the PyPI JSON API today; npm tarball URLs, Cargo's `config.json`, and NuGet's service index later), so clients that store those URLs, as in lockfiles, see one stable URL however they reached flint. Without it, absolute URLs are built from the request's scheme and host as seen through trusted proxies. Where a protocol allows relative URLs (PyPI pages, Helm indexes), flint writes relative ones. Upstream bytes are stored verbatim and rewritten when served, so changing `publicURL` needs no cache flush.
+- **Public URL.** An optional top-level `publicURL` is the base of every absolute URL flint writes into the metadata it serves (the PyPI JSON API and Cargo's `config.json` today; npm tarball URLs and NuGet's service index later), so clients that store those URLs, as in lockfiles, see one stable URL however they reached flint. Without it, absolute URLs are built from the request's scheme and host as seen through trusted proxies. Where a protocol allows relative URLs (PyPI pages, Helm indexes), flint writes relative ones. Upstream bytes are stored verbatim and rewritten when served, so changing `publicURL` needs no cache flush.
 - **Immutable names.** A published version or file never changes. Path-shaped formats (Maven, generic files) accept an upload of identical content to a published name again without a change, because build tools retry individual file uploads, and refuse different content with `409`. Publish-shaped formats (npm, Cargo, PyPI, NuGet) refuse a duplicate version, as their public registries do (PyPI accepts the very same file again, as PyPI does). Deleting an immutable name leaves a tombstone, and the name is never usable again, not even with identical content; this is PyPI's rule for file names, applied to every format.
 
 ## Spec coverage
@@ -660,6 +697,14 @@ For generic files:
 - The legacy upload API used by `twine upload` and `uv publish`.
 - The JSON API at `/pypi/<name>/json` (per repository, `/pypi/<repo>/pypi/<name>/json`), with `info` from the core metadata of the latest release.
 - Deferred: trusted publishing and PEP 740 attestations. Never: XML-RPC search.
+
+### Cargo
+
+- The sparse registry protocol: `config.json` with `auth-required`, and index files with ETag revalidation.
+- The registry web API's publish, yank, unyank, download, and search (a name match over hosted crates, passed through to the upstream for proxies).
+- Index lines as the Cargo reference specifies them, with `features2` and `v` 2 for the `dep:` and `?` feature syntax, renamed dependencies, `rust_version`, and `pubtime`.
+- Cargo's `Authorization` token and its `login_url` challenge.
+- Not supported: the git index protocol, crate owners (`cargo owner` gets an error naming flint's permission grants), asymmetric tokens, and the `/me` login page until the UI exists.
 
 ## Auth and permissions
 
@@ -701,7 +746,7 @@ For generic files:
 - **Backup** is a built-in v1 command: it writes a consistent metadata snapshot plus every blob not already present in the target directory, so repeated backups are incremental. Backup takes and pins its metadata view with the garbage collector in one step and holds it until it finishes copying, so the sweep's deletion check covers it and every blob its snapshot references is still present when it is copied. [backup.md](backup.md) is the operator's guide; the decisions behind it:
   - **It runs in the server.** Only the live process can pin a view with the garbage collector, so a backup is started through the admin API (`POST /api/v1/backup`, global admin), which `flint backup` drives and waits on. The target is `backup.directory` from the configuration, never a path in the request, so an admin token cannot make the server write elsewhere. One backup runs at a time, and a `LOCK` file in the target keeps out another process.
   - **The target is a content-addressed blob store** (`internal/blob`'s filesystem layout) shared by every backup in it, plus `backups/<id>/` holding the metadata snapshot (`meta.WriteSnapshot` of the pinned view), the list of blobs the backup needs, and `backup.json`. Copies go through blob store uploads, so each is verified against its digest and fsynced before it counts. `backup.json` records the digests of the other two files and is renamed into place, then its directory fsynced, only after everything else is durable, so an interrupted backup never looks complete. Nothing is deleted from the target, not even incomplete backups.
-  - **It copies every blob in the data directory**, not only those it can tell are referenced, so a backup never depends on every format package reporting its references correctly: every blob the view references was committed before the view was taken, so the blob walk finds it, and a blob that disappears during the walk was unreferenced. Each format package also reports the blobs its records reference (`oci.References`, `pypi.References`, `generic.References`), and the backup fails if one is missing.
+  - **It copies every blob in the data directory**, not only those it can tell are referenced, so a backup never depends on every format package reporting its references correctly: every blob the view references was committed before the view was taken, so the blob walk finds it, and a blob that disappears during the walk was unreferenced. Each format package also reports the blobs its records reference (`oci.References`, `pypi.References`, `generic.References`, `cargo.References`), and the backup fails if one is missing.
   - **Restore** (`flint restore`) writes a backup into a new, empty data directory with `meta.Restore`, re-verifying every blob as it copies it, behind a `RESTORE-INCOMPLETE` marker that `flint serve` refuses. The restored store keeps every record's version and continues the log after the backup's sequence number. `flint backup verify` checks a backup the same way without restoring it.
   - **Secrets.** A backup holds the metadata, including password and API token hashes, but not the signing keys: a restored server generates new ones, which only invalidates bearer tokens and signed URLs that live minutes anyway, so backups never contain private key material. The configuration file and the files it names (TLS keys, the bootstrap password, upstream credentials) belong to the deployment and are not backed up either.
 
