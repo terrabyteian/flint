@@ -212,8 +212,8 @@ type Route struct {
 	Client *Client
 	// Recheck makes Read run Expect.Check on a cached copy too, for
 	// content cached without it, such as by a route without the check:
-	// a copy that fails as a mismatch is fetched again, and replaced by
-	// one that passes.
+	// a copy that fails as a mismatch, or is larger than Read's limit,
+	// is fetched again, and replaced by one that passes.
 	Recheck bool
 	// Revalidate, if positive, is the revalidation window of mutable
 	// content instead of the repository's.
@@ -725,10 +725,10 @@ func (pc *PathCache) Read(ctx context.Context, rp *PathRepo, rt *Route, actor st
 			return nil, "", err
 		}
 	}
-	if f != nil {
-		if f.Size > max {
-			return nil, "", tooLarge(rt, max)
-		}
+	if f != nil && f.Size > max && !rt.Recheck {
+		return nil, "", tooLarge(rt, max)
+	}
+	if f != nil && f.Size <= max {
 		b, err := pc.readBlob(ctx, f.Digest, f.Size)
 		if err == nil && rt.Recheck {
 			err = rt.Expect.Check(ctx, bytes.NewReader(b), int64(len(b)))
@@ -740,9 +740,9 @@ func (pc *PathCache) Read(ctx context.Context, rp *PathRepo, rt *Route, actor st
 		if !errors.Is(err, blob.ErrNotFound) && !errors.Is(err, ErrDigestMismatch) {
 			return nil, "", err
 		}
-		// Linked but missing from the store, or failing its check: fetch
-		// it again.
 	}
+	// Not cached, linked but missing from the store, or a rechecked
+	// copy that is too large or fails its check: fetch it.
 	if err := pc.remembered(rp, rt); err != nil {
 		return nil, "", err
 	}

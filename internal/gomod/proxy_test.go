@@ -385,6 +385,28 @@ func TestSumDBProofReuse(t *testing.T) {
 	}
 }
 
+// TestSumDBOversizedTile checks that a cached tile larger than any tile
+// is fetched again when a proof needs it, and replaced by the tile that
+// passes.
+func TestSumDBOversizedTile(t *testing.T) {
+	e := newEnv(t)
+	var ms []*module
+	for i := range 300 {
+		ms = append(ms, newModule(t, fmt.Sprintf("example.com/m%d", i), "v1.0.0"))
+	}
+	e.up.add(ms...)
+	e.db.add(ms...)
+	base := "/go/goproxy/sumdb/sum.example.com"
+	tile, _ := e.db.tile("8/0/000")
+	e.db.set(func(db *sumDB) { db.tiles["8/0/000"] = bytes.Repeat([]byte("<html>"), 2*maxTile) })
+	e.get(base+"/tile/8/0/000", http.StatusOK, "")
+	e.db.set(func(db *sumDB) { clear(db.tiles) })
+	e.get("/go/goproxy/example.com/m5/@v/v1.0.0.zip", http.StatusOK, string(ms[5].zip))
+	e.settle()
+	e.db.set(func(db *sumDB) { db.down = true })
+	e.get(base+"/tile/8/0/000", http.StatusOK, string(tile))
+}
+
 func TestRequests(t *testing.T) {
 	e := newEnv(t)
 	for _, path := range []string{
