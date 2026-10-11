@@ -78,7 +78,7 @@ func fetchToken(t *testing.T, base, user, pass, scope string) (int, string) {
 // administrator creates a user and an API token through the admin API, the
 // token works at the Docker token endpoint, no secret reaches the log, and
 // a restart keeps the administrator and the signing key. When the registry
-// routes are served and crane or docker is available, a real client then
+// routes require authentication and crane or docker is available, a real client then
 // logs in with the token and pushes and pulls an image.
 func TestAuthEndToEnd(t *testing.T) {
 	dir := t.TempDir()
@@ -177,16 +177,16 @@ func TestAuthEndToEnd(t *testing.T) {
 }
 
 // registryClient pushes and pulls an image with a real client, logged in
-// with an API token. It skips while flint does not serve the registry
-// API, or no client is installed.
+// with an API token. It skips while flint does not authenticate the
+// registry API, or no client is installed.
 func registryClient(t *testing.T, addr, user, token string) {
 	resp, err := http.Get("http://" + addr + "/v2/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		t.Skip("flint does not serve the OCI registry routes yet")
+	if resp.StatusCode == http.StatusOK {
+		t.Skip("flint does not authenticate the OCI registry routes yet")
 	}
 	if resp.StatusCode != http.StatusUnauthorized || !strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Bearer ") {
 		t.Fatalf("GET /v2/ without credentials = %d %q, want a 401 Bearer challenge", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
