@@ -913,3 +913,27 @@ func TestVirtualPushAfterOwnership(t *testing.T) {
 	ve.pull("all/library/nginx", bDigest, b, map[string][]byte{layer: base.Blobs[layer], blob.FromBytes(cfg).String(): cfg})
 	ve.pull("all/library/nginx", "multi", index, nil)
 }
+
+// TestVirtualPushRefusedRequest checks that a push through a virtual
+// repository that the push refuses for the request itself, after every
+// reference of the manifest was found held, links nothing into the
+// publishTo member, so it does not come to own the name and the upstream
+// image is still served.
+func TestVirtualPushRefusedRequest(t *testing.T) {
+	ve := newVirtualEnv(t)
+	index, platforms := ve.putUpstreamIndex("library/nginx", "1.27")
+	ve.pull("all/library/nginx", "1.27", index, nil)
+	for _, img := range platforms {
+		ve.pullImage("all/library/nginx", img.Digest, img)
+	}
+	for _, tc := range []struct{ ref, code string }{
+		{"v1+build", codeManifestInvalid},
+		{"v1?tag=v1%2Bbuild", codeManifestInvalid},
+		{blob.FromBytes([]byte("another manifest")).String(), codeDigestInvalid},
+	} {
+		want(t, ve.do("PUT", "/v2/all/library/nginx/manifests/"+tc.ref, index, "Content-Type", mtOCIIndex), http.StatusBadRequest, tc.code)
+		want(t, ve.do("GET", "/v2/local/library/nginx/tags/list", nil), http.StatusNotFound, codeNameUnknown)
+		ve.pull("all/library/nginx", "1.27", index, nil)
+		ve.pullImage("all/library/nginx", platforms[0].Digest, platforms[0])
+	}
+}

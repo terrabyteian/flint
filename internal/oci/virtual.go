@@ -76,8 +76,10 @@ import (
 //     the virtual repository was told exist: they are linked into the
 //     publishTo member, as a cross-repository mount would link them, a
 //     child manifest with what it references, whose blobs a proxy member
-//     holding it fetches first, as a pull would. Nothing is linked unless
-//     everything the manifest references then is.
+//     holding it fetches first, as a pull would. Nothing is linked if the
+//     push is refused for the request or for what the manifest
+//     references; a push that then fails to store the manifest, such as
+//     with the disk full, may leave what was linked.
 //
 // A virtual repository stores nothing of its own; it remembers in memory
 // only which member last served a manifest of each name.
@@ -191,7 +193,7 @@ func (h *Handler) virtualPublish(w http.ResponseWriter, r *http.Request, rn *rep
 	}
 	server.LogAttrs(r.Context(), slog.String("member", mrn.repo))
 	if ep == epManifest && r.Method == http.MethodPut {
-		if err := h.linkFromMembers(r, rn, mrn); err != nil {
+		if err := h.linkFromMembers(r, rn, mrn, arg); err != nil {
 			h.writeError(w, r, err)
 			return
 		}
@@ -200,25 +202,29 @@ func (h *Handler) virtualPublish(w http.ResponseWriter, r *http.Request, rn *rep
 }
 
 // linkFromMembers links into mrn, the publishTo member of virtual
-// repository name rn, what the manifest that r pushes references that mrn
-// does not hold but another member of the virtual repository holds under
-// the name, whether or not a hosted member owns it: blobs, and child
+// repository name rn, what the manifest that r pushes under ref
+// references that mrn does not hold but another member of the virtual
+// repository holds under the name, whether or not a hosted member owns
+// it: blobs, and child
 // manifests, each with what it references in turn. A client that checked
 // for them through the virtual repository was told they exist. The blobs
 // of a child manifest a proxy member holds are fetched into it first, as
-// a pull would; if one cannot be, the push is refused. It links nothing
-// unless the manifest's every reference can then be held, with the size
-// its descriptor gives, so a push that fails leaves no child manifest
-// behind to own the name. It leaves r's body to be read again.
-func (h *Handler) linkFromMembers(r *http.Request, rn, mrn *repoName) error {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxManifestSize+1))
+// a pull would; if one cannot be, the push is refused. It first refuses
+// the request as the push would, and links nothing unless the manifest's
+// every reference can then be held, with the size its descriptor gives,
+// so a push refused for the request or its references leaves no child
+// manifest behind to own the name. One that fails to store the manifest
+// afterwards, such as with the disk full, may. It leaves r's body to be
+// read again.
+func (h *Handler) linkFromMembers(r *http.Request, rn, mrn *repoName, ref string) error {
+	_, body, _, err := readManifestPut(r, ref)
 	if err != nil {
-		return manifestInvalid("reading the manifest: %v", err)
+		return err
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	pm, err := parseManifest(body, r.Header.Get("Content-Type"))
-	if err != nil || len(body) > maxManifestSize {
-		return nil // the push answers it
+	if err != nil {
+		return err
 	}
 	var others []*repoName
 	for _, m := range rn.cfg.virtual.Sources(rn.name, func(string) bool { return false }) {
