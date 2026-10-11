@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/terrabyteian/flint/internal/audit"
+	"github.com/terrabyteian/flint/internal/meta"
 )
 
 // TestAuditHoldsNoSecrets creates users and tokens and changes passwords
@@ -46,7 +49,7 @@ func TestAuditHoldsNoSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"system auth.user.create user root",
+		"(system) auth.user.create user root",
 		"root auth.user.create user alice",
 		"alice auth.token.create token " + tok.ID + " of user alice",
 		"alice auth.user.password user alice",
@@ -94,6 +97,59 @@ func TestAuditHoldsNoSecrets(t *testing.T) {
 	b, _ := json.Marshal(actions)
 	if bytes.Contains(b, []byte("password-")) {
 		t.Error("an origin holds a password")
+	}
+}
+
+// TestAuditBuiltinActorsAreDistinct checks that users named system and
+// anonymous are recorded, and selected by the actor filter, apart from
+// flint's own work and unauthenticated clients.
+func TestAuditBuiltinActorsAreDistinct(t *testing.T) {
+	e := newEnv(t, testConfig)
+	l, err := audit.Open(audit.Options{Store: e.store, Dir: "/data/audit", FS: e.fs, Logger: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	e.addUser("root", "root-password-1", true)
+	for _, name := range []string{"system", "anonymous"} {
+		e.wantStatus(e.api("POST", "/api/v1/users", "root", "root-password-1",
+			`{"name": "`+name+`", "password": "`+name+`-password-1"}`, nil), http.StatusCreated, "create "+name)
+		e.wantStatus(e.api("PUT", "/api/v1/users/"+name+"/password", name, name+"-password-1",
+			`{"password": "`+name+`-password-2"}`, nil), http.StatusNoContent, "change "+name+"'s password")
+	}
+	var b meta.Batch
+	b.Put([]byte("test/anonymous"), []byte("x"))
+	b.SetOrigin(meta.Origin{Actor: e.svc.Actor(httptest.NewRequest("GET", "/", nil)), Action: "test.anonymous"})
+	if _, err := e.store.Commit(context.Background(), &b); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	scan := func(actor string) []string {
+		var out []string
+		err := l.Scan(context.Background(), audit.Filter{Actor: actor}, func(r *audit.Record) bool {
+			out = append(out, r.Actor+" "+r.Action+" "+r.Target)
+			return true
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		actor string
+		want  []string
+	}{
+		{meta.ActorSystem, []string{"(system) auth.user.create user root"}},
+		{meta.ActorAnonymous, []string{"(anonymous) test.anonymous "}},
+		{"system", []string{"system auth.user.password user system"}},
+		{"anonymous", []string{"anonymous auth.user.password user anonymous"}},
+	} {
+		if got := scan(tc.actor); !slices.Equal(got, tc.want) {
+			t.Errorf("actor %q: records %q, want %q", tc.actor, got, tc.want)
+		}
 	}
 }
 

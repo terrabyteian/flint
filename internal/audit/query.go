@@ -23,8 +23,8 @@ type Filter struct {
 	Since, Until time.Time
 	// Actor, if set, selects records whose actor is this principal: a
 	// user name matches the user's changes, made with a password or with
-	// any of the user's API tokens; "system" and "anonymous" match
-	// themselves.
+	// any of the user's API tokens; meta.ActorSystem and
+	// meta.ActorAnonymous match themselves.
 	Actor string
 	// Action, if set, selects records whose action is this action or
 	// starts with it followed by ".": "oci.manifest" selects

@@ -135,7 +135,7 @@ func TestAuditEndToEnd(t *testing.T) {
 	}
 	all := query("limit=1000")
 	for _, want := range []struct{ action, target, actor string }{
-		{"auth.user.create", "user admin", "system"},
+		{"auth.user.create", "user admin", "(system)"},
 		{"auth.user.create", "user ci-bot", "admin"},
 		{"auth.token.create", "token " + tok.ID + " of user ci-bot", "ci-bot"},
 		{"oci.blob.push", "docker-local/app@" + digest(layer), tokenActor},

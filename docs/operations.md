@@ -19,7 +19,7 @@ By default it is kept forever.
 | --- | --- |
 | `seq` | The batch's sequence number in the metadata store. Records are in increasing order, and each batch appears once. |
 | `time` | When the batch was committed, from the server's clock, in UTC. |
-| `actor` | Who made the change: a user name, such as `alice`, for a change made with a password; `alice (token <id>)` for one made with one of the user's API tokens, directly or through a bearer token from the Docker token endpoint; `anonymous` for an unauthenticated client, such as a containerd mirror pulling through a proxy repository; or `system` for flint's own background work, such as expiring abandoned uploads, and for the first administrator created at startup. |
+| `actor` | Who made the change: a user name, such as `alice`, for a change made with a password; `alice (token <id>)` for one made with one of the user's API tokens, directly or through a bearer token from the Docker token endpoint; `(anonymous)` for an unauthenticated client, such as a containerd mirror pulling through a proxy repository; or `(system)` for flint's own background work, such as expiring abandoned uploads, and for the first administrator created at startup. User names never contain parentheses, so a user named `system` or `anonymous` is never confused with these. |
 | `action` | What the change was, such as `oci.manifest.push`; see below. |
 | `target` | What it changed, in a readable form, such as `docker-local/app:v1@sha256:...`, `user alice`, or `token <id> of user alice`. |
 | `keys` | The metadata keys the batch wrote (`"op": "put"`) or deleted (`"op": "delete"`), each as its components, such as `["oci", "tag", "docker-local", "app", "v1"]`. A key that is not UTF-8 is shown in hex as `keyHex`. |
@@ -33,9 +33,9 @@ Actions:
 | `oci.manifest.push` | A manifest pushed, by tag or digest. |
 | `oci.manifest.delete`, `oci.tag.delete` | A manifest deleted by digest with its tags, or a tag deleted. |
 | `oci.upload.start`, `oci.upload.cancel` | An upload session started or cancelled. |
-| `oci.upload.expire`, `oci.upload.forget` | `system`: an abandoned upload session removed. |
+| `oci.upload.expire`, `oci.upload.forget` | `(system)`: an abandoned upload session removed. |
 | `oci.proxy.cache` | A proxy repository cached content for the client that pulled it. |
-| `oci.proxy.pulled`, `oci.proxy.evict` | `system`: a size-limited proxy repository saved its pull times (about once a minute while it is pulled from) or evicted content. |
+| `oci.proxy.pulled`, `oci.proxy.evict` | `(system)`: a size-limited proxy repository saved its pull times (about once a minute while it is pulled from) or evicted content. |
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |
@@ -53,7 +53,7 @@ Both endpoints take the same filters as query parameters, all optional:
 | Parameter | Selects |
 | --- | --- |
 | `since`, `until` | Records committed at or after `since` and before `until`, as RFC 3339 times such as `2026-10-01T00:00:00Z`. |
-| `actor` | Records of one principal: a user name selects the user's changes, made with a password or any of the user's tokens; `alice (token <id>)` selects one token's; `system` and `anonymous` select themselves. |
+| `actor` | Records of one principal: a user name selects the user's changes, made with a password or any of the user's tokens; `alice (token <id>)` selects one token's; `(system)` and `(anonymous)` select themselves. |
 | `action` | Records of one action, or of every action under a prefix: `oci.manifest` selects `oci.manifest.push` and `oci.manifest.delete`, and `auth` every user, group, and token change. |
 | `target` | Records whose target starts with the value, such as `docker-local/app:` or `user alice`. |
 | `after` | Records after this sequence number. |

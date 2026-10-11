@@ -126,7 +126,7 @@ func normalizeGroups(groups []string) ([]string, error) {
 func actorOf(p *Principal) string {
 	switch {
 	case p == nil || p.User == "":
-		return "system"
+		return meta.ActorSystem
 	case p.TokenID != "":
 		return p.User + " (token " + p.TokenID + ")"
 	}

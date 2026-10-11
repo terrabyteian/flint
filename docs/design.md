@@ -280,7 +280,7 @@ func (b *Batch) SetOrigin(o Origin)
 // Origin describes the actor, action, and target behind a batch.
 // It must not contain secrets: it is kept in the audit stream.
 type Origin struct {
-	Actor  string // user or token identity, or "system"
+	Actor  string // user or token identity, "(system)", or "(anonymous)"
 	Action string // e.g. "oci.manifest.push"
 	Target string // affected resources, human-readable, e.g. "repo/name:tag", "pkg/file.whl", "user alice"
 }
@@ -434,7 +434,7 @@ type CatalogAuthorizer interface {
 
 Deletes ask for `delete`, which only admins hold.
 A cross-repository mount asks, with a response writer it discards, whether the caller may pull from the source; if not, it falls back to a normal upload.
-`oci.Options.Actor` names the principal recorded in batch origins for the audit log: `internal/auth` records the principal it admitted in the request's context, and names it as the user, the user and API token, or `anonymous`.
+`oci.Options.Actor` names the principal recorded in batch origins for the audit log: `internal/auth` records the principal it admitted in the request's context, and names it as the user, the user and API token, or `(anonymous)`.
 
 ## Package layout
 

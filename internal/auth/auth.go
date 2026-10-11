@@ -511,11 +511,11 @@ type principalKey struct{}
 
 // Actor names the principal Authorize admitted r as, for the origin of the
 // metadata batches the request writes: the user, the user and API token,
-// or "anonymous".
+// or meta.ActorAnonymous.
 func (s *Service) Actor(r *http.Request) string {
 	p := PrincipalOf(r)
 	if p == nil || p.User == "" {
-		return "anonymous"
+		return meta.ActorAnonymous
 	}
 	return actorOf(p)
 }
