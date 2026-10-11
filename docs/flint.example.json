@@ -43,6 +43,29 @@
         "url": "https://ghcr.io",
         "sizeLimit": "200GiB"
       }
+    },
+    {
+      "name": "pypi-local",
+      "format": "pypi",
+      "type": "hosted"
+    },
+    {
+      "name": "pypi",
+      "format": "pypi",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://pypi.org/simple/",
+        "revalidateAfter": "10m"
+      }
+    },
+    {
+      "name": "pypi-all",
+      "format": "pypi",
+      "type": "virtual",
+      "anonymousPull": true,
+      "virtual": {
+        "members": ["pypi-local", "pypi"]
+      }
     }
   ],
   "proxyCache": {
@@ -58,12 +81,12 @@
     },
     "permissions": [
       {
-        "repositories": ["docker-local", "releases"],
+        "repositories": ["docker-local", "releases", "pypi-local"],
         "role": "write",
         "groups": ["ci"]
       },
       {
-        "repositories": ["dockerhub", "ghcr"],
+        "repositories": ["dockerhub", "ghcr", "pypi"],
         "role": "read",
         "groups": ["ci"]
       },

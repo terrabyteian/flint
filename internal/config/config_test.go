@@ -44,12 +44,19 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 4 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 7 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
 		p.PasswordFile != "/etc/flint/upstream/dockerhub/password" || c.Repositories[3].Proxy.SizeLimit.Bytes != 200<<30 {
 		t.Errorf("unexpected proxy settings: %+v", c.Repositories[2:])
+	}
+	if p := c.Repositories[5].Proxy; c.Repositories[4].Format != FormatPyPI || p == nil || PyPIIndexURL(p.URL) != "https://pypi.org/simple/" ||
+		p.RevalidateAfter.Duration != 10*time.Minute {
+		t.Errorf("unexpected PyPI repositories: %+v", c.Repositories[4:6])
+	}
+	if v := c.Repositories[6].Virtual; v == nil || !v.Protected() || len(v.Members) != 2 || !c.Repositories[6].AnonymousPull {
+		t.Errorf("unexpected virtual repository: %+v", c.Repositories[6])
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)

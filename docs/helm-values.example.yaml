@@ -29,9 +29,25 @@ config:
       anonymousPull: true
       proxy:
         url: https://registry-1.docker.io
+    # Python packages: publish to pypi-local, install from pypi-all, which
+    # merges it with a pypi.org cache (docs/pypi.md).
+    - name: pypi-local
+      format: pypi
+      type: hosted
+    - name: pypi
+      format: pypi
+      type: proxy
+      proxy:
+        url: https://pypi.org/simple/
+    - name: pypi-all
+      format: pypi
+      type: virtual
+      anonymousPull: true
+      virtual:
+        members: [pypi-local, pypi]
   auth:
     permissions:
-      - repositories: ["docker-local", "releases"]
+      - repositories: ["docker-local", "releases", "pypi-local"]
         role: write
         groups: ["ci"]
 

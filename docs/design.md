@@ -170,7 +170,12 @@ Illustrative v1 key space:
 | `oci\0upload\0<id>` | upload session (repository name, start time) | `internal/oci` |
 | `oci\0pulled\0blob\0<repo>\0<name>\0<digest>` | last pull of a blob cached by a size-limited proxy repository | `internal/oci` |
 | `oci\0pulled\0manifest\0<repo>\0<name>\0<digest>` | last pull of a manifest cached by a size-limited proxy repository | `internal/oci` |
-| `pypi\0file\0<repo>\0<filename>` | file record, kept as a tombstone after delete | `internal/pypi` |
+| `pypi\0project\0<repo>\0<project>` | hosted project (name as first uploaded); kept forever, so the repository keeps owning the name | `internal/pypi` |
+| `pypi\0file\0<repo>\0<filename>` | hosted file record (digests, metadata blob, yank state), kept as a tombstone after delete; or a file a proxy repository cached | `internal/pypi` |
+| `pypi\0index\0<repo>\0<project>\0<filename>` | empty; indexes a hosted project's live files | `internal/pypi` |
+| `pypi\0metadata\0<repo>\0<filename>` | core-metadata file a proxy repository cached | `internal/pypi` |
+| `pypi\0page\0<repo>\0<project>` | project page a proxy repository cached: page blob digest, upstream ETag | `internal/pypi` |
+| `pypi\0pulled\0file\0<repo>\0<filename>` | last pull of a file cached by a size-limited proxy repository (also `...\0metadata\0...`) | `internal/pypi` |
 | `gc\0epoch` | GC epoch counter, incremented when a sweep starts | `internal/gc` |
 | `gc\0doomed\0<digest>` | doomed set of the running sweep; cleared when the sweep ends | `internal/gc` |
 | `auth\0user\0<username>` | user record | `internal/auth` |
@@ -447,13 +452,14 @@ Packages are created when there is code for them; this is the target layout, not
 | `internal/blob` | Digest type, blob store interface, filesystem implementation (S3 later). |
 | `internal/config` | JSON config loading and validation. |
 | `internal/server` | HTTP server, routing, TLS with hot reload, trusted-proxy handling, health endpoints. |
-| `internal/repo` | Repository model (hosted, proxy, virtual), config-declared and runtime-created repositories. |
+| `internal/repo` | Repository model (hosted, proxy, virtual), config-declared and runtime-created repositories. M3 adds the virtual repository rules: member order and dependency-confusion protection, for every format. |
 | `internal/auth` | Users, API tokens, Docker bearer-token service, OIDC, permission checks. |
 | `internal/oci` | OCI distribution API: hosted and proxy repositories, referrers. |
 | `internal/pypi` | PyPI simple API, JSON API, uploads: hosted, proxy, and virtual repositories. |
-| `internal/upstream` | Shared upstream client: credentials, revalidation TTLs, offline fallback. |
+| `internal/upstream` | Shared upstream client and caching-proxy pieces: credentials, retries, offline fallback, revalidation windows, the shared fetcher, free-space watcher, size-limit tracker, and proxy metrics. |
 | `internal/metrics` | Prometheus text exposition. |
-| `internal/gc` | Online mark-and-sweep garbage collection. |
+| `internal/gc` | Online mark-and-sweep garbage collection (M4). Since M3 it holds the GC keys and the precondition every link batch carries, which every format shares. |
+| `internal/blake2b` | BLAKE2b, hand-written, for the BLAKE2b-256 digests PyPI clients send and PyPI's JSON API reports. |
 | `internal/backup` | Consistent, incremental backup to a directory; verify and restore. |
 | `internal/flock` | Exclusive file locks on the data and backup directories. |
 | `internal/ui` | Server-rendered UI templates and static assets. |
@@ -466,13 +472,31 @@ Everything is under `internal/` until a stable public Go API is a deliberate dec
 v1 has hosted and caching-proxy repositories for both formats, plus virtual repositories for PyPI.
 Each repository has a name, and clients address it by a path prefix: an image reference such as `host/<repo>/library/nginx` for OCI, and a per-repository index URL for PyPI.
 For OCI, the first path component of a repository name is the configured repository and the rest, at least one component, is an image name below it: `docker-local/team/app` is image `team/app` in repository `docker-local`, served at `/v2/docker-local/team/app/...`.
-The PyPI URL layout is settled with its milestone.
+Repository names are unique across formats, so permissions and metrics name a repository unambiguously.
+
+For PyPI, each repository is served under `/pypi/<repo>/`, following the layout of pypi.org, whose index is at `/simple/` and JSON API at `/pypi/<name>/json`:
+
+| URL | Serves |
+| --- | --- |
+| `/pypi/<repo>/simple/` | root index (PEP 503 HTML or PEP 691 JSON) |
+| `/pypi/<repo>/simple/<project>/` | project page; other spellings of the name redirect to the PEP 503 normalized one |
+| `/pypi/<repo>/files/<project>/<filename>` | distribution file |
+| `/pypi/<repo>/files/<project>/<filename>.metadata` | core-metadata file (PEP 658, PEP 714) |
+| `/pypi/<repo>/legacy/` | upload, with the legacy API of twine and uv publish; hosted repositories only |
+| `/pypi/<repo>/pypi/<project>/json`, `/pypi/<repo>/pypi/<project>/<version>/json` | JSON API |
+
+Pages link files relatively (`../../files/<project>/<filename>`), so they do not depend on the host name a client used and can be cached as they are; only the JSON API, whose URLs are absolute as on PyPI, uses the request's scheme and host.
+Every format lives under its own path prefix (`/v2/`, `/pypi/`), so the formats that follow PyPI (npm, Maven, Go modules, Cargo) get their own prefixes on the same server.
+The admin API's PyPI endpoints, which yank, unyank, and delete, are under `/api/v1/pypi/<repo>/`.
 
 ### Hosted
 
 Clients push and pull first-party artifacts.
 Docker tags are mutable by default; a per-repository immutable-tags setting makes a pushed tag permanent: it can be neither moved to another manifest nor deleted, and a manifest it points to cannot be deleted. Turning the setting off is the escape hatch for removing an image that must not stay.
 PyPI filenames are never reusable, even after the file is deleted: a deleted file leaves a tombstone, because a re-uploaded file with different content under the same name breaks hash-pinned installs.
+The upload batch requires the file record to be absent, so of concurrent uploads under one name exactly one wins; uploading the very same file again succeeds without a change, as on PyPI, so retries are harmless.
+A tombstone keeps only the project, version, and deletion time, no digest, so garbage collection reclaims the file's bytes.
+Hosted PyPI uploads verify the sha256, MD5, and BLAKE2b-256 digests the client sends, and store the file's core metadata (a wheel's `METADATA`, a source distribution's `PKG-INFO`) as its own blob, served as the PEP 658 metadata file where it is reliable.
 Deletes are admin-only, hide the artifact immediately, and leave space reclamation to garbage collection.
 
 Hosted repositories **never auto-delete untagged manifests.**
@@ -499,7 +523,7 @@ OCI virtual repositories are deferred; the hosted-plus-proxy pattern covers v1 n
 
 How the OCI proxy meets these rules (M2):
 
-- **Shared upstream client.** `internal/upstream` holds what PyPI proxies will reuse: the registry token handshake (anonymous or with credentials read from a file at each authentication, never logged), retries with backoff for transient failures, and an offline mark: after a request fails for good, the upstream counts as offline for 30 seconds, during which lookups that have a cached copy serve it without asking. It also holds the fetcher, the free-space monitor, and a group that collapses concurrent identical lookups, so a stale tag pulled by many clients at once costs one revalidation.
+- **Shared upstream client.** `internal/upstream` holds what every format's proxies share: the registry token handshake (anonymous or with credentials read from a file at each authentication, never logged), retries with backoff for transient failures, and an offline mark: after a request fails for good, the upstream counts as offline for 30 seconds, during which lookups that have a cached copy serve it without asking. It also holds the fetcher, the free-space monitor, and a group that collapses concurrent identical lookups, so a stale tag pulled by many clients at once costs one revalidation.
 - **Same storage as hosted.** Cached content is stored in the one blob store and linked to the proxy repository with the same `oci\0blob`, `oci\0manifest`, `oci\0tag`, and `oci\0referrer` records hosted repositories use, under the same garbage-collection precondition, so garbage collection marks cached content like any other. A blob already stored for another repository is linked only after the upstream confirms with `HEAD` that it has the blob under the requested name, since a digest is not a secret.
 - **Tags.** The revalidation window is per repository (`revalidateAfter`, default 5 minutes). When the upstream last confirmed a tag is kept in memory only, so after a restart each tag is revalidated on its first pull. A tag the upstream cannot be reached to confirm (network errors, timeouts, `5xx`, `429`) keeps being served from the cache; a tag the upstream answers is not found or denied is answered `404`, even if cached, while a refusal of flint's own credentials or an unusable authentication challenge counts as the upstream being unreachable. Tag listings and referrers come from the upstream, kept in memory for the window, with the cached tags and referrers as the fallback when the upstream cannot be reached; a tag listing the upstream answers is not found or denied is answered `404`, and an upstream without the referrers API is answered from the cached referrers.
 - **Fetching.** A blob that is not cached is fetched once however many clients ask for it at the same time: the fetch writes it to a blob store upload, and every client streams the upload's staged bytes as they arrive (`blob.StagedOpener`), at its own pace. The fetch runs independently of the requests, so a client that disconnects does not cancel it, and stalls are bounded by an idle timeout. The upload verifies the digest at commit, and clients receive the final byte only after that, so no client gets the whole of a blob that fails verification and it never enters the cache. Manifests are verified before they are served. Content passed through without caching is verified the same way while it streams.
@@ -507,10 +531,25 @@ How the OCI proxy meets these rules (M2):
 - **Size limit.** With `sizeLimit`, the repository's cached items (each blob link and manifest record, with its size) and their last-pull times are held in memory. Pull times are saved in periodic batches (`oci\0pulled\0...`, every minute), never one metadata write per pull. Over the limit, the least recently pulled items are evicted by deleting their records (a manifest's tags and referrers entry with it), each batch requiring the records unchanged so a concurrent re-cache is not lost. As for any delete, garbage collection reclaims the bytes later. Content larger than the limit is passed through.
 - **Read-only.** Proxy repositories refuse pushes and deletes. Pulls use the same permission model as hosted repositories; with anonymous pull, a client pulls without a token, which is how containerd mirrors reach flint. containerd's `ns` query parameter is ignored: the repository in the path decides the upstream.
 
-### Virtual (PyPI only in v1)
+How the PyPI proxy meets the same rules (M3), with the same shared pieces:
 
-A PyPI virtual repository serves one merged index over an ordered list of hosted and proxy repositories, so `pip` and `uv` need a single index URL.
-Dependency-confusion protection is on by default: once a hosted member repository owns a package name, upstream versions of that name are never served through the virtual repository.
+- **Project pages are the mutable listings.** A page is fetched from the configured simple index URL, asking for PEP 691 JSON and reading PEP 503 HTML too, converted to flint's own form with the upstream file URLs kept, and stored as a blob that a `pypi\0page` record names, with the upstream's ETag. It is served for the revalidation window after the upstream last confirmed it (kept in memory, as for OCI tags), then revalidated with `If-None-Match`, so an unchanged page costs a `304`. A page the upstream cannot be reached to confirm is served from the cache; a project the upstream answers is not found or denied is answered `404`. A page that cannot be stored, such as under disk pressure, is served but not marked confirmed, so the next request asks again rather than serving the older cached page for a window. Decoded pages are kept in a small in-memory cache keyed by their digest, which never goes stale.
+- **Files are digest-addressed content.** The page names each file's sha256 digest, which is the blob store's digest, so a file is fetched once through the shared fetcher from wherever the page links (often another host, which never gets the upstream credentials), verified at commit, cached forever, and linked with a `pypi\0file` record under the GC precondition. A blob already stored for another repository is linked without a fetch, since the upstream page vouches for the digest. A file whose entry has no sha256 digest cannot be verified and is passed through without being cached. Core-metadata files are fetched, verified against the page's metadata digest, and cached the same way.
+- **Disk pressure and size limits** use the shared free-space watcher and size-limit tracker; files and metadata files count against a size limit, pages do not.
+
+### Virtual
+
+A virtual repository serves one merged index over an ordered list of hosted and proxy repositories of its format, so `pip` and `uv` need a single index URL.
+v1 has virtual repositories for PyPI only; OCI virtual repositories are deferred, and the formats that follow PyPI build on the same model.
+Dependency-confusion protection is on by default: once a hosted member owns a package name, upstream versions of that name are never served through the virtual repository.
+
+The rules are format-agnostic and live in `internal/repo`: given the members in order and whether each hosted member owns a name, it returns the members that may serve the name, which with protection are only the hosted ones once any owns it, so the proxies are never even asked.
+The format package decides what owning means and how members merge. For PyPI:
+
+- A hosted repository owns a project from the first upload of one of its files; the `pypi\0project` record is kept forever, so deleting every file does not hand the name back to the upstream.
+- A project page merges the pages of the members that may serve it: where several have a file of the same name, the first member's is served, and the virtual repository's file URLs resolve to that member. The JSON API merges the same way.
+- A member that fails (an unreachable upstream with the project uncached) is left out with a warning, so one upstream outage does not take the index down; the request fails only if no member could answer.
+- Pulling needs `read` on the virtual repository itself; members' permissions are not consulted. Uploads are refused, naming the hosted members.
 
 ## Spec coverage
 
@@ -530,7 +569,7 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - PEP 592 yanking.
 - PEP 700 fields (versions, file sizes, upload times).
 - The legacy upload API used by `twine upload` and `uv publish`.
-- The JSON API at `/pypi/<name>/json`.
+- The JSON API at `/pypi/<name>/json` (per repository, `/pypi/<repo>/pypi/<name>/json`), with `info` from the core metadata of the latest release.
 - Deferred: trusted publishing and PEP 740 attestations. Never: XML-RPC search.
 
 ## Auth and permissions
@@ -538,7 +577,7 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 - **Identities.** Local users with passwords and groups, and OIDC login, in v1. LDAP is deferred. Passwords are hashed with PBKDF2-HMAC-SHA256 (`crypto/pbkdf2`) at a high iteration count, since bcrypt and Argon2 live outside the standard library.
 - **API tokens.** Random, high-entropy secrets, shown once and stored only as a SHA-256 hash. Tokens can be given an expiry and carry a subset of their owner's permissions, never more: on each use the owner's current role is capped by the token's scopes.
 - **Docker clients.** A built-in bearer-token service implements the Docker token authentication flow, issuing short-lived JWTs scoped to repositories and actions (pull, push, delete). The JWTs are hand-written and signed with an Ed25519 key generated on first start and kept in the data directory. Each registry request also checks the subject's current permissions, so deleting a user or revoking a token takes effect before the JWT expires.
-- **PyPI clients.** HTTP basic auth with the `__token__` username convention and an API token as the password.
+- **PyPI clients.** HTTP basic auth with the `__token__` username convention and an API token as the password, or a user name and its password or token. `internal/pypi` consumes it through `Permit(r, repo, actions...)`, which `internal/auth` implements: it answers as an HTTP status, and the PyPI handler writes the response with a `Basic` challenge.
 - **Other package clients.** An API token is also accepted as `Authorization: Bearer <token>` (told apart from the token service's JWTs by its `flint_` prefix), as `Authorization: <token>` with no scheme, and in `X-NuGet-ApiKey`. Each route family challenges in its clients' style: Docker `Bearer` for `/v2/`, `Basic realm="flint"`, Cargo's `login_url`, or a plain `401`. A client's login command can mint an owned, named API token that expires after `auth.loginTokenTTL`. Clients that send no credentials for downloads get signed URLs: an HMAC-SHA256 over the path, an expiry, and the requesting principal, valid until the expiry and only while that principal may still read the repository. Reading through a virtual repository needs `read` on it only; publishing through it needs `write` on its `publishTo` member.
 - **Permissions.** Per-repository roles (`read` < `write` < `delete` < `admin`) are granted to users or groups. Grants can target a pattern such as `team-a-*`. One global `admin` role administers everything. Anonymous pull is a per-repository setting, off by default.
 - **First administrator.** Created at startup from a password file named in the configuration when no administrator exists, so Kubernetes can mount it from a Secret.
