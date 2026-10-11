@@ -93,6 +93,11 @@ Repositories and permission grants declared here are read-only through the API.
   "backup": {
     "directory": "/var/backups/flint"
   },
+  "audit": {
+    "retention": {
+      "maxAge": "17520h"
+    }
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",
@@ -139,6 +144,8 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `auth.loginTokenTTL` | duration string | `"2160h"` | How long an API token minted by a package client's login command stays valid (90 days by default); see [authentication](auth.md#tokens-from-client-login-commands). Must be positive. |
 | `backup.directory` | string | none | Absolute path of the [backup](backup.md) directory, outside the data directory and not containing it. Without it, backups are disabled. |
 | `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
+| `audit.retention.maxAge` | duration string | none | Delete [audit log](operations.md#retention) records once they are older than this, such as `"8760h"`, a file at a time, within about half of this after they pass it. Without it, records are kept forever. |
+| `audit.retention.maxSize` | string or number | none | Delete the oldest audit log records, a file at a time, while the audit log is larger than this size, such as `"10GiB"`, keeping it within about a quarter of this of the limit. Without it, there is no limit. |
 
 Durations are Go duration strings: a number and a unit, such as `"30s"`, `"2m"`, or `"1m30s"`.
 Sizes are a number of bytes, or a number and a unit: `kB`, `MB`, `GB`, `TB`, and `PB` count in powers of 1000, and `KiB`, `MiB`, `GiB`, `TiB`, and `PiB` in powers of 1024, with or without the final `B` (`Gi`), such as `"500MiB"` or `"1.5TB"`.
@@ -282,11 +289,11 @@ These authenticate themselves, as [authentication](auth.md) describes:
 | Endpoint | Meaning |
 | --- | --- |
 | `GET, POST /auth/token` | The Docker token endpoint: issues short-lived bearer tokens for registry requests. |
-| `/api/v1/...` | The admin API: users, groups, API tokens, [backups](backup.md), and yanking and deleting PyPI files. |
+| `/api/v1/...` | The admin API: users, groups, API tokens, [backups](backup.md), the [audit log](operations.md#audit-log), and yanking and deleting PyPI files. |
 
 ## Signals and shutdown
 
-On `SIGTERM` or `SIGINT`, flint fails readiness, stops accepting connections, and waits up to `shutdownTimeout` for in-flight requests, then closes the metadata store and exits 0.
+On `SIGTERM` or `SIGINT`, flint fails readiness, stops accepting connections, and waits up to `shutdownTimeout` for in-flight requests, then writes the audit log's last records, closes the metadata store, and exits 0.
 A second signal during shutdown exits at once.
 In Kubernetes, keep `terminationGracePeriodSeconds` longer than `shutdownTimeout`.
 
@@ -300,7 +307,7 @@ Requests to PyPI repositories carry it too, with the route `pypi.index`, `pypi.p
 
 ## Metrics
 
-Besides the HTTP, metadata store, Go runtime, and [backup](backup.md#metrics) metrics, the OCI API and PyPI repositories export the metrics below. The `flint_proxy_*` metrics cover proxy repositories of both formats.
+Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime, and [backup](backup.md#metrics) metrics, the OCI API and PyPI repositories export the metrics below. The `flint_proxy_*` metrics cover proxy repositories of both formats.
 
 | Metric | Meaning |
 | --- | --- |

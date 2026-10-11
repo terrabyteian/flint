@@ -473,7 +473,7 @@ func clientActor(r *http.Request) string {
 	if ip := server.Info(r.Context()).ClientIP; ip.IsValid() {
 		return "client " + ip.String()
 	}
-	return "anonymous"
+	return meta.ActorAnonymous
 }
 
 func (h *Handler) origin(r *http.Request, action, target string) meta.Origin {

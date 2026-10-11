@@ -397,7 +397,7 @@ func TestBootstrap(t *testing.T) {
 	e.store.ReadLog(ctx, 0, func(en meta.Entry) error {
 		if en.Origin.Action == "auth.user.create" {
 			found = true
-			if en.Origin.Actor != "system" || en.Origin.Target != "user admin" {
+			if en.Origin.Actor != meta.ActorSystem || en.Origin.Target != "user admin" {
 				t.Errorf("origin %+v", en.Origin)
 			}
 		}

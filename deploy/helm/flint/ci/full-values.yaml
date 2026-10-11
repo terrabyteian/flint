@@ -58,6 +58,10 @@ config:
         dependencyConfusionProtection: true
   proxyCache:
     minFreeSpace: 20GiB
+  audit:
+    retention:
+      maxAge: 8760h
+      maxSize: 10GiB
   auth:
     permissions:
       - repositories: ["docker-local", "releases", "pypi-local"]

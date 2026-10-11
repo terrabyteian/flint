@@ -37,7 +37,7 @@ func (h *Handler) ExpireUploads(ctx context.Context, maxAge time.Duration) error
 		for _, k := range chunk {
 			b.Delete(k)
 		}
-		b.SetOrigin(meta.Origin{Actor: "system", Action: "oci.upload.expire",
+		b.SetOrigin(meta.Origin{Actor: meta.ActorSystem, Action: "oci.upload.expire",
 			Target: "upload sessions started before " + cutoff.UTC().Format(time.RFC3339)})
 		if err := h.commit(ctx, &b); err != nil {
 			return err

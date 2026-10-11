@@ -3,7 +3,7 @@
 flint is a self-hosted artifact registry, built from scratch.
 It serves container images and OCI artifacts, and Python packages, from hosted repositories and caching proxies of upstream registries such as Docker Hub, ghcr.io, and PyPI.
 
-> **Status: pre-alpha.** `flint serve` serves hosted OCI repositories (the OCI Distribution Spec v1.1, checked against the official conformance suite), caching proxies of upstream registries such as Docker Hub and ghcr.io that also work as [containerd mirrors](docs/containerd.md), [classic Helm chart repositories](docs/helm-repository.md) over charts pushed with `helm push`, [PyPI repositories](docs/pypi.md) (hosted, caching proxies of indexes such as pypi.org, and virtual indexes merging them) for pip, uv, and twine, local users and API tokens, the Docker token service, an [admin API](docs/auth.md), and incremental [backups](docs/backup.md) with restore.
+> **Status: pre-alpha.** `flint serve` serves hosted OCI repositories (the OCI Distribution Spec v1.1, checked against the official conformance suite), caching proxies of upstream registries such as Docker Hub and ghcr.io that also work as [containerd mirrors](docs/containerd.md), [classic Helm chart repositories](docs/helm-repository.md) over charts pushed with `helm push`, [PyPI repositories](docs/pypi.md) (hosted, caching proxies of indexes such as pypi.org, and virtual indexes merging them) for pip, uv, and twine, local users and API tokens, the Docker token service, an [admin API](docs/auth.md), incremental [backups](docs/backup.md) with restore, and an [audit log](docs/operations.md#audit-log) of every change.
 > See the [roadmap](docs/design.md#roadmap) for what comes next.
 
 ## Goals
@@ -33,7 +33,7 @@ echo '{"dataDir": "/tmp/flint-data"}' > /tmp/flint.json
 ./flint serve -config /tmp/flint.json    # plain HTTP on :5000
 ```
 
-[docs/configuration.md](docs/configuration.md) describes the configuration file.
+[docs/configuration.md](docs/configuration.md) describes the configuration file, and [docs/operations.md](docs/operations.md) running flint, including its audit log.
 
 Releases publish a multi-arch `FROM scratch` image to `ghcr.io/terrabyteian/flint`, a Helm chart to `oci://ghcr.io/terrabyteian/charts/flint`, and static binaries, signed with cosign; see [installing with Helm](docs/helm.md), and [releasing](docs/releasing.md) for how to cut and verify a release.
 

@@ -195,6 +195,8 @@ Request bodies are strict JSON: unknown fields are errors.
 | `PUT, DELETE /api/v1/pypi/{repository}/projects/{project}/releases/{version}/yank` | `delete` role on the repository | Yank or unyank a release of a hosted PyPI repository; see [PyPI](pypi.md#yanking-and-deleting). |
 | `DELETE /api/v1/pypi/{repository}/projects/{project}/releases/{version}` | `delete` role on the repository | Delete a release's files. |
 | `DELETE /api/v1/pypi/{repository}/projects/{project}/files/{filename}` | `delete` role on the repository | Delete one file. |
+| `GET /api/v1/audit` | admin | Query the [audit log](operations.md#audit-log). |
+| `GET /api/v1/audit/export` | admin | Export the audit log as JSON lines. |
 
 "admin" means the global admin role: an administrator authenticated with a password, or with a token created with `"admin": true`.
 Creating a token, creating or updating a user or its groups, and setting a password need a password, even for a token created with `"admin": true`, so a leaked token cannot mint longer-lived tokens or take over its owner's or anyone else's account.
