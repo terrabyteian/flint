@@ -111,7 +111,13 @@ type upload struct {
 // serveUpload serves POST /pypi/<repo>/legacy/, the legacy upload API
 // that twine and uv publish use: a multipart form with the file in the
 // "content" part and its metadata in the other fields.
+//
+// An upload to a virtual repository with publishTo goes to that hosted
+// member, and needs the permissions an upload to it directly needs.
 func (h *Handler) serveUpload(w http.ResponseWriter, r *http.Request, rp *repository) {
+	if rp.typ == config.TypeVirtual && rp.virtual.PublishTo != "" {
+		rp = h.repos[rp.virtual.PublishTo]
+	}
 	actions := []string{ActionPull}
 	if rp.typ == config.TypeHosted {
 		actions = append(actions, ActionPush)

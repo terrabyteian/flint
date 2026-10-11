@@ -20,6 +20,7 @@ Repositories and permission grants declared here are read-only through the API.
 {
   "listen": ":8443",
   "dataDir": "/var/lib/flint",
+  "publicURL": "https://flint.example.com",
   "tls": {
     "certFile": "/etc/flint/tls/tls.crt",
     "keyFile": "/etc/flint/tls/tls.key"
@@ -83,7 +84,11 @@ Repositories and permission grants declared here are read-only through the API.
       "type": "virtual",
       "anonymousPull": true,
       "virtual": {
-        "members": ["pypi-local", "pypi"]
+        "members": [
+          "pypi-local",
+          {"name": "pypi", "exclude": ["acme-*"]}
+        ],
+        "publishTo": "pypi-local"
       }
     }
   ],

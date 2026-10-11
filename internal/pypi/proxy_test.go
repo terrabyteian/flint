@@ -586,6 +586,96 @@ func TestVirtualMemberFailure(t *testing.T) {
 	}
 }
 
+// TestVirtualFilters checks that each member is consulted only for the
+// names its filters admit, compared normalized, so an upstream package
+// under an internal prefix is never served, and that a hosted member the
+// filters leave out does not own a name.
+func TestVirtualFilters(t *testing.T) {
+	e := newEnv(t)
+	e.up.add("acme-new", upFile{dist: wheel("acme-new", "9.9", nil)})
+	pub := wheel("numpy", "2.0", nil)
+	e.up.add("numpy", upFile{dist: pub})
+
+	// No member admits acme-new but the hosted ones, which lack it: the
+	// upstream's package is never served, nor even asked for.
+	e.up.took()
+	e.get("/pypi/filtered/simple/acme-new/", http.StatusNotFound)
+	e.get("/pypi/filtered/simple/Acme.New/", http.StatusMovedPermanently)
+	if got := e.up.took(); len(got) != 0 {
+		t.Errorf("an excluded name was looked up upstream: %q", got)
+	}
+	// Once published to the member that admits it, it is served.
+	own := wheel("acme-new", "1.0", nil)
+	e.mustUpload("local", own)
+	if got := e.page("filtered", "acme-new").filenames(); !slices.Equal(got, []string{own.filename}) {
+		t.Errorf("acme-new: %q", got)
+	}
+
+	// local does not admit numpy, so its copy is neither served nor
+	// owns the name: the upstream's numpy comes through.
+	e.mustUpload("local", wheel("numpy", "0.1", nil))
+	if got := e.page("filtered", "numpy").filenames(); !slices.Equal(got, []string{pub.filename}) {
+		t.Errorf("numpy: %q", got)
+	}
+	// team admits it: once team owns numpy, the upstream's is not served.
+	mine := wheel("numpy", "0.2", nil)
+	e.mustUpload("team", mine)
+	if got := e.page("filtered", "numpy").filenames(); !slices.Equal(got, []string{mine.filename}) {
+		t.Errorf("numpy owned by team: %q", got)
+	}
+	e.get("/pypi/filtered/files/numpy/"+pub.filename, http.StatusNotFound)
+
+	// The root index lists what the members' filters admit.
+	e.mustUpload("local", wheel("other", "1.0", nil))
+	w := e.get("/pypi/filtered/simple/", http.StatusOK, "Accept", mtSimpleJSON)
+	if !strings.Contains(w.Body.String(), `{"name":"acme-new"}`) || strings.Contains(w.Body.String(), `{"name":"other"}`) {
+		t.Errorf("filtered root index %s", w.Body)
+	}
+}
+
+// TestVirtualPublishTo checks that an upload to a virtual repository with
+// publishTo goes to that hosted member, authorized as an upload to it.
+func TestVirtualPublishTo(t *testing.T) {
+	e := newEnv(t)
+	d := wheel("pkg", "1.0", nil)
+	e.auth.reset()
+	if w := e.upload("filtered", d, d.form(), false); w.Code != http.StatusOK {
+		t.Fatalf("upload through the virtual repository: %d %s", w.Code, w.Body)
+	}
+	if got := e.auth.reset(); !slices.Equal(got, []string{"team:pull,push"}) {
+		t.Errorf("upload authorization %q, want an upload to team", got)
+	}
+	if got := e.page("team", "pkg").filenames(); !slices.Equal(got, []string{d.filename}) {
+		t.Errorf("team after the upload: %q", got)
+	}
+	e.get("/pypi/local/simple/pkg/", http.StatusNotFound)
+	if got := e.page("filtered", "pkg").filenames(); !slices.Equal(got, []string{d.filename}) {
+		t.Errorf("the virtual repository after the upload: %q", got)
+	}
+	// A retry is harmless, and a different file under the name is not.
+	if w := e.upload("filtered", d, d.form(), false); w.Code != http.StatusOK {
+		t.Errorf("retried upload: %d %s", w.Code, w.Body)
+	}
+	e.auth.status = http.StatusForbidden
+	if w := e.upload("filtered", d, d.form(), false); w.Code != http.StatusForbidden {
+		t.Errorf("upload without write on team: %d %s", w.Code, w.Body)
+	}
+}
+
+// TestVirtualSkipCounted checks that a member skipped because it failed
+// is counted.
+func TestVirtualSkipCounted(t *testing.T) {
+	e := newEnv(t)
+	e.mustUpload("local", wheel("pkg", "1.0", nil))
+	e.up.set(func(x *index) { x.down = true })
+	e.page("open", "pkg")
+	var b bytes.Buffer
+	e.reg.WriteTo(&b)
+	if !strings.Contains(b.String(), `flint_virtual_member_skips_total{repository="open",member="remote"} 1`) {
+		t.Errorf("the skipped member is not counted:\n%s", b.String())
+	}
+}
+
 func TestProxyAuthorization(t *testing.T) {
 	e := newEnv(t)
 	e.up.add("pkg", upFile{dist: wheel("pkg", "1.0", nil)})

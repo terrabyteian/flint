@@ -70,6 +70,7 @@ func (a *testAuth) reset() []string {
 //	small     proxy of up with a size limit
 //	all       virtual: local, remote
 //	open      virtual: local, remote, without dependency-confusion protection, with anonymous pull
+//	filtered  virtual: local for acme-* only, team, remote except acme-*; publishes to team
 type env struct {
 	t     *testing.T
 	fs    *fsys.Mem
@@ -117,9 +118,12 @@ func (e *env) restart() {
 		{Name: "small", Format: config.FormatPyPI, Type: config.TypeProxy,
 			Proxy: &config.Proxy{URL: e.up.URL + "/simple", RevalidateAfter: config.Duration{Duration: testWindow},
 				SizeLimit: config.ByteSize{Bytes: 2500}, AllowHosts: e.up.fileHosts()}},
-		{Name: "all", Format: config.FormatPyPI, Type: config.TypeVirtual, Virtual: &config.Virtual{Members: []string{"local", "remote"}}},
+		{Name: "all", Format: config.FormatPyPI, Type: config.TypeVirtual, Virtual: &config.Virtual{Members: config.Members("local", "remote")}},
 		{Name: "open", Format: config.FormatPyPI, Type: config.TypeVirtual, AnonymousPull: true,
-			Virtual: &config.Virtual{Members: []string{"local", "remote"}, DependencyConfusionProtection: &off}},
+			Virtual: &config.Virtual{Members: config.Members("local", "remote"), DependencyConfusionProtection: &off}},
+		{Name: "filtered", Format: config.FormatPyPI, Type: config.TypeVirtual, Virtual: &config.Virtual{PublishTo: "team",
+			Members: []config.VirtualMember{{Name: "local", Include: []string{"Acme_*"}}, {Name: "team"},
+				{Name: "remote", Exclude: []string{"acme-*"}}}}},
 		{Name: "oci", Format: config.FormatOCI, Type: config.TypeHosted},
 	}
 	space := upstream.NewSpace(upstream.SpaceOptions{

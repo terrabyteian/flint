@@ -24,6 +24,7 @@ import (
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
 	"github.com/terrabyteian/flint/internal/pypi"
+	"github.com/terrabyteian/flint/internal/repo"
 	"github.com/terrabyteian/flint/internal/server"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
@@ -196,6 +197,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	opts := server.Options{
 		Addr:           cfg.Listen,
 		TrustedProxies: cfg.Proxies(),
+		PublicURL:      cfg.PublicBase(),
 		Logger:         logger,
 		Metrics:        reg,
 	}
@@ -273,6 +275,8 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	docs := upstream.NewDocCache(upstream.DocCacheOptions{Meta: store, Blobs: blobs, Space: space,
 		Metrics: proxyMetrics, Logger: logger})
 	upOpts := upstream.Options{UserAgent: "flint/" + version}
+	// Virtual repositories of every format share one set of metrics.
+	virtualMetrics := repo.NewMetrics(reg)
 	registry, err := oci.New(oci.Options{
 		Meta:         store,
 		Blobs:        blobs,
@@ -294,19 +298,20 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	}
 	registry.Register(srv)
 	index, err := pypi.New(pypi.Options{
-		Meta:         store,
-		Blobs:        blobs,
-		Repositories: cfg.Repositories,
-		Authorizer:   authz,
-		Actor:        authz.Actor,
-		Logger:       logger,
-		Metrics:      reg,
-		Upstream:     upOpts,
-		Space:        space,
-		Now:          now,
-		Fetcher:      fetcher,
-		ProxyMetrics: proxyMetrics,
-		Docs:         docs,
+		Meta:           store,
+		Blobs:          blobs,
+		Repositories:   cfg.Repositories,
+		Authorizer:     authz,
+		Actor:          authz.Actor,
+		Logger:         logger,
+		Metrics:        reg,
+		Upstream:       upOpts,
+		Space:          space,
+		Now:            now,
+		Fetcher:        fetcher,
+		ProxyMetrics:   proxyMetrics,
+		Docs:           docs,
+		VirtualMetrics: virtualMetrics,
 	})
 	if err != nil {
 		return nil, err
@@ -333,7 +338,7 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	collector, err := gc.New(gc.Options{
 		Meta:        store,
 		Blobs:       blobs,
-		Markers:     []gc.Marker{oci.GCMarker(), pypi.GCMarker(), upstream.Marks, auth.GCMarker()},
+		Markers:     gcMarkers(),
 		Pruners:     []gc.Pruner{registry.GCPruner()},
 		GracePeriod: cfg.GC.GracePeriod.Duration,
 		Interval:    cfg.GC.Interval.Duration,
@@ -348,6 +353,13 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
 	return &app{srv: srv, oci: registry, pypi: index, space: space, audit: auditLog, backups: backups, gc: collector,
 		docs: docs, revalidate: revalidate}, nil
+}
+
+// gcMarkers are the garbage-collection markers of every package that
+// writes metadata: every key family flint writes is under a prefix one of
+// them registers. A format adds its marker here when it is wired in.
+func gcMarkers() []gc.Marker {
+	return []gc.Marker{oci.GCMarker(), pypi.GCMarker(), upstream.Marks, auth.GCMarker()}
 }
 
 // blobReferences report the blobs every format package's records, and

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +63,12 @@ type Config struct {
 	// whose X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host
 	// headers are believed. Forwarded headers from anyone else are ignored.
 	TrustedProxies []string `json:"trustedProxies,omitempty"`
+	// PublicURL, if set, is the URL clients reach flint at, such as
+	// "https://flint.example.com": the base of every absolute URL flint
+	// writes into the metadata it serves, which clients may store, as in
+	// lockfiles. Without it, absolute URLs are built from the scheme and
+	// host of each request, as seen through trusted proxies.
+	PublicURL string `json:"publicURL,omitempty"`
 	// ShutdownTimeout bounds how long a graceful shutdown waits for
 	// in-flight requests. Default 25s.
 	ShutdownTimeout Duration `json:"shutdownTimeout,omitzero"`
@@ -164,10 +171,11 @@ type Repository struct {
 	// separators ".", "_", or "-" between them; at most 64 characters.
 	// Names are unique across formats.
 	Name string `json:"name"`
-	// Format is the package format: "oci" or "pypi".
+	// Format is the package format: one of Formats(), such as "oci" or
+	// "pypi".
 	Format string `json:"format"`
-	// Type is the repository type: "hosted", "proxy", or, for "pypi",
-	// "virtual".
+	// Type is the repository type: "hosted", "proxy", or "virtual", as
+	// the format supports.
 	Type string `json:"type"`
 	// ImmutableTags makes a pushed tag permanent. Hosted OCI repositories
 	// only.
@@ -184,22 +192,6 @@ type Repository struct {
 	// Virtual configures a virtual repository's members. Required for
 	// type "virtual", and not allowed for other types.
 	Virtual *Virtual `json:"virtual,omitempty"`
-}
-
-// Virtual configures a virtual repository: one index merged from an
-// ordered list of hosted and proxy repositories of the same format.
-type Virtual struct {
-	// Members are the repositories merged, in order: where several have
-	// the same file, the first one's is served.
-	Members []string `json:"members"`
-	// DependencyConfusionProtection, on by default, never serves a
-	// package from a proxy member once a hosted member owns its name.
-	DependencyConfusionProtection *bool `json:"dependencyConfusionProtection,omitempty"`
-}
-
-// Protected reports whether dependency-confusion protection is on.
-func (v *Virtual) Protected() bool {
-	return v.DependencyConfusionProtection == nil || *v.DependencyConfusionProtection
 }
 
 // Proxy configures the upstream registry a proxy repository caches.
@@ -474,6 +466,12 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.PublicURL != "" {
+		if err := checkPublicURL(c.PublicURL); err != nil {
+			v.addf("publicURL", "%q %v", c.PublicURL, err)
+		}
+	}
+
 	if c.ShutdownTimeout.invalid != "" {
 		v.addf("shutdownTimeout", "%s", c.ShutdownTimeout.invalid)
 	} else if c.ShutdownTimeout.Duration <= 0 {
@@ -497,13 +495,7 @@ func (c *Config) Validate() error {
 		} else {
 			names[r.Name] = i
 		}
-		switch r.Format {
-		case FormatOCI, FormatPyPI:
-		case "":
-			v.addf(path+".format", "is required")
-		default:
-			v.addf(path+".format", "%q is not supported; supported formats: oci, pypi", r.Format)
-		}
+		validateFormat(&v, path, &c.Repositories[i])
 		switch {
 		case !r.ImmutableTags || r.Format == FormatOCI && r.Type == TypeHosted:
 		case r.Type == TypeProxy:
@@ -533,10 +525,7 @@ func (c *Config) Validate() error {
 				validateProxy(&v, path+".proxy", r.Format, r.Proxy)
 			}
 		case TypeVirtual:
-			switch {
-			case r.Format == FormatOCI:
-				v.addf(path+".type", "%q is not supported for format oci; use a hosted and a proxy repository", r.Type)
-			case r.Virtual == nil:
+			if r.Virtual == nil {
 				v.addf(path+".virtual", "is required for type %q", TypeVirtual)
 			}
 		case "":
@@ -546,8 +535,8 @@ func (c *Config) Validate() error {
 		}
 	}
 	for i, r := range c.Repositories {
-		if r.Type == TypeVirtual && r.Virtual != nil && r.Format != FormatOCI {
-			c.validateMembers(&v, fmt.Sprintf("repositories[%d].virtual.members", i), r, names)
+		if f := formatOf(r.Format); r.Type == TypeVirtual && r.Virtual != nil && f != nil && slices.Contains(f.types, TypeVirtual) {
+			c.validateVirtual(&v, fmt.Sprintf("repositories[%d].virtual", i), r, names)
 		}
 	}
 	if f := c.ProxyCache.MinFreeSpace; f.invalid != "" {
@@ -640,32 +629,6 @@ func within(path, dir string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
-// validateMembers checks a virtual repository's members: each must be a
-// hosted or proxy repository of the same format, named once.
-func (c *Config) validateMembers(v *validator, path string, r Repository, names map[string]int) {
-	if len(r.Virtual.Members) == 0 {
-		v.addf(path, "must name at least one hosted or proxy repository")
-	}
-	seen := map[string]bool{}
-	for j, m := range r.Virtual.Members {
-		mp := fmt.Sprintf("%s[%d]", path, j)
-		i, ok := names[m]
-		switch {
-		case seen[m]:
-			v.addf(mp, "%q is named twice", m)
-		case m == r.Name:
-			v.addf(mp, "a virtual repository cannot be its own member")
-		case !ok:
-			v.addf(mp, "%q is not a declared repository", m)
-		case c.Repositories[i].Format != r.Format:
-			v.addf(mp, "%q is a %s repository, not %s", m, c.Repositories[i].Format, r.Format)
-		case c.Repositories[i].Type != TypeHosted && c.Repositories[i].Type != TypeProxy:
-			v.addf(mp, "%q is a %s repository; members must be hosted or proxy repositories", m, c.Repositories[i].Type)
-		}
-		seen[m] = true
-	}
-}
-
 // validateProxy checks a proxy repository's upstream settings.
 func validateProxy(v *validator, path, format string, p *Proxy) {
 	if p.URL == "" {
@@ -724,6 +687,31 @@ func checkUpstreamURL(s, format string) error {
 		return errors.New("must be the registry's base URL, without a path: the registry API is served at /v2/")
 	}
 	return nil
+}
+
+// checkPublicURL checks the public URL: an absolute http or https URL,
+// optionally with a path that flint is served under.
+func checkPublicURL(s string) error {
+	u, err := url.Parse(s)
+	switch {
+	case err != nil:
+		return errors.New("is not a URL")
+	case u.Scheme != "https" && u.Scheme != "http":
+		return errors.New("must be an http or https URL")
+	case u.Host == "":
+		return errors.New("has no host")
+	case u.User != nil:
+		return errors.New("must not contain credentials")
+	case u.RawQuery != "" || u.Fragment != "" || u.ForceQuery:
+		return errors.New("must not have a query or fragment")
+	}
+	return nil
+}
+
+// PublicBase returns the public URL without a trailing "/", to which a
+// path starting with "/" is appended, or "" if it is not set.
+func (c *Config) PublicBase() string {
+	return strings.TrimRight(c.PublicURL, "/")
 }
 
 // PyPIIndexURL returns the simple index URL of a PyPI proxy repository's

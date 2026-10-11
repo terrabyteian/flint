@@ -53,6 +53,10 @@ type Options struct {
 	TLS *TLSFiles
 	// TrustedProxies are the peers whose forwarded headers are believed.
 	TrustedProxies []netip.Prefix
+	// PublicURL, if set, is the URL clients reach the server at, such as
+	// "https://flint.example.com": BaseURL returns it, without a trailing
+	// "/", instead of the scheme and host of each request.
+	PublicURL string
 	// Logger receives request and server logs; nil means slog.Default().
 	Logger *slog.Logger
 	// Metrics receives the server's metrics and is served at /metrics;
@@ -83,6 +87,8 @@ type Server struct {
 	reg     *metrics.Registry
 	proxies proxies
 	certs   *certReloader
+	// publicURL is Options.PublicURL without a trailing "/".
+	publicURL string
 
 	mu      sync.Mutex
 	routes  []route
@@ -126,10 +132,11 @@ func New(opts Options) (*Server, error) {
 		opts.TLSReloadInterval = DefaultTLSReloadInterval
 	}
 	s := &Server{
-		opts:    opts,
-		log:     opts.Logger,
-		reg:     opts.Metrics,
-		proxies: proxies(opts.TrustedProxies),
+		opts:      opts,
+		log:       opts.Logger,
+		reg:       opts.Metrics,
+		proxies:   proxies(opts.TrustedProxies),
+		publicURL: strings.TrimRight(opts.PublicURL, "/"),
 	}
 	if opts.TLS != nil {
 		certs, err := newCertReloader(opts.TLS.CertFile, opts.TLS.KeyFile, s.log, s.reg)
@@ -332,6 +339,7 @@ func (s *Server) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		st := &requestState{info: resolve(r, s.proxies)}
+		st.info.PublicURL = s.publicURL
 		st.info.ID = rand.Text()
 		w.Header().Set("X-Request-Id", st.info.ID)
 		rw := &responseWriter{ResponseWriter: w}

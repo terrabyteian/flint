@@ -13,6 +13,7 @@ import (
 
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/fsys"
+	"github.com/terrabyteian/flint/internal/repo"
 )
 
 func TestPasswordHash(t *testing.T) {
@@ -170,8 +171,8 @@ func TestMatchPattern(t *testing.T) {
 		{"*a*a*a*a*b", strings.Repeat("a", 60), false},
 	}
 	for _, tt := range tests {
-		if got := matchPattern(tt.pattern, tt.name); got != tt.want {
-			t.Errorf("matchPattern(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		if got := repo.Match(tt.pattern, tt.name); got != tt.want {
+			t.Errorf("repo.Match(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
 		}
 	}
 }

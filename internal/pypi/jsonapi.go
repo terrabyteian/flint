@@ -12,6 +12,7 @@ import (
 	"github.com/terrabyteian/flint/internal/blob"
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/repo"
 	"github.com/terrabyteian/flint/internal/server"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
@@ -164,12 +165,7 @@ func (h *Handler) serveJSON(w http.ResponseWriter, r *http.Request, rp *reposito
 		writeError(w, http.StatusNotFound, "project %s has no release %s", project, version)
 		return
 	}
-	info := server.Info(ctx)
-	scheme, host := info.Scheme, info.Host
-	if scheme == "" {
-		scheme, host = "http", r.Host
-	}
-	base := scheme + "://" + host + "/pypi/" + rp.name + "/"
+	base := server.BaseURL(r) + repo.Path(config.FormatPyPI, rp.name)
 	out := struct {
 		Info            *jsonInfo              `json:"info"`
 		LastSerial      int64                  `json:"last_serial"`
@@ -390,7 +386,7 @@ func (h *Handler) serialIn(v meta.View, rp *repository, project string) int64 {
 	case config.TypeVirtual:
 		var out int64
 		for _, m := range rp.virtual.Members {
-			if mr := h.repos[m.Name]; mr != nil {
+			if mr := h.repos[m.Name]; mr != nil && rp.virtual.Admits(m, project) {
 				out = max(out, h.serialIn(v, mr, project))
 			}
 		}

@@ -24,6 +24,9 @@ type RequestInfo struct {
 	// Host is the host the client addressed: the Host header, or
 	// X-Forwarded-Host set by a trusted proxy.
 	Host string
+	// PublicURL is the server's configured public URL, without a
+	// trailing "/", or "" if none is configured.
+	PublicURL string
 }
 
 // requestState is the per-request state the server's middleware keeps in
@@ -51,6 +54,29 @@ func Info(ctx context.Context) RequestInfo {
 		return st.info
 	}
 	return RequestInfo{}
+}
+
+// BaseURL returns the base of the absolute URLs a handler writes into the
+// metadata it serves, to which a path starting with "/" is appended: the
+// configured public URL, so clients that store the URLs, as in lockfiles,
+// see one stable URL however they reached the server, or else the scheme
+// and host the client addressed, honoring trusted proxies, as in
+// "https://registry.example".
+func BaseURL(r *http.Request) string {
+	info := Info(r.Context())
+	if info.PublicURL != "" {
+		return info.PublicURL
+	}
+	scheme, host := info.Scheme, info.Host
+	if scheme == "" {
+		// Not served by a Server, as in a test.
+		scheme = "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		host = r.Host
+	}
+	return scheme + "://" + host
 }
 
 // SetRoute names the route that served the request, for the route label
