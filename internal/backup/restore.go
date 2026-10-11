@@ -50,6 +50,12 @@ func Restore(ctx context.Context, dir, dataDir string, opts VerifyOptions) (*Rep
 	if err := mkdirDurable(fsy, dataDir); err != nil {
 		return nil, err
 	}
+	for d := filepath.Clean(dataDir); d != filepath.Dir(d); {
+		d = filepath.Dir(d)
+		if err := fsy.SyncDir(d); err != nil {
+			return nil, err
+		}
+	}
 	if err := writeFileAtomic(fsy, dataDir, RestoreMarker,
 		[]byte("flint restore of backup "+rep.Record.ID+" did not finish; remove this data directory and restore again\n")); err != nil {
 		return nil, err

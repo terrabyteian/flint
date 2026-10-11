@@ -64,6 +64,23 @@ type env struct {
 	clock time.Time
 }
 
+// runBackup starts a backup with m and returns it when it finishes. Its
+// error is also in the returned Run.
+func runBackup(t *testing.T, m *Manager, actor string) (Run, error) {
+	t.Helper()
+	if _, err := m.Start(actor); err != nil {
+		return Run{}, err
+	}
+	if err := m.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r := *m.Status().Last
+	if r.Error != "" {
+		return r, errors.New(r.Error)
+	}
+	return r, nil
+}
+
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	e := &env{t: t, src: fsys.NewMem(), dst: fsys.NewMem(), reg: metrics.NewRegistry(),
@@ -199,7 +216,6 @@ func verifyOK(t *testing.T, fsy fsys.FS, id string) *Report {
 func TestBackupIncrementalAndRestore(t *testing.T) {
 	e := newEnv(t)
 	m := e.manager(nil)
-	ctx := context.Background()
 
 	first := []string{"alpha", "beta", strings.Repeat("big", 100000)}
 	for _, c := range first {
@@ -210,7 +226,7 @@ func TestBackupIncrementalAndRestore(t *testing.T) {
 	want1 := dump(v1)
 	v1.Release()
 
-	r1, err := m.Run(ctx, "alice")
+	r1, err := runBackup(t, m, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +241,7 @@ func TestBackupIncrementalAndRestore(t *testing.T) {
 	v2 := e.meta.View()
 	want2 := dump(v2)
 	v2.Release()
-	r2, err := m.Run(ctx, "")
+	r2, err := runBackup(t, m, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +292,7 @@ func TestBackupIncrementalAndRestore(t *testing.T) {
 
 func TestBackupEmptyStore(t *testing.T) {
 	e := newEnv(t)
-	r, err := e.manager(nil).Run(context.Background(), "")
+	r, err := runBackup(t, e.manager(nil), "")
 	if err != nil || r.Blobs != 0 || r.Records != 0 {
 		t.Fatalf("Run = %+v, %v", r, err)
 	}
@@ -313,7 +329,7 @@ func TestBackupSkipsBlobsDeletedDuringWalk(t *testing.T) {
 	keep := e.put("kept")
 	gone := storeBlob(t, e.blobs, "collected")
 	m := e.manager(&gcBlobs{Store: e.blobs, gone: map[blob.Digest]bool{gone: true}})
-	r, err := m.Run(context.Background(), "")
+	r, err := runBackup(t, m, "")
 	if err != nil || r.Blobs != 1 {
 		t.Fatalf("Run = %+v, %v", r, err)
 	}
@@ -329,7 +345,7 @@ func TestBackupFailsOnMissingReference(t *testing.T) {
 	lost := blob.FromBytes([]byte("lost"))
 	e.ref(lost, "points at nothing")
 	m := e.manager(nil)
-	r, err := m.Run(context.Background(), "")
+	r, err := runBackup(t, m, "")
 	if err == nil || !strings.Contains(err.Error(), lost.String()) || r.State != StateFailed || r.Error == "" {
 		t.Fatalf("Run = %+v, %v; want a failure naming %s", r, err, lost)
 	}
@@ -347,21 +363,29 @@ func TestBackupFailsOnMissingReference(t *testing.T) {
 		t.Fatalf("Status = %+v", st)
 	}
 
-	// A copy an earlier backup made makes up for a blob the data
-	// directory lost.
+	// A copy an earlier backup made does not make up for a blob the
+	// data directory lost.
 	e2 := newEnv(t)
 	d := e2.put("lost later")
-	if _, err := e2.manager(nil).Run(context.Background(), ""); err != nil {
+	if _, err := runBackup(t, e2.manager(nil), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := e2.blobs.Delete(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
-	r, err = e2.manager(nil).Run(context.Background(), "")
-	if err != nil || r.Blobs != 1 || r.CopiedBlobs != 0 {
-		t.Fatalf("Run = %+v, %v", r, err)
+	m = e2.manager(nil)
+	r, err = runBackup(t, m, "")
+	if err == nil || !strings.Contains(err.Error(), d.String()) || r.State != StateFailed {
+		t.Fatalf("Run = %+v, %v; want a failure naming %s", r, err, d)
 	}
-	verifyOK(t, e2.dst, r.ID)
+	if st := m.Status(); st.Last.State != StateFailed || st.LastSuccess.ID == r.ID {
+		t.Fatalf("Status = %+v", st)
+	}
+	var buf bytes.Buffer
+	e2.reg.WriteTo(&buf)
+	if !strings.Contains(buf.String(), `flint_backup_runs_total{result="failure"} 1`+"\n") {
+		t.Fatalf("metrics lack the failure:\n%s", buf.String())
+	}
 }
 
 func TestBackupFailsOnCorruptSourceBlob(t *testing.T) {
@@ -369,7 +393,7 @@ func TestBackupFailsOnCorruptSourceBlob(t *testing.T) {
 	d := e.put("original")
 	path := filepath.Join(dataDir, "blobs", "sha256", d.Hex()[:2], d.Hex())
 	rewrite(t, e.src, path, func(b []byte) { b[0] = 'O' })
-	if _, err := e.manager(nil).Run(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "corrupt") {
+	if _, err := runBackup(t, e.manager(nil), ""); err == nil || !strings.Contains(err.Error(), "corrupt") {
 		t.Fatalf("Run: %v, want a corruption error", err)
 	}
 }
@@ -403,7 +427,7 @@ func TestVerifyFindsDamage(t *testing.T) {
 			e := newEnv(t)
 			d := e.put(strings.Repeat("payload", 50))
 			e.put("other")
-			r, err := e.manager(nil).Run(ctx, "")
+			r, err := runBackup(t, e.manager(nil), "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -456,7 +480,7 @@ func rewrite(t *testing.T, fsy *fsys.Mem, path string, edit func([]byte)) {
 func TestVerifyFindsUnlistedReference(t *testing.T) {
 	e := newEnv(t)
 	e.put("a")
-	r, err := e.manager(nil).Run(context.Background(), "")
+	r, err := runBackup(t, e.manager(nil), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +496,7 @@ func TestVerifyFindsUnlistedReference(t *testing.T) {
 func TestRestoreRefusesNonEmptyDataDir(t *testing.T) {
 	e := newEnv(t)
 	e.put("a")
-	if _, err := e.manager(nil).Run(context.Background(), ""); err != nil {
+	if _, err := runBackup(t, e.manager(nil), ""); err != nil {
 		t.Fatal(err)
 	}
 	e.dst.MkdirAll(restoreDir+"/meta", 0o755)
@@ -512,9 +536,6 @@ func TestOneBackupAtATime(t *testing.T) {
 	e.put("after the pin")
 	if _, err := m.Start("bob"); !errors.Is(err, ErrRunning) {
 		t.Fatalf("second Start: %v, want ErrRunning", err)
-	}
-	if _, err := m.Run(context.Background(), "bob"); !errors.Is(err, ErrRunning) {
-		t.Fatalf("Run while running: %v, want ErrRunning", err)
 	}
 	st := m.Status()
 	if st.Running == nil || st.Running.ID != r.ID || st.Running.Phase != PhaseBlobs || st.Running.Records != 2 {
@@ -589,7 +610,7 @@ func TestCrash(t *testing.T) {
 			blob.FromBytes([]byte(contents[1])): true, blob.FromBytes([]byte(contents[4])): true,
 		}})
 		m.opts.References = nil
-		r, err := m.Run(context.Background(), "")
+		r, err := runBackup(t, m, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -598,7 +619,7 @@ func TestCrash(t *testing.T) {
 	prep(base)
 	start := base.Ops()
 	e.dst = base
-	if _, err := e.manager(nil).Run(context.Background(), ""); err != nil {
+	if _, err := runBackup(t, e.manager(nil), ""); err != nil {
 		t.Fatal(err)
 	}
 	total := base.Ops() - start
@@ -609,7 +630,7 @@ func TestCrash(t *testing.T) {
 		prep(fsy)
 		fsy.CrashAfter(n)
 		e.dst = fsy
-		if _, err := e.manager(nil).Run(context.Background(), ""); err == nil {
+		if _, err := runBackup(t, e.manager(nil), ""); err == nil {
 			t.Fatalf("crash after %d ops: backup succeeded", n)
 		}
 		after := fsy.Restart(rng)
@@ -641,7 +662,7 @@ func TestCrash(t *testing.T) {
 		}
 		// The next backup succeeds and restores everything.
 		e.dst = after
-		r, err := e.manager(nil).Run(context.Background(), "")
+		r, err := runBackup(t, e.manager(nil), "")
 		if err != nil {
 			t.Fatalf("crash after %d ops: next backup: %v", n, err)
 		}
@@ -659,7 +680,7 @@ func TestRestoreCrash(t *testing.T) {
 	for i := range 4 {
 		e.put(fmt.Sprintf("blob %d", i))
 	}
-	if _, err := e.manager(nil).Run(context.Background(), ""); err != nil {
+	if _, err := runBackup(t, e.manager(nil), ""); err != nil {
 		t.Fatal(err)
 	}
 	probe := e.dst.Restart(nil)
@@ -695,6 +716,38 @@ func TestRestoreCrash(t *testing.T) {
 	}
 }
 
+// TestRestoreIntoCreatedDataDir restores into a data directory the
+// caller created, with any missing parents, without syncing them, as
+// flint restore does to lock it, and checks that the restored directory
+// survives a crash.
+func TestRestoreIntoCreatedDataDir(t *testing.T) {
+	e := newEnv(t)
+	e.put("a")
+	if _, err := runBackup(t, e.manager(nil), ""); err != nil {
+		t.Fatal(err)
+	}
+	fsy := e.dst.Restart(nil)
+	target := restoreDir + "/nested/data"
+	if err := fsy.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(context.Background(), backupDir, target, VerifyOptions{FS: fsy}); err != nil {
+		t.Fatal(err)
+	}
+	after := fsy.Restart(nil)
+	if _, err := after.Stat(target + "/meta"); err != nil {
+		t.Fatalf("the restored data directory did not survive a crash: %v", err)
+	}
+	ms, err := meta.Open(target+"/meta", meta.Options{FS: after, Logger: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+	if n := ms.Stats().Keys; n != 1 {
+		t.Fatalf("restored %d records, want 1", n)
+	}
+}
+
 // TestBackupSyncsBlobsAnEarlierBackupLeftUnsynced fails a backup after a
 // blob copy was renamed into place but before its directory was synced,
 // so the next backup finds the blob present; it must make the blob
@@ -710,11 +763,11 @@ func TestBackupSyncsBlobsAnEarlierBackupLeftUnsynced(t *testing.T) {
 		}
 		return nil
 	})
-	if _, err := e.manager(nil).Run(context.Background(), ""); err == nil {
+	if _, err := runBackup(t, e.manager(nil), ""); err == nil {
 		t.Fatal("backup with a failed sync succeeded")
 	}
 	e.dst.SetFault(nil)
-	r, err := e.manager(nil).Run(context.Background(), "")
+	r, err := runBackup(t, e.manager(nil), "")
 	if err != nil || r.CopiedBlobs != 0 {
 		t.Fatalf("Run = %+v, %v; want the blob found present", r, err)
 	}

@@ -226,7 +226,7 @@ flint logs `backup started`, `backup finished` (with the duration and counts), a
 
 ## When a backup fails
 
-- **A blob the metadata references is missing from the data directory.** The backup fails and names the missing digests, because a backup cannot hold what the registry has lost. If an earlier backup in the same directory copied the blob, the backup keeps that copy instead, logs a warning, and succeeds.
+- **A blob the metadata references is missing from the data directory.** The backup fails and names the missing digests, because a backup cannot hold what the registry has lost.
 - **A blob's content does not match its digest.** The data directory is damaged; the backup fails and names the blob.
 - **The server shuts down.** A running backup is cancelled and left incomplete. Start another after the restart.
 - **The backup directory fills up or fails.** The backup fails with the error, and the next one picks up where it left off, copying only what is still missing.

@@ -277,24 +277,6 @@ func (m *Manager) Start(actor string) (Run, error) {
 	return p.snapshot(m.now()), nil
 }
 
-// Run runs a backup and returns when it finishes. Its error is also in
-// the returned Run.
-func (m *Manager) Run(ctx context.Context, actor string) (Run, error) {
-	p, v, err := m.begin(actor)
-	if err != nil {
-		return Run{}, err
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stop := context.AfterFunc(m.ctx, cancel)
-	defer stop()
-	r := m.execute(ctx, p, v)
-	if r.Error != "" {
-		return r, errors.New(r.Error)
-	}
-	return r, nil
-}
-
 // Wait returns when no backup is running, or when ctx is done.
 func (m *Manager) Wait(ctx context.Context) error {
 	for {
@@ -436,7 +418,7 @@ func (m *Manager) backup(ctx context.Context, p *progress, v meta.View) error {
 			return err
 		}
 		p.setPhase(PhaseReferences)
-		return c.checkReferences(ctx, v)
+		return c.checkReferences(v)
 	}); err != nil {
 		return err
 	}
@@ -541,9 +523,7 @@ func (c *copier) copyBlob(ctx context.Context, d blob.Digest) (int64, error) {
 const maxReported = 10
 
 // checkReferences checks that the backup holds every blob v references.
-// A referenced blob the walk did not find, but which an earlier backup
-// copied, is added to the backup.
-func (c *copier) checkReferences(ctx context.Context, v meta.View) error {
+func (c *copier) checkReferences(v meta.View) error {
 	var missing []string
 	nMissing := 0
 	for _, refs := range c.m.opts.References {
@@ -551,25 +531,12 @@ func (c *copier) checkReferences(ctx context.Context, v meta.View) error {
 			if _, ok := c.have[d]; ok {
 				return nil
 			}
-			if err := ctx.Err(); err != nil {
-				return err
+			c.have[d] = struct{}{} // report it once
+			nMissing++
+			if len(missing) < maxReported {
+				missing = append(missing, d.String())
 			}
-			info, err := c.dst.Stat(ctx, d)
-			if errors.Is(err, blob.ErrNotFound) {
-				c.have[d] = struct{}{} // report it once
-				nMissing++
-				if len(missing) < maxReported {
-					missing = append(missing, d.String())
-				}
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			c.m.log.Warn("backup: a referenced blob is missing from the data directory; keeping the copy an earlier backup made",
-				"digest", d.String())
-			c.syncFanout[fanout(d)] = true
-			return c.add(d, info.Size)
+			return nil
 		})
 		if err != nil {
 			return err
