@@ -310,6 +310,32 @@ func TestDeleteManifestRace(t *testing.T) {
 	want(t, e.do("GET", "/v2/hosted/app/manifests/v2", nil), 404, codeManifestUnknown)
 }
 
+// TestDeleteManifestRetagRace moves a tag to another manifest between a
+// delete's view and its commit: the delete must not take the moved tag.
+func TestDeleteManifestRetagRace(t *testing.T) {
+	e := newEnv(t)
+	a, other := newImage("a", nil), newImage("b", nil)
+	want(t, e.pushImage("hosted/app", "latest", a), 201, "")
+	rn := &repoName{full: "hosted/app", repo: "hosted", name: "app", cfg: e.h.repos["hosted"]}
+
+	var b meta.Batch
+	v := e.meta.View()
+	if err := e.h.buildManifestDelete(v, &b, httptest.NewRequest("DELETE", "/", nil), rn, a.digest.String()); err != nil {
+		t.Fatal(err)
+	}
+	v.Release()
+	want(t, e.pushImage("hosted/app", "latest", other), 201, "")
+	if _, err := e.meta.Commit(context.Background(), &b); !errors.Is(err, meta.ErrConflict) {
+		t.Fatalf("stale delete committed: %v", err)
+	}
+	want(t, e.do("DELETE", "/v2/hosted/app/manifests/"+a.digest.String(), nil), 202, "")
+	w := e.do("GET", "/v2/hosted/app/manifests/latest", nil)
+	want(t, w, 200, "")
+	if got := w.Header().Get("Docker-Content-Digest"); got != other.digest.String() {
+		t.Errorf("latest = %s, want %s", got, other.digest)
+	}
+}
+
 // TestManifestReferenceRace deletes a layer between a push's view and its
 // commit: the push must not commit a manifest whose layer is gone.
 func TestManifestReferenceRace(t *testing.T) {

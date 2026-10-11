@@ -82,15 +82,15 @@ func (h *Handler) statExists(ctx context.Context, ds ...blob.Digest) func(int) e
 }
 
 // lookupBlob returns the size of blob d as linked in rn.
-func (h *Handler) lookupBlob(rn *repoName, d blob.Digest) (int64, meta.Seq, bool, error) {
+func (h *Handler) lookupBlob(rn *repoName, d blob.Digest) (int64, bool, error) {
 	v := h.view()
 	defer v.Release()
 	rec, ok := v.Get(blobKey(rn, d))
 	if !ok {
-		return 0, 0, false, nil
+		return 0, false, nil
 	}
 	size, err := decodeBlobLink(rec.Value)
-	return size, rec.Version, true, err
+	return size, true, err
 }
 
 func blobUnknown(d blob.Digest) error {
@@ -105,7 +105,7 @@ func (h *Handler) getBlob(w http.ResponseWriter, r *http.Request, rn *repoName, 
 		h.writeError(w, r, err)
 		return
 	}
-	size, _, ok, err := h.lookupBlob(rn, d)
+	size, ok, err := h.lookupBlob(rn, d)
 	if err == nil && !ok {
 		err = blobUnknown(d)
 	}
@@ -151,7 +151,7 @@ func (h *Handler) deleteBlob(w http.ResponseWriter, r *http.Request, rn *repoNam
 		h.writeError(w, r, err)
 		return
 	}
-	_, _, ok, err := h.lookupBlob(rn, d)
+	_, ok, err := h.lookupBlob(rn, d)
 	if err == nil && !ok {
 		err = blobUnknown(d)
 	}

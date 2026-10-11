@@ -1,7 +1,6 @@
 package oci
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -488,7 +487,8 @@ func (h *Handler) buildManifestDelete(v meta.View, b *meta.Batch, r *http.Reques
 		return err
 	}
 	// A push that tags this manifest rewrites its record, so requiring
-	// the record unchanged keeps a tag added meanwhile from dangling.
+	// the record unchanged keeps a tag added meanwhile from dangling;
+	// requiring each tag unchanged keeps a tag moved meanwhile alive.
 	b.Require(manifestKey(rn, d), version)
 	b.Delete(manifestKey(rn, d))
 	if !m.Subject.IsZero() {
@@ -503,6 +503,7 @@ func (h *Handler) buildManifestDelete(v meta.View, b *meta.Batch, r *http.Reques
 				tagErr = immutable(tag)
 				return false
 			}
+			b.Require(key, rec.Version)
 			b.Delete(key)
 		}
 		return true
@@ -512,16 +513,4 @@ func (h *Handler) buildManifestDelete(v meta.View, b *meta.Batch, r *http.Reques
 	}
 	b.SetOrigin(h.origin(r, "oci.manifest.delete", rn.full+"@"+d.String()))
 	return nil
-}
-
-// compactJSON returns s, a JSON object, as a raw message, or nil if empty.
-func compactJSON(s string) json.RawMessage {
-	if s == "" {
-		return nil
-	}
-	var buf bytes.Buffer
-	if json.Compact(&buf, []byte(s)) != nil {
-		return nil
-	}
-	return buf.Bytes()
 }

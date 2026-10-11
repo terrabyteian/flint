@@ -208,7 +208,7 @@ func (h *Handler) listReferrers(w http.ResponseWriter, r *http.Request, rn *repo
 			Size:         m.Size,
 			Digest:       rd.String(),
 			ArtifactType: m.ArtifactType,
-			Annotations:  compactJSON(m.Annotations),
+			Annotations:  json.RawMessage(m.Annotations),
 		})
 		return true
 	})
