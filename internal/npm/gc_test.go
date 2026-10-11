@@ -12,6 +12,7 @@ import (
 	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/gc/gctest"
 	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // TestGCMarker writes every kind of npm record and checks that the marker
@@ -81,6 +82,66 @@ func TestGCMarker(t *testing.T) {
 	for _, d := range refs {
 		if !got[d] {
 			t.Errorf("References reports %s, which the marker does not", d)
+		}
+	}
+}
+
+// TestGCMarkerProxy writes every kind of record proxy and virtual npm
+// repositories write, which are the shared proxy cache's, and checks that
+// the npm marker with the proxy cache's covers them all and marks every
+// cached packument, document, and tarball.
+func TestGCMarkerProxy(t *testing.T) {
+	e := newEnv(t)
+	e.up.add("left-pad", "1.0.0", nil)
+	e.up.add("@acme/lib", "1.0.0", nil)
+	e.publish("local", newPkg("p", "1.0.0"), http.StatusOK)
+	e.packument("remote", "left-pad", false)
+	for _, repo := range []string{"remote", "small", "all"} {
+		e.expect("GET", "/npm/"+repo+"/left-pad/-/left-pad-1.0.0.tgz", nil, http.StatusOK)
+	}
+	e.expect("GET", "/npm/exposed/@acme/lib", nil, http.StatusOK)
+	e.expect("GET", "/npm/all/-/npm/v1/keys", nil, http.StatusOK)
+	e.expect("GET", "/npm/remote/-/npm/v1/attestations/left-pad@1.0.0", nil, http.StatusOK)
+	e.settle()
+	if err := e.h.FlushPullTimes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	v := e.meta.View()
+	defer v.Release()
+	for _, ns := range []string{nsPkg, nsVersion, upstream.NSDoc, upstream.NSFile, upstream.NSPulled} {
+		found := false
+		v.Scan([]byte(ns), nil, func([]byte, meta.Record) bool { found = true; return false })
+		if !found {
+			t.Errorf("the test writes no record under %q", ns)
+		}
+	}
+	var want []blob.Digest
+	for _, k := range []string{packumentKey("left-pad", true), packumentKey("left-pad", false), packumentKey("@acme/lib", false),
+		"keys", "attestations/left-pad@1.0.0"} {
+		rec, ok := v.Get(upstream.DocKey("remote", k))
+		if !ok {
+			t.Fatalf("document %s is not cached", k)
+		}
+		d, err := upstream.DecodeDocRecord(rec.Value)
+		if err != nil {
+			t.Fatalf("document %s: %v", k, err)
+		}
+		want = append(want, d.Digest)
+	}
+	for _, repo := range []string{"remote", "small"} {
+		if !e.has(upstream.FileKey(repo, "left-pad/-/left-pad-1.0.0.tgz")) {
+			t.Errorf("the tarball is not cached in %s", repo)
+		}
+	}
+	want = append(want, blob.FromBytes(tarballOf("left-pad", "1.0.0")))
+	got := map[blob.Digest]bool{}
+	for _, d := range gctest.CheckStored(t, e.meta, e.blobs, GCMarker(), upstream.Marks) {
+		got[d] = true
+	}
+	for _, d := range want {
+		if !got[d] {
+			t.Errorf("%s is not marked", d)
 		}
 	}
 }

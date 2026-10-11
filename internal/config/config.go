@@ -205,6 +205,8 @@ type Repository struct {
 	// Go configures a Go module proxy repository's checksum database.
 	// Go proxy repositories only.
 	Go *Go `json:"go,omitempty"`
+	// NPM holds the settings of an npm repository.
+	NPM *NPM `json:"npm,omitempty"`
 }
 
 // Proxy configures the upstream registry a proxy repository caches.
@@ -223,12 +225,16 @@ type Proxy struct {
 	// "https://repo.maven.apache.org/maven2".
 	// For Go, it is a module proxy's URL, as GOPROXY names it, such as
 	// "https://proxy.golang.org".
+	// For npm, it is the registry URL, such as
+	// "https://registry.npmjs.org/".
 	URL string `json:"url"`
 	// Username and PasswordFile, if set, authenticate to the upstream.
 	// PasswordFile holds the password or access token, such as a mounted
 	// Kubernetes Secret; one trailing newline is ignored. It is read
 	// whenever flint authenticates, so a rotated secret takes effect
-	// without a restart.
+	// without a restart. For npm, the credentials are sent with every
+	// request to the upstream, and PasswordFile alone is a token, sent as
+	// a bearer token.
 	Username     string `json:"username,omitempty"`
 	PasswordFile string `json:"passwordFile,omitempty"`
 	// RevalidateAfter is how long a cached tag or package listing is
@@ -661,7 +667,7 @@ func validateProxy(v *validator, path, format string, p *Proxy) {
 	switch {
 	case p.Username != "" && p.PasswordFile == "":
 		v.addf(path+".passwordFile", "is required with username")
-	case p.Username == "" && p.PasswordFile != "":
+	case p.Username == "" && p.PasswordFile != "" && format != FormatNPM:
 		v.addf(path+".username", "is required with passwordFile")
 	case strings.ContainsAny(p.Username, ":\r\n"):
 		v.addf(path+".username", "must not contain \":\" or line breaks")
@@ -756,6 +762,15 @@ func PyPIIndexURL(s string) string {
 	}
 	u.RawPath = ""
 	return u.String()
+}
+
+// NPMRegistryURL returns the registry URL of an npm proxy repository's
+// upstream: its URL, ending in "/".
+func NPMRegistryURL(s string) string {
+	if !strings.HasSuffix(s, "/") {
+		s += "/"
+	}
+	return s
 }
 
 // CargoIndexURL returns the sparse index URL of a Cargo proxy

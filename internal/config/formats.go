@@ -45,7 +45,14 @@ var formats = []formatSpec{
 		},
 		check: checkGeneric},
 	{name: FormatCargo, types: []string{TypeHosted, TypeProxy, TypeVirtual}},
-	{name: FormatNPM, types: []string{TypeHosted}},
+	{name: FormatNPM, types: []string{TypeHosted, TypeProxy, TypeVirtual},
+		settings: func(r *Repository) any {
+			if r.NPM == nil {
+				return nil
+			}
+			return r.NPM
+		},
+		check: checkNPM},
 	{name: FormatMaven, types: []string{TypeHosted, TypeProxy, TypeVirtual},
 		settings: func(r *Repository) any {
 			if r.Maven == nil {
@@ -62,6 +69,27 @@ var formats = []formatSpec{
 			return r.Go
 		},
 		check: validateGo},
+}
+
+// NPM holds the settings of an npm repository.
+type NPM struct {
+	// ForwardAudit, on by default, forwards npm audit's requests to the
+	// upstream: a proxy repository's own, and a virtual repository's
+	// proxy members', without the names its hosted members own. Off,
+	// audits are answered with no advisories, so no package name leaves
+	// the network. Proxy and virtual repositories only.
+	ForwardAudit *bool `json:"forwardAudit,omitempty"`
+}
+
+// AuditForwarded reports whether npm audit's requests are forwarded to
+// the upstream.
+func (n *NPM) AuditForwarded() bool { return n == nil || n.ForwardAudit == nil || *n.ForwardAudit }
+
+// checkNPM checks an npm repository's settings, at path.
+func checkNPM(v *validator, path string, r *Repository) {
+	if n := r.NPM; n != nil && n.ForwardAudit != nil && r.Type == TypeHosted {
+		v.addf(path+".forwardAudit", "is only allowed for a proxy or virtual repository")
+	}
 }
 
 // Generic holds the settings of a generic files repository.

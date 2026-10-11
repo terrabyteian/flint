@@ -183,7 +183,7 @@ func (c *Client) fetchToken(ctx context.Context, ch challenge, scope string) (st
 		}
 		auth = "Basic " + basicAuth(c.username, pw)
 	}
-	resp, err := c.roundTrip(ctx, http.MethodGet, realm.String(), nil, auth)
+	resp, err := c.roundTrip(ctx, http.MethodGet, realm.String(), nil, nil, auth)
 	if err != nil {
 		return "", transportError(op, err)
 	}

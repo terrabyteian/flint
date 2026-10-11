@@ -3,6 +3,7 @@ package upstream_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -202,6 +203,57 @@ func TestCargoChallenge(t *testing.T) {
 	}
 	if _, err := c.GetURL(ctx, srv.URL+"/config.json", nil); !errors.Is(err, upstream.ErrAuth) {
 		t.Errorf("a wrong token against Cargo: %v, want ErrAuth", err)
+	}
+}
+
+// TestPreemptiveCredentials checks that preemptive credentials are sent
+// with the first request, to the upstream's own host only: basic
+// credentials with a username, the password as a bearer token without
+// one, and that a refusal of them is ErrAuth.
+func TestPreemptiveCredentials(t *testing.T) {
+	pwFile := filepath.Join(t.TempDir(), "password")
+	os.WriteFile(pwFile, []byte("secret\n"), 0o600)
+	var authz []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		authz = append(authz, r.Header.Get("Authorization"))
+		mu.Unlock()
+		if u, p, ok := r.BasicAuth(); ok && u == "me" && p == "secret" || r.Header.Get("Authorization") == "Bearer secret" {
+			io.WriteString(w, "{}")
+			return
+		}
+		// As an npm registry does: no challenge.
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	get := func(c *upstream.Client) error {
+		resp, err := c.GetURL(ctx, srv.URL+"/pkg", nil)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	for _, tc := range []struct {
+		user, want string
+	}{{"me", "Basic " + base64.StdEncoding.EncodeToString([]byte("me:secret"))}, {"", "Bearer secret"}} {
+		authz = nil
+		c := newClient(t, srv.URL, upstream.Options{Username: tc.user, PasswordFile: pwFile, Preemptive: true})
+		if err := get(c); err != nil {
+			t.Fatalf("user %q: %v", tc.user, err)
+		}
+		if !slices.Equal(authz, []string{tc.want}) {
+			t.Errorf("user %q: Authorization headers sent: %q", tc.user, authz)
+		}
+	}
+	os.WriteFile(pwFile, []byte("wrong"), 0o600)
+	if err := get(newClient(t, srv.URL, upstream.Options{PasswordFile: pwFile, Preemptive: true})); !errors.Is(err, upstream.ErrAuth) {
+		t.Errorf("a refused token: %v, want ErrAuth", err)
+	}
+	// Without credentials, Preemptive sends none.
+	authz = nil
+	if err := get(newClient(t, srv.URL, upstream.Options{Preemptive: true})); !errors.Is(err, upstream.ErrAuth) || authz[0] != "" {
+		t.Errorf("no credentials: %v, sent %q", err, authz)
 	}
 }
 

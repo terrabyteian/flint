@@ -238,15 +238,40 @@ func tarballBase(r *http.Request, rp *repository) string {
 	return server.BaseURL(r) + repo.Path(config.FormatNPM, rp.name)
 }
 
-// servePackument serves GET /npm/<repo>/<name>: the abbreviated
-// packument if the client asks for it, else the full one. A request with
-// ?write=true, which npm sends before it edits a package, always gets
-// the full packument, uncached.
-func (h *Handler) servePackument(w http.ResponseWriter, r *http.Request, rp *repository, name string) {
-	ctx := r.Context()
-	write := r.URL.Query().Get("write") == "true"
-	abbreviated := !write && wantsAbbreviated(r)
-	base := tarballBase(r, rp)
+// docBody is a packument as served: its bytes, or for one too large to
+// hold, a stream of them, which must be closed.
+type docBody struct {
+	b      []byte
+	stream io.ReadCloser
+	etag   string // for b
+	// abbreviated reports whether it is the abbreviated form.
+	abbreviated bool
+	// id names what the body was rendered from, so a document derived
+	// from it can be cached under it: a hosted package's record version,
+	// or a proxied packument's digest.
+	id string
+}
+
+// reader returns the body's content; it is the stream itself for a
+// stream, so it can be read once.
+func (d *docBody) reader() io.ReadCloser {
+	if d.stream != nil {
+		return d.stream
+	}
+	return io.NopCloser(bytes.NewReader(d.b))
+}
+
+// close closes a stream that was not read.
+func (d *docBody) close() {
+	if d.stream != nil {
+		d.stream.Close()
+	}
+}
+
+// hostedBody returns hosted repository rp's packument of name, its
+// tarball URLs below base, rendered from the records. It returns a 404
+// error if the package has no live version.
+func (h *Handler) hostedBody(ctx context.Context, rp *repository, name string, abbreviated bool, base string) (*docBody, error) {
 	variant := "full"
 	if abbreviated {
 		variant = "abbreviated"
@@ -254,27 +279,64 @@ func (h *Handler) servePackument(w http.ResponseWriter, r *http.Request, rp *rep
 	// The package record's version names the packument's state, so a
 	// rendering cached under it never goes stale.
 	v := h.meta.View()
+	defer v.Release()
 	_, rec, err := hostedPackage(v, rp, name)
+	if err != nil {
+		return nil, err
+	}
+	seq := strconv.FormatUint(uint64(rec.Version), 10)
 	cacheKey := ""
-	if err == nil && rec.Version != 0 {
-		cacheKey = strings.Join([]string{rp.name, name, strconv.FormatUint(uint64(rec.Version), 10), base, variant}, "\x00")
+	if rec.Version != 0 {
+		cacheKey = strings.Join([]string{rp.name, name, seq, base, variant}, "\x00")
 	}
 	body, etag, ok := h.renders.get(cacheKey)
-	if !ok && err == nil {
-		var doc *packument
-		doc, err = h.hostedPackument(ctx, v, rp, name, !abbreviated)
-		if err == nil {
-			body = renderPackument(doc, base, abbreviated)
-			etag = h.renders.put(cacheKey, body)
+	if !ok {
+		doc, err := h.hostedPackument(ctx, v, rp, name, !abbreviated)
+		if err != nil {
+			return nil, err
 		}
+		body = renderPackument(doc, base, abbreviated)
+		etag = h.renders.put(cacheKey, body)
 	}
-	v.Release()
+	return &docBody{b: body, etag: etag, abbreviated: abbreviated, id: "h" + rp.name + ":" + seq}, nil
+}
+
+// packumentBody returns the packument of name that rp serves, its URLs
+// below base.
+func (h *Handler) packumentBody(ctx context.Context, actor string, rp *repository, name string, abbreviated bool, base string) (*docBody, error) {
+	switch rp.typ {
+	case config.TypeProxy:
+		return h.proxyBody(ctx, actor, rp, name, abbreviated, base)
+	case config.TypeVirtual:
+		return h.virtualBody(ctx, actor, rp, name, abbreviated, base)
+	}
+	return h.hostedBody(ctx, rp, name, abbreviated, base)
+}
+
+// servePackument serves GET /npm/<repo>/<name>: the abbreviated
+// packument if the client asks for it, else the full one. A request with
+// ?write=true, which npm sends before it edits a package, always gets
+// the full packument, uncached; through a virtual repository, that of
+// its publishTo member, which the edit is sent to.
+func (h *Handler) servePackument(w http.ResponseWriter, r *http.Request, rp *repository, name string) {
+	ctx := r.Context()
+	write := r.URL.Query().Get("write") == "true"
+	abbreviated := !write && wantsAbbreviated(r)
+	base := tarballBase(r, rp)
+	var body *docBody
+	var err error
+	if pt := h.repos[publishTo(rp)]; write && pt != nil {
+		body, err = h.hostedBody(ctx, pt, name, false, base)
+	} else {
+		body, err = h.packumentBody(ctx, h.actor(r), rp, name, abbreviated, base)
+	}
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
+	defer body.close()
 	hd := w.Header()
-	if abbreviated {
+	if body.abbreviated {
 		hd.Set("Content-Type", mtAbbreviated)
 	} else {
 		hd.Set("Content-Type", mtJSON)
@@ -284,10 +346,36 @@ func (h *Handler) servePackument(w http.ResponseWriter, r *http.Request, rp *rep
 	case write:
 		hd.Set("Cache-Control", "no-store")
 	default:
-		hd.Set("ETag", etag)
+		if body.etag != "" {
+			hd.Set("ETag", body.etag)
+		}
 		hd.Set("Cache-Control", cacheControl(rp, "max-age=0, must-revalidate"))
 	}
-	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
+	if body.stream == nil {
+		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body.b))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	if _, err := io.Copy(w, body.stream); err != nil {
+		if ctx.Err() == nil {
+			h.log.WarnContext(ctx, "serving a packument failed", "repository", rp.name, "package", name, "err", err)
+		}
+		// Part of the packument is out: cut the connection, so the client
+		// cannot take it for the whole document.
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// publishTo returns the name of a virtual repository's publishTo member,
+// or "".
+func publishTo(rp *repository) string {
+	if rp.virtual != nil {
+		return rp.virtual.PublishTo
+	}
+	return ""
 }
 
 // cacheControl returns a Cache-Control value: directives, after "public"
@@ -303,27 +391,106 @@ func cacheControl(rp *repository, directives string) string {
 // serveVersion serves GET /npm/<repo>/<name>/<spec>: the manifest of a
 // version, or of the version a dist-tag points at.
 func (h *Handler) serveVersion(w http.ResponseWriter, r *http.Request, rp *repository, name, spec string) {
-	doc, err := h.packumentOf(r.Context(), rp, name, false)
-	if err != nil {
-		h.fail(w, r, err)
-		return
-	}
-	pv := doc.version(spec)
-	if pv == nil {
-		for _, t := range doc.tags {
-			if t.Tag == spec {
-				pv = doc.version(t.Version)
+	ctx := r.Context()
+	var out []byte
+	if rp.typ == config.TypeHosted {
+		doc, err := h.packumentOf(ctx, rp, name, false)
+		if err != nil {
+			h.fail(w, r, err)
+			return
+		}
+		pv := doc.version(spec)
+		if pv == nil {
+			for _, t := range doc.tags {
+				if t.Tag == spec {
+					pv = doc.version(t.Version)
+				}
 			}
 		}
+		if pv != nil {
+			out = renderVersion(doc.name, pv, tarballBase(r, rp), false)
+		}
+	} else {
+		body, err := h.packumentBody(ctx, h.actor(r), rp, name, false, tarballBase(r, rp))
+		if err != nil {
+			h.fail(w, r, err)
+			return
+		}
+		f := body.reader()
+		out, err = versionIn(f, spec)
+		f.Close()
+		if err != nil {
+			h.fail(w, r, err)
+			return
+		}
 	}
-	if pv == nil {
+	if out == nil {
 		writeError(w, http.StatusNotFound, "version %s of %s is not found", abbrev(spec), name)
 		return
 	}
-	body := renderVersion(doc.name, pv, tarballBase(r, rp), false)
 	w.Header().Set("Content-Type", mtJSON)
 	w.Header().Set("Cache-Control", cacheControl(rp, "max-age=0, must-revalidate"))
-	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(out))
+}
+
+// versionIn returns the manifest of a served packument's version spec, or
+// of the version the dist-tag spec points at, or nil if it has none.
+func versionIn(r io.Reader, spec string) (json.RawMessage, error) {
+	var tags map[string]string
+	var exact, tagged json.RawMessage
+	pending := map[string]json.RawMessage{} // versions read before the dist-tags
+	_, isVersion := parseVersion(spec)
+	err := scanPackument(r, packumentVisitor{
+		field: func(k string, raw json.RawMessage) error {
+			if k == "dist-tags" {
+				json.Unmarshal(raw, &tags)
+				if tags == nil {
+					tags = map[string]string{}
+				}
+			}
+			return nil
+		},
+		version: func(ver string, raw json.RawMessage) error {
+			switch {
+			case ver == spec:
+				exact = raw
+			case tags != nil:
+				if t, ok := tags[spec]; ok && t == ver {
+					tagged = raw
+				}
+			case !isVersion:
+				pending[ver] = raw
+			}
+			return nil
+		},
+	})
+	switch {
+	case err != nil:
+		return nil, err
+	case exact != nil:
+		return exact, nil
+	case tagged != nil:
+		return tagged, nil
+	}
+	if t, ok := tags[spec]; ok {
+		return pending[t], nil
+	}
+	return nil, nil
+}
+
+// distTagsIn returns the dist-tags of a served packument.
+func distTagsIn(r io.Reader) (map[string]string, error) {
+	tags := map[string]string{}
+	err := scanPackument(r, packumentVisitor{
+		field: func(k string, raw json.RawMessage) error {
+			if k == "dist-tags" {
+				json.Unmarshal(raw, &tags)
+			}
+			return nil
+		},
+		version: func(string, json.RawMessage) error { return nil },
+	})
+	return tags, err
 }
 
 // abbreviatedFields are the version fields of the abbreviated packument:
@@ -490,6 +657,20 @@ func hasInstallScript(m map[string]json.RawMessage) bool {
 
 // serveTarball serves GET and HEAD /npm/<repo>/<name>/-/<file>.
 func (h *Handler) serveTarball(w http.ResponseWriter, r *http.Request, rp *repository, name, file string) {
+	switch rp.typ {
+	case config.TypeProxy:
+		h.proxyTarball(w, r, rp, rp, name, file, nil)
+		return
+	case config.TypeVirtual:
+		h.virtualTarball(w, r, rp, name, file)
+		return
+	}
+	h.hostedTarball(w, r, rp, rp, name, file)
+}
+
+// hostedTarball serves a tarball of hosted repository rp, as repository
+// front, which the request named.
+func (h *Handler) hostedTarball(w http.ResponseWriter, r *http.Request, front, rp *repository, name, file string) {
 	version, ok := tarballVersion(name, file)
 	if !ok {
 		writeError(w, http.StatusNotFound, "%s is not a tarball of %s", abbrev(file), name)
@@ -510,7 +691,7 @@ func (h *Handler) serveTarball(w http.ResponseWriter, r *http.Request, rp *repos
 		writeError(w, http.StatusNotFound, "%s@%s is not found", name, version)
 		return
 	}
-	h.serveBlob(w, r, rp, vr.Tarball, vr.Size)
+	h.serveBlob(w, r, front, vr.Tarball, vr.Size)
 }
 
 // serveBlob streams blob d, size bytes, as a tarball.

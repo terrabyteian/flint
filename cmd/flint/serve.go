@@ -401,13 +401,20 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Repositories: cfg.Repositories,
 		// npm sends API tokens as bearer tokens, and tells the user to
 		// log in when it gets a 401 without a challenge.
-		Authorizer: authz.Authorizer(auth.Challenge{Style: auth.ChallengePlain, WriteError: npm.WriteError}),
-		Login:      npmLogin(authz),
-		User:       principalUser,
-		Actor:      authz.Actor,
-		Logger:     logger,
-		Metrics:    reg,
-		Now:        now,
+		Authorizer:     authz.Authorizer(auth.Challenge{Style: auth.ChallengePlain, WriteError: npm.WriteError}),
+		Login:          npmLogin(authz),
+		User:           principalUser,
+		Actor:          authz.Actor,
+		Logger:         logger,
+		Metrics:        reg,
+		Now:            now,
+		Upstream:       upOpts,
+		Space:          space,
+		Fetcher:        fetcher,
+		Docs:           docs,
+		Paths:          paths,
+		ProxyMetrics:   proxyMetrics,
+		VirtualMetrics: virtualMetrics,
 	})
 	if err != nil {
 		return nil, err
