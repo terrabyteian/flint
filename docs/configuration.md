@@ -41,8 +41,31 @@ Repositories and permission grants declared here are read-only through the API.
       "type": "hosted",
       "immutableTags": true,
       "anonymousPull": true
+    },
+    {
+      "name": "dockerhub",
+      "format": "oci",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://registry-1.docker.io",
+        "username": "flint-mirror",
+        "passwordFile": "/etc/flint/upstream/dockerhub/password",
+        "revalidateAfter": "5m"
+      }
+    },
+    {
+      "name": "ghcr",
+      "format": "oci",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://ghcr.io",
+        "sizeLimit": "200GiB"
+      }
     }
   ],
+  "proxyCache": {
+    "minFreeSpace": "5%"
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",
@@ -52,6 +75,11 @@ Repositories and permission grants declared here are read-only through the API.
       {
         "repositories": ["docker-local", "releases"],
         "role": "write",
+        "groups": ["ci"]
+      },
+      {
+        "repositories": ["dockerhub", "ghcr"],
+        "role": "read",
         "groups": ["ci"]
       },
       {
@@ -81,8 +109,10 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `repositories` | array | `[]` | Repositories declared in configuration; see below. |
 | `auth.permissions` | array | `[]` | Permission grants; see below. |
 | `auth.bootstrapAdmin` | object | none | Create the first administrator at startup if none exists; see below. |
+| `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
 
 Durations are Go duration strings: a number and a unit, such as `"30s"`, `"2m"`, or `"1m30s"`.
+Sizes are a number of bytes, or a number and a unit: `kB`, `MB`, `GB`, `TB`, and `PB` count in powers of 1000, and `KiB`, `MiB`, `GiB`, `TiB`, and `PiB` in powers of 1024, with or without the final `B` (`Gi`), such as `"500MiB"` or `"1.5TB"`.
 
 ### TLS
 
@@ -105,9 +135,26 @@ A bare IP address means that one address; IPv4-mapped IPv6 addresses match IPv4 
 | --- | --- | --- | --- |
 | `name` | string | required | The repository's path prefix, as in `host/docker-local/team/app`: clients address images below it, never the repository itself. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique. |
 | `format` | string | required | Package format. Only `oci` is supported so far; `pypi` arrives with milestone M3. |
-| `type` | string | required | Repository type. Only `hosted` is supported so far; `proxy` and `virtual` arrive with later milestones. |
-| `immutableTags` | bool | `false` | Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
+| `type` | string | required | Repository type: `hosted`, which clients push to, or `proxy`, a read-only cache of an upstream registry. `virtual` arrives with milestone M3. |
+| `immutableTags` | bool | `false` | Hosted repositories only. Make a pushed tag permanent: pushing another manifest under it, deleting it, or deleting a manifest it points to is refused with `409 DENIED`. Pushing the same manifest again is allowed. |
 | `anonymousPull` | bool | `false` | Let unauthenticated clients pull. |
+| `proxy` | object | required for `proxy` | The upstream of a proxy repository; see below. Not allowed for other types. |
+
+### Proxy repository settings
+
+A proxy repository caches one upstream registry, such as Docker Hub, ghcr.io, or quay.io; [proxy repositories](#proxy-repositories) describes how it serves pulls.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `proxy.url` | string | required | The upstream registry's base URL, without a path, such as `"https://registry-1.docker.io"` or `"https://ghcr.io"`. For Docker Hub (`registry-1.docker.io`), a single-component image name gets the `library/` prefix, as Docker clients add it: `dockerhub/nginx` pulls `library/nginx`. |
+| `proxy.username` | string | none | User name for the upstream, such as a Docker Hub account for its higher pull limits. Requires `passwordFile`. See the warning below. |
+| `proxy.passwordFile` | string | none | Absolute path of a file holding the upstream password or access token, such as a mounted Kubernetes Secret. One trailing newline is ignored. flint reads it at startup, failing to start if it cannot, and again whenever it authenticates to the upstream, so a rotated secret takes effect without a restart. It is never logged. Requires `username`. |
+| `proxy.revalidateAfter` | duration | `"5m"` | How long a cached tag, tag listing, or referrers listing is served before the upstream is asked again. Must be positive. |
+| `proxy.sizeLimit` | size | none | Cap the content cached in this repository. Over the cap, the least recently pulled content is evicted. Without it, everything is cached forever. |
+
+> **Warning: upstream credentials are shared with everyone who can pull.**
+> flint sends every upstream request of a proxy repository with its configured account, so anyone allowed to pull from that repository, including anonymous clients with `anonymousPull`, can read whatever that account can read upstream, including its private repositories.
+> Use a dedicated account that has no private content, or an access token limited to public, read-only access, such as a Docker Hub personal access token with the *Public Repo Read-only* scope.
 
 ### Permissions
 
@@ -136,8 +183,8 @@ The file is read only while no administrator exists, so it can be removed after 
 
 ### OCI registry API
 
-Hosted OCI repositories are served at `/v2/` following the OCI Distribution Spec v1.1: blob pulls with range requests, monolithic, chunked, and streamed uploads, cross-repository mounts, manifests (OCI image manifests and indexes, Docker schema 2 manifests and manifest lists), the referrers API, paginated tag and catalog listings, and deletes.
-An image is addressed as `<host>/<repository>/<name>`, for example `registry.example.com/docker-local/team/app:1.0`, where `<repository>` is a configured hosted OCI repository and `<name>` is one or more path components.
+OCI repositories are served at `/v2/` following the OCI Distribution Spec v1.1: blob pulls with range requests, monolithic, chunked, and streamed uploads, cross-repository mounts, manifests (OCI image manifests and indexes, Docker schema 2 manifests and manifest lists), the referrers API, paginated tag and catalog listings, and deletes.
+An image is addressed as `<host>/<repository>/<name>`, for example `registry.example.com/docker-local/team/app:1.0`, where `<repository>` is a configured OCI repository and `<name>` is one or more path components.
 Blobs and manifests are visible only in the repository name they were pushed or mounted to.
 
 A manifest is accepted only when every blob and child manifest it references is already in the same repository name, with the size its descriptor gives; a manifest's `subject` may name a manifest not pushed yet.
@@ -147,8 +194,24 @@ Deletes hide content at once; the disk space is reclaimed by garbage collection,
 
 An upload session expires 24 hours after it starts; flint checks for expired sessions hourly and removes their staged data.
 
-Authentication arrives later in milestone M1.
-Until then every request is allowed, so expose flint only to clients you trust.
+Every request is authenticated and authorized as [authentication](auth.md) describes.
+
+### Proxy repositories
+
+A proxy repository serves pulls of its upstream's images, such as `registry.example.com/dockerhub/library/nginx:1.27` for Docker Hub's `nginx:1.27`, and caches what it serves in the same content-addressed store as hosted repositories, so each blob is stored once however many repositories use it.
+
+- **Content addressed by digest** (blobs, and manifests pulled by digest) never changes, so once cached it is served forever without asking the upstream.
+- **Tags** are served from the cache for `revalidateAfter` after the upstream last confirmed them. After that, flint asks the upstream for the tag's current digest with a `HEAD` request, which Docker Hub does not count against its pull rate limit, and fetches the manifest again only if the tag moved.
+- **Tag listings and the referrers API** come from the upstream and are kept in memory for `revalidateAfter`. An upstream without the referrers API is answered with the referrers of the manifests cached so far.
+- **When the upstream is unreachable**, because of network errors, timeouts, `5xx` errors, or `429` rate limiting, cached content keeps being served: tags as last confirmed, and listings as last fetched or, failing that, from the cached tags. After such a failure flint treats the upstream as offline for 30 seconds and serves cached copies without waiting on it. Content that was never cached cannot be served, and is answered with `503 UNAVAILABLE`.
+- **When the upstream answers that a tag or tag listing is not found or denied** (`404`, or `401` or `403` once flint has authenticated), for example because the tag was deleted or the image made private, flint answers `404` too, even if it has the tag cached. Content addressed by digest stays cached and served.
+- **When flint cannot authenticate to the upstream**, because the upstream or its token service refuses the configured credentials (an expired access token, say) or its authentication challenge is unusable, cached content keeps being served as if the upstream were unreachable, flint logs a warning naming the authentication failure, and it treats the upstream as offline for 30 seconds, so it does not ask the token service again on every pull.
+- **Fetching.** A blob that is not cached streams to the client while flint writes it to the store, and concurrent pulls of the same blob share one upstream request. Every blob and manifest is checked against its digest: a mismatched manifest is refused with `502`, and a mismatched blob is cut off before its last byte, so a client never receives it whole and it never enters the cache. Transient upstream failures (network errors, `429`, and `5xx`) are retried with backoff. The `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment variables apply to upstream requests.
+- **Disk space.** When the free space on the data directory's filesystem would fall below `proxyCache.minFreeSpace`, new content is passed through from the upstream without being cached, cached content keeps being served, flint logs a warning, and `flint_proxy_disk_pressure` is 1. flint never deletes cached content to make room.
+- **Size limit.** With `proxy.sizeLimit`, when the repository's cached content (each blob and manifest, counted once per image name) exceeds the limit, the least recently pulled items are evicted until it fits: a blob's link, or a manifest with the tags pointing to it. Content larger than the limit is passed through. Pull times are kept in memory and saved every minute, so a restart forgets at most the last minute's pulls. Eviction hides content at once; the disk space is reclaimed by garbage collection, which arrives with milestone M4.
+- **Read-only.** Pushes and deletes are refused with `405 UNSUPPORTED`.
+
+Proxy repositories use the same permissions as hosted ones: pulling needs the `read` role or `anonymousPull`. With `anonymousPull`, clients pull without credentials or a token, which is how a containerd registry mirror reaches flint; [containerd mirrors](containerd.md) shows the setup.
 
 ### Built-in endpoints
 
@@ -189,3 +252,21 @@ Besides the HTTP, metadata store, and Go runtime metrics, the OCI API exports:
 | `flint_oci_upload_bytes_total{repository}` | Blob bytes received in uploads. |
 | `flint_oci_manifest_pushes_total{repository}` | Manifests pushed. |
 | `flint_oci_link_retries_total` | Link batches retried because a concurrent change, such as a garbage-collection sweep starting, failed their precondition. |
+| `flint_proxy_requests_total{repository,result}` | Pulls from proxy repositories, by result: `hit` (served from the cache), `revalidated` (served after the upstream confirmed a tag or listing), `fetched` (fetched from the upstream and cached), `passthrough` (fetched without caching, under disk pressure or over the size limit), and `stale` (served from the cache because the upstream failed). |
+| `flint_proxy_upstream_errors_total{repository}` | Upstream requests that failed: unreachable, server errors, denied access, failed authentication, or content that did not match its digest. A blob fetch shared by several clients counts once. |
+| `flint_proxy_upstream_bytes_total{repository}` | Bytes fetched from upstream registries. |
+| `flint_proxy_fetches_in_flight` | Blobs being fetched from upstream registries. |
+| `flint_proxy_disk_pressure` | 1 while the free space is below `proxyCache.minFreeSpace` and new content is passed through without caching, else 0. Alert on it. |
+| `flint_data_free_bytes` | Free bytes on the data directory's filesystem, as last measured. |
+| `flint_proxy_cached_bytes{repository}` | Bytes cached by proxy repositories with a size limit. |
+| `flint_proxy_evictions_total{repository}` | Items evicted to keep proxy repositories within their size limits. |
+
+The disk-pressure gauge is the alert for a nearly full disk, for example as a Prometheus alerting rule:
+
+```yaml
+- alert: FlintProxyDiskPressure
+  expr: flint_proxy_disk_pressure == 1
+  for: 10m
+  annotations:
+    summary: flint's data volume is nearly full; proxy repositories no longer cache new content.
+```

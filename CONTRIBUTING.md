@@ -54,6 +54,7 @@ It also builds the container image for linux/amd64 and linux/arm64 from the [`Do
 Changes to the Helm chart in [`deploy/helm/flint`](deploy/helm/flint) are checked by `scripts/check-chart.sh`, which needs helm, yq, and kubeconform; see [releasing](docs/releasing.md#checking-the-chart-locally).
 
 CI also runs the official OCI distribution conformance suite and [`scripts/e2e-oci.sh`](scripts/e2e-oci.sh) against a running flint; the `oci` job in [`ci.yml`](.github/workflows/ci.yml) shows the configuration, and the script's header lists the clients it needs.
+The `proxy` job runs [`scripts/e2e-proxy.sh`](scripts/e2e-proxy.sh), which pulls real images from Docker Hub and ghcr.io through proxy repositories, then again after restarting flint with its upstreams unreachable.
 
 ## Pull requests
 

@@ -42,6 +42,10 @@ Roles are granted in the configuration to users and groups, on repository names 
 A user's role on a repository is the highest one any matching grant gives the user directly or through a group.
 A user with the global `admin` flag has the `admin` role on every repository and may use the admin API.
 A repository with `anonymousPull` lets everyone pull from it, signed in or not; it is off by default.
+An anonymous client may pull from such a repository directly, without a token, as a containerd registry mirror does.
+
+[Proxy repositories](configuration.md#proxy-repositories) use the same roles: pulling, which may fetch from the upstream, needs `read`.
+They are read-only, so pushes and deletes are refused whatever the role.
 
 Permissions apply to flint repositories: the first component of an image path.
 A grant on `docker-local` covers `host/docker-local/team/app`.

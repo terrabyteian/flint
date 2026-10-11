@@ -17,6 +17,22 @@ config:
       type: hosted
       immutableTags: true
       anonymousPull: true
+    - name: dockerhub
+      format: oci
+      type: proxy
+      proxy:
+        url: https://registry-1.docker.io
+        username: flint-mirror
+        passwordFile: /etc/flint/upstream/dockerhub/password
+        revalidateAfter: 10m
+        sizeLimit: 200GiB
+    - name: ghcr
+      format: oci
+      type: proxy
+      proxy:
+        url: https://ghcr.io
+  proxyCache:
+    minFreeSpace: 20GiB
   auth:
     permissions:
       - repositories: ["docker-local", "releases"]
@@ -26,6 +42,9 @@ bootstrapAdmin:
   enabled: true
   username: root
   existingSecret: flint-admin
+upstreamSecrets:
+  - name: dockerhub
+    existingSecret: dockerhub-credentials
 containerPort: 8443
 service:
   type: LoadBalancer

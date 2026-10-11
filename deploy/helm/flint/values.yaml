@@ -32,8 +32,32 @@ config:
   # - name: docker-local
   #   format: oci
   #   type: hosted
+  # - name: dockerhub
+  #   format: oci
+  #   type: proxy
+  #   anonymousPull: true
+  #   proxy:
+  #     url: https://registry-1.docker.io
+  #     # Optional upstream credentials; the password comes from
+  #     # upstreamSecrets below.
+  #     username: my-docker-hub-user
+  #     passwordFile: /etc/flint/upstream/dockerhub/password
   auth:
     permissions: []
+  # proxyCache:
+  #   # Free space below which proxy repositories stop caching new content.
+  #   minFreeSpace: 5%
+
+# Secrets holding proxy repositories' upstream passwords or access tokens.
+# Each Secret's key "password" is mounted at
+# /etc/flint/upstream/<name>/password, the path to give as
+# config.repositories[].proxy.passwordFile. flint reads the file whenever it
+# authenticates, so a rotated Secret takes effect without a restart.
+upstreamSecrets: []
+# - name: dockerhub
+#   # Such as one made with
+#   #   kubectl create secret generic dockerhub-credentials --from-literal=password=...
+#   existingSecret: dockerhub-credentials
 
 # The first administrator, which flint creates at startup while no
 # administrator exists (docs/auth.md). Its password is the key "password" of

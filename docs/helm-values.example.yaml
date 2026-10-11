@@ -18,6 +18,14 @@ config:
       type: hosted
       immutableTags: true
       anonymousPull: true
+    # A Docker Hub mirror, also usable as a containerd registry mirror
+    # (docs/containerd.md).
+    - name: dockerhub
+      format: oci
+      type: proxy
+      anonymousPull: true
+      proxy:
+        url: https://registry-1.docker.io
   auth:
     permissions:
       - repositories: ["docker-local", "releases"]

@@ -472,6 +472,20 @@ type upload struct {
 	done bool
 }
 
+// OpenStaged opens a second handle on the upload's data file. It keeps
+// reading the same file after Commit renames it into place or the upload
+// is discarded.
+func (u *upload) OpenStaged() (StagedReader, error) {
+	if u.done {
+		return nil, ErrUploadClosed
+	}
+	f, err := u.s.fs.Open(u.f.Name())
+	if err != nil {
+		return nil, fmt.Errorf("blob: opening upload %s for reading: %w", u.id, err)
+	}
+	return f, nil
+}
+
 func (u *upload) ID() string  { return u.id }
 func (u *upload) Size() int64 { return u.size }
 

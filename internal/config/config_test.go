@@ -21,6 +21,7 @@ func TestMinimalDefaults(t *testing.T) {
 		DataDir:         "/data",
 		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout},
 		Log:             Log{Level: DefaultLogLevel},
+		ProxyCache:      ProxyCache{MinFreeSpace: FreeSpace{Percent: 5, text: "5%"}},
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("got %+v, want %+v", c, want)
@@ -41,8 +42,12 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 2 || !c.Repositories[1].ImmutableTags || len(c.Auth.Permissions) != 2 {
+	if len(c.Repositories) != 4 || !c.Repositories[1].ImmutableTags || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
+	}
+	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
+		p.PasswordFile != "/etc/flint/upstream/dockerhub/password" || c.Repositories[3].Proxy.SizeLimit.Bytes != 200<<30 {
+		t.Errorf("unexpected proxy settings: %+v", c.Repositories[2:])
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
@@ -167,8 +172,40 @@ func TestValidation(t *testing.T) {
 			[]string{`repositories[1].name: "a" is already declared by repositories[0]`}},
 		{"repo missing format and type", `{"dataDir": "/d", "repositories": [{"name": "a"}]}`,
 			[]string{"repositories[0].format: is required", "repositories[0].type: is required"}},
-		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "pypi", "type": "proxy"}]}`,
-			[]string{`repositories[0].format: "pypi" is not supported`, `repositories[0].type: "proxy" is not supported`}},
+		{"repo unsupported", `{"dataDir": "/d", "repositories": [{"name": "a", "format": "pypi", "type": "virtual"}]}`,
+			[]string{`repositories[0].format: "pypi" is not supported`, `repositories[0].type: "virtual" is not supported`}},
+		{"proxy good", `{"dataDir": "/d", "proxyCache": {"minFreeSpace": "20GiB"}, "repositories": [{"name": "dockerhub", "format": "oci", "type": "proxy",
+			"anonymousPull": true, "proxy": {"url": "https://registry-1.docker.io", "username": "me", "passwordFile": "/run/pw",
+			"revalidateAfter": "1m", "sizeLimit": "500GiB"}}]}`, nil},
+		{"proxy minimal", `{"dataDir": "/d", "repositories": [{"name": "ghcr", "format": "oci", "type": "proxy", "proxy": {"url": "http://localhost:5001/"}}]}`, nil},
+		{"proxy missing", `{"dataDir": "/d", "repositories": [{"name": "p", "format": "oci", "type": "proxy", "immutableTags": true}]}`,
+			[]string{`repositories[0].proxy: is required for type "proxy"`, "repositories[0].immutableTags: is not allowed"}},
+		{"proxy on hosted", `{"dataDir": "/d", "repositories": [{"name": "h", "format": "oci", "type": "hosted", "proxy": {"url": "https://ghcr.io"}}]}`,
+			[]string{`repositories[0].proxy: is only allowed for type "proxy"`}},
+		{"proxy bad settings", `{"dataDir": "/d", "repositories": [{"name": "p", "format": "oci", "type": "proxy", "proxy": {
+			"url": "ftp://x", "username": "a:b", "passwordFile": "pw", "revalidateAfter": "-1s", "sizeLimit": "lots"}}]}`,
+			[]string{`repositories[0].proxy.url: "ftp://x" must be an http or https URL`, "repositories[0].proxy.username: must not contain",
+				`repositories[0].proxy.passwordFile: "pw" must be an absolute path`, "repositories[0].proxy.revalidateAfter: must be positive",
+				`repositories[0].proxy.sizeLimit: "lots" is not a size`}},
+		{"proxy url checks", `{"dataDir": "/d", "repositories": [
+			{"name": "a", "format": "oci", "type": "proxy", "proxy": {"url": ""}},
+			{"name": "b", "format": "oci", "type": "proxy", "proxy": {"url": "https://u:p@ghcr.io"}},
+			{"name": "c", "format": "oci", "type": "proxy", "proxy": {"url": "https://ghcr.io/v2/x"}},
+			{"name": "d", "format": "oci", "type": "proxy", "proxy": {"url": "https://ghcr.io?x=1"}},
+			{"name": "e", "format": "oci", "type": "proxy", "proxy": {"url": "https://"}}]}`,
+			[]string{"repositories[0].proxy.url: is required", "repositories[1].proxy.url: \"https://u:p@ghcr.io\" must not contain credentials",
+				"repositories[2].proxy.url: \"https://ghcr.io/v2/x\" must be the registry's base URL", "repositories[3].proxy.url: \"https://ghcr.io?x=1\" must not have a query",
+				"repositories[4].proxy.url: \"https://\" has no host"}},
+		{"proxy credentials incomplete", `{"dataDir": "/d", "repositories": [
+			{"name": "a", "format": "oci", "type": "proxy", "proxy": {"url": "https://ghcr.io", "username": "me"}},
+			{"name": "b", "format": "oci", "type": "proxy", "proxy": {"url": "https://ghcr.io", "passwordFile": "/pw"}}]}`,
+			[]string{"repositories[0].proxy.passwordFile: is required with username", "repositories[1].proxy.username: is required with passwordFile"}},
+		{"proxy zero size limit", `{"dataDir": "/d", "repositories": [{"name": "p", "format": "oci", "type": "proxy", "proxy": {"url": "https://ghcr.io", "sizeLimit": 0}}]}`,
+			[]string{"repositories[0].proxy.sizeLimit: must be positive"}},
+		{"bad min free space", `{"dataDir": "/d", "proxyCache": {"minFreeSpace": "100%"}}`,
+			[]string{`proxyCache.minFreeSpace: "100%" is not a percentage`}},
+		{"bad min free size", `{"dataDir": "/d", "proxyCache": {"minFreeSpace": "some"}}`,
+			[]string{`proxyCache.minFreeSpace: "some" is not a size: use a percentage such as "5%"`}},
 		{"repo good", `{"dataDir": "/d", "repositories": [{"name": "my.repo_1-x", "format": "oci", "type": "hosted"}]}`, nil},
 		{"permission empty", `{"dataDir": "/d", "auth": {"permissions": [{}]}}`,
 			[]string{"auth.permissions[0].repositories: must name at least one", `auth.permissions[0].role: "" is not one of`,
@@ -203,6 +240,64 @@ func TestValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProxyDefaults(t *testing.T) {
+	c, err := Parse([]byte(`{"dataDir": "/d", "proxyCache": {"minFreeSpace": 1073741824}, "repositories": [
+		{"name": "p", "format": "oci", "type": "proxy", "proxy": {"url": "https://ghcr.io", "sizeLimit": "1.5GiB"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.Repositories[0].Proxy
+	if p.RevalidateAfter.Duration != DefaultRevalidateAfter {
+		t.Errorf("revalidateAfter = %v, want the default %v", p.RevalidateAfter, DefaultRevalidateAfter)
+	}
+	if p.SizeLimit.Bytes != 3<<29 {
+		t.Errorf("sizeLimit = %d, want 1.5GiB", p.SizeLimit.Bytes)
+	}
+	if got := c.ProxyCache.MinFreeSpace.Of(1 << 40); got != 1<<30 {
+		t.Errorf("minFreeSpace of 1TiB = %d, want 1GiB", got)
+	}
+	d, _ := Parse([]byte(`{"dataDir": "/d"}`))
+	if got := d.ProxyCache.MinFreeSpace.Of(1000); got != 50 {
+		t.Errorf("default minFreeSpace of 1000 bytes = %d, want 50", got)
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	tests := []struct {
+		in   string
+		want int64 // -1 means an error
+	}{
+		{"0", 0},
+		{"1024", 1024},
+		{"1KB", 1000},
+		{"1kB", 1000},
+		{"1KiB", 1024},
+		{"1Ki", 1024},
+		{"20GiB", 20 << 30},
+		{"1.5 GiB", 3 << 29},
+		{"2TB", 2e12},
+		{"1Pi", 1 << 50},
+		{"", -1},
+		{"GiB", -1},
+		{"1 gib", -1},
+		{"-1GiB", -1},
+		{"1..2GiB", -1},
+		{"99999999PiB", -1},
+	}
+	for _, tt := range tests {
+		got, err := ParseSize(tt.in)
+		if tt.want < 0 {
+			if err == nil {
+				t.Errorf("ParseSize(%q) = %d, want an error", tt.in, got)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("ParseSize(%q) = %d, %v; want %d", tt.in, got, err, tt.want)
+		}
 	}
 }
 

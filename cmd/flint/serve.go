@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/terrabyteian/flint/internal/auth"
 	"github.com/terrabyteian/flint/internal/blob"
@@ -18,6 +19,7 @@ import (
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
 	"github.com/terrabyteian/flint/internal/server"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // defaultConfigPath is where serve looks for its configuration without -config.
@@ -88,16 +90,15 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	if err != nil {
 		return err
 	}
-	// Expire abandoned uploads in the background until the stores close.
+	// Expire abandoned uploads, and run the proxy repositories' upkeep,
+	// in the background until the stores close.
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
-	janitorDone := make(chan struct{})
-	go func() {
-		defer close(janitorDone)
-		registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge)
-	}()
+	var janitors sync.WaitGroup
+	janitors.Go(func() { registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
+	janitors.Go(func() { registry.RunProxy(janitorCtx) })
 	defer func() {
 		stopJanitor()
-		<-janitorDone
+		janitors.Wait()
 	}()
 	addr, err := srv.Listen()
 	if err != nil {
@@ -174,6 +175,17 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	}
 	authz.Register(srv)
 
+	var space *upstream.Space
+	for _, r := range cfg.Repositories {
+		if r.Type == config.TypeProxy {
+			space = upstream.NewSpace(upstream.SpaceOptions{
+				Path:    cfg.DataDir,
+				MinFree: cfg.ProxyCache.MinFreeSpace.Of,
+				Logger:  logger,
+			})
+			break
+		}
+	}
 	registry, err := oci.New(oci.Options{
 		Meta:         store,
 		Blobs:        blobs,
@@ -182,6 +194,8 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Actor:        authz.Actor,
 		Logger:       logger,
 		Metrics:      reg,
+		Upstream:     upstream.Options{UserAgent: "flint/" + version},
+		Space:        space,
 	})
 	if err != nil {
 		return nil, nil, err

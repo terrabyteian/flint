@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -398,36 +399,41 @@ func (h *Handler) getManifest(w http.ResponseWriter, r *http.Request, rn *repoNa
 		h.writeError(w, r, err)
 		return
 	}
+	h.serveManifest(w, r, rn, ref, d, m, nil)
+}
+
+// serveManifest serves manifest d, described by m, from body if it is
+// not nil, or else from the blob store.
+func (h *Handler) serveManifest(w http.ResponseWriter, r *http.Request, rn *repoName, ref string, d blob.Digest, m *manifestRecord, body []byte) {
 	if !accepts(r, m.MediaType) {
 		h.writeError(w, r, newError(http.StatusNotFound, codeManifestUnknown,
 			"manifest %s is %s, which the request's Accept header does not include", abbrev(ref), m.MediaType))
 		return
+	}
+	var content io.Reader = bytes.NewReader(body)
+	if body == nil && r.Method != http.MethodHead {
+		f, err := h.blobs.Open(r.Context(), d)
+		if err != nil {
+			if errors.Is(err, blob.ErrNotFound) {
+				h.log.WarnContext(r.Context(), "stored manifest is missing from the blob store",
+					"repository", rn.full, "digest", d.String())
+				err = manifestUnknown(rn, ref)
+			}
+			h.writeError(w, r, err)
+			return
+		}
+		defer f.Close()
+		content = f
 	}
 	hd := w.Header()
 	hd.Set("Content-Type", m.MediaType)
 	hd.Set("Docker-Content-Digest", d.String())
 	hd.Set("ETag", `"`+d.String()+`"`)
 	hd.Set("Content-Length", strconv.FormatInt(m.Size, 10))
-	if r.Method == http.MethodHead {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	f, err := h.blobs.Open(r.Context(), d)
-	if err != nil {
-		for _, k := range []string{"Content-Type", "Docker-Content-Digest", "ETag", "Content-Length"} {
-			hd.Del(k)
-		}
-		if errors.Is(err, blob.ErrNotFound) {
-			h.log.WarnContext(r.Context(), "stored manifest is missing from the blob store",
-				"repository", rn.full, "digest", d.String())
-			err = manifestUnknown(rn, ref)
-		}
-		h.writeError(w, r, err)
-		return
-	}
-	defer f.Close()
 	w.WriteHeader(http.StatusOK)
-	io.CopyN(w, f, m.Size)
+	if r.Method != http.MethodHead {
+		io.CopyN(w, content, m.Size)
+	}
 }
 
 // deleteManifest serves DELETE /v2/<name>/manifests/<reference>. By tag it

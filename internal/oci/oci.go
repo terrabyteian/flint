@@ -1,8 +1,10 @@
-// Package oci serves hosted OCI repositories over the OCI Distribution
-// Spec v1.1 API at /v2/: blob pulls, monolithic, chunked, and streamed
-// uploads, cross-repository mounts, manifests (OCI image manifests and
-// indexes, Docker schema 2 manifests and manifest lists), the referrers
-// API, paginated tag and catalog listings, and deletes.
+// Package oci serves hosted and proxy OCI repositories over the OCI
+// Distribution Spec v1.1 API at /v2/: blob pulls, monolithic, chunked,
+// and streamed uploads, cross-repository mounts, manifests (OCI image
+// manifests and indexes, Docker schema 2 manifests and manifest lists),
+// the referrers API, paginated tag and catalog listings, and deletes.
+// Proxy repositories cache an upstream registry and are read-only; see
+// proxy.go.
 //
 // Clients address an image as <repository>/<name>: the first path
 // component is a repository declared in the configuration, and the rest
@@ -22,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
@@ -29,6 +32,7 @@ import (
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/server"
+	"github.com/terrabyteian/flint/internal/upstream"
 )
 
 // Actions passed to Authorizer.Authorize.
@@ -85,8 +89,18 @@ type Options struct {
 	Meta  meta.Store
 	Blobs blob.Store
 	// Repositories are the configured repositories; those with format
-	// "oci" and type "hosted" are served.
+	// "oci" and type "hosted" or "proxy" are served.
 	Repositories []config.Repository
+	// Upstream holds the defaults for proxy repositories' upstream
+	// clients, such as the user agent; each repository's URL and
+	// credentials come from its configuration.
+	Upstream upstream.Options
+	// Space, if set, watches the data directory's free space, so proxy
+	// repositories stop caching new content when it runs low.
+	Space *upstream.Space
+	// FetchIdleTimeout is how long a proxy's blob fetch waits for the
+	// upstream to send more; zero means upstream.DefaultIdleTimeout.
+	FetchIdleTimeout time.Duration
 	// Authorizer authorizes every request. Required.
 	Authorizer Authorizer
 	// Logger receives failures; nil means slog.Default().
@@ -101,10 +115,11 @@ type Options struct {
 	Now func() time.Time
 }
 
-// repository is a configured hosted OCI repository.
+// repository is a configured OCI repository.
 type repository struct {
 	name          string
 	immutableTags bool
+	proxy         *proxyRepo // nil for a hosted repository
 }
 
 // Handler serves the OCI distribution API.
@@ -120,6 +135,23 @@ type Handler struct {
 	uploadBytes   *metrics.Counter
 	manifestPuts  *metrics.Counter
 	linkConflicts *metrics.CounterSeries
+
+	// Proxy repositories.
+	hasProxy      bool
+	fetcher       *upstream.Fetcher
+	space         *upstream.Space
+	tagCalls      upstream.Group[*proxied]
+	manifestCalls upstream.Group[*proxied]
+	validatedMu   sync.Mutex
+	validated     map[string]time.Time // tag key: when the upstream last confirmed it
+	listings      listingCache
+	evictKick     chan struct{}
+
+	proxyResults   *metrics.Counter
+	upstreamErrors *metrics.Counter
+	upstreamBytes  *metrics.Counter
+	evictions      *metrics.Counter
+	cachedBytes    *metrics.Gauge
 }
 
 // New returns a Handler.
@@ -131,13 +163,17 @@ func New(opts Options) (*Handler, error) {
 		return nil, errors.New("oci: an Authorizer is required")
 	}
 	h := &Handler{
-		meta:  opts.Meta,
-		blobs: opts.Blobs,
-		repos: map[string]*repository{},
-		auth:  opts.Authorizer,
-		log:   opts.Logger,
-		actor: opts.Actor,
-		now:   opts.Now,
+		meta:      opts.Meta,
+		blobs:     opts.Blobs,
+		repos:     map[string]*repository{},
+		auth:      opts.Authorizer,
+		log:       opts.Logger,
+		actor:     opts.Actor,
+		now:       opts.Now,
+		space:     opts.Space,
+		fetcher:   upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout),
+		validated: map[string]time.Time{},
+		evictKick: make(chan struct{}, 1),
 	}
 	if h.log == nil {
 		h.log = slog.Default()
@@ -148,9 +184,30 @@ func New(opts Options) (*Handler, error) {
 	if h.actor == nil {
 		h.actor = clientActor
 	}
+	upOpts := opts.Upstream
+	if upOpts.Logger == nil {
+		upOpts.Logger = h.log
+	}
+	if upOpts.Now == nil {
+		upOpts.Now = h.now
+	}
 	for _, rc := range opts.Repositories {
-		if rc.Format == config.FormatOCI && rc.Type == config.TypeHosted {
+		if rc.Format != config.FormatOCI {
+			continue
+		}
+		switch rc.Type {
+		case config.TypeHosted:
 			h.repos[rc.Name] = &repository{name: rc.Name, immutableTags: rc.ImmutableTags}
+		case config.TypeProxy:
+			if rc.Proxy == nil {
+				return nil, fmt.Errorf("oci: proxy repository %s has no upstream", rc.Name)
+			}
+			p, err := newProxyRepo(rc, upOpts)
+			if err != nil {
+				return nil, fmt.Errorf("oci: proxy repository %s: %w", rc.Name, err)
+			}
+			h.repos[rc.Name] = &repository{name: rc.Name, proxy: p}
+			h.hasProxy = true
 		}
 	}
 	reg := opts.Metrics
@@ -163,7 +220,59 @@ func New(opts Options) (*Handler, error) {
 		"Manifests pushed, by repository.", "repository")
 	h.linkConflicts = reg.Counter("flint_oci_link_retries_total",
 		"Link batches retried after a metadata precondition failed.").With()
+	h.proxyResults = reg.Counter("flint_proxy_requests_total",
+		"Pulls from proxy repositories, by repository and result: hit (served from the cache), "+
+			"revalidated (served after the upstream confirmed a tag or listing), fetched (fetched from the upstream and cached), "+
+			"passthrough (fetched from the upstream without caching), stale (served from the cache because the upstream failed).",
+		"repository", "result")
+	h.upstreamErrors = reg.Counter("flint_proxy_upstream_errors_total",
+		"Proxy requests to upstream registries that failed, by repository.", "repository")
+	h.upstreamBytes = reg.Counter("flint_proxy_upstream_bytes_total",
+		"Bytes proxy repositories fetched from upstream registries, by repository.", "repository")
+	h.evictions = reg.Counter("flint_proxy_evictions_total",
+		"Cached items proxy repositories evicted to stay within their size limits, by repository.", "repository")
+	h.cachedBytes = reg.Gauge("flint_proxy_cached_bytes",
+		"Bytes cached by size-limited proxy repositories, by repository.", "repository")
+	fetcher := h.fetcher
+	reg.GaugeFunc("flint_proxy_fetches_in_flight", "Blobs proxy repositories are fetching from upstream registries.",
+		func() float64 { return float64(fetcher.Active()) })
+	if h.space != nil && h.hasProxy {
+		space := h.space
+		reg.GaugeFunc("flint_proxy_disk_pressure",
+			"1 while the data directory's free space is below proxyCache.minFreeSpace and proxy repositories pass new content through without caching it, else 0.",
+			func() float64 {
+				if space.Pressure() {
+					return 1
+				}
+				return 0
+			})
+		reg.GaugeFunc("flint_data_free_bytes", "Free bytes on the data directory's filesystem, as last measured.",
+			func() float64 { return float64(space.Free()) })
+	}
+	if err := h.loadTrackers(); err != nil {
+		return nil, err
+	}
 	return h, nil
+}
+
+// loadTrackers loads the size-limited proxy repositories' cached items,
+// and asks for an eviction if one is over its limit.
+func (h *Handler) loadTrackers() error {
+	v := h.view()
+	defer v.Release()
+	for _, c := range h.trackers() {
+		if err := c.load(v); err != nil {
+			return fmt.Errorf("oci: loading the cache of proxy repository %s: %w", c.repo, err)
+		}
+		h.cachedBytes.With(c.repo).Set(float64(c.size()))
+		if c.size() > c.limit {
+			select {
+			case h.evictKick <- struct{}{}:
+			default:
+			}
+		}
+	}
+	return nil
 }
 
 // Register mounts the handler at /v2/ on a server.
@@ -188,7 +297,7 @@ func (h *Handler) resolve(full string) (*repoName, error) {
 	cfg := h.repos[repo]
 	if cfg == nil {
 		return nil, newError(http.StatusNotFound, codeNameUnknown,
-			"repository %q is not a hosted OCI repository on this registry", repo)
+			"repository %q is not an OCI repository on this registry", repo)
 	}
 	if !ok {
 		return nil, newError(http.StatusNotFound, codeNameUnknown,
@@ -235,6 +344,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	server.LogAttrs(ctx, slog.String("repository", rn.full))
+	if rn.cfg.proxy != nil {
+		h.serveProxy(w, r, rn, ep, arg)
+		return
+	}
 
 	push := []string{ActionPull, ActionPush}
 	type op struct {

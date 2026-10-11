@@ -22,8 +22,31 @@
       "type": "hosted",
       "immutableTags": true,
       "anonymousPull": true
+    },
+    {
+      "name": "dockerhub",
+      "format": "oci",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://registry-1.docker.io",
+        "username": "flint-mirror",
+        "passwordFile": "/etc/flint/upstream/dockerhub/password",
+        "revalidateAfter": "5m"
+      }
+    },
+    {
+      "name": "ghcr",
+      "format": "oci",
+      "type": "proxy",
+      "proxy": {
+        "url": "https://ghcr.io",
+        "sizeLimit": "200GiB"
+      }
     }
   ],
+  "proxyCache": {
+    "minFreeSpace": "5%"
+  },
   "auth": {
     "bootstrapAdmin": {
       "username": "admin",
@@ -33,6 +56,11 @@
       {
         "repositories": ["docker-local", "releases"],
         "role": "write",
+        "groups": ["ci"]
+      },
+      {
+        "repositories": ["dockerhub", "ghcr"],
+        "role": "read",
         "groups": ["ci"]
       },
       {

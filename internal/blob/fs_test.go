@@ -911,3 +911,51 @@ func TestSyncDirFaultAfterRename(t *testing.T) {
 		t.Fatalf("blob after crash = %q", got)
 	}
 }
+
+func TestOpenStaged(t *testing.T) {
+	forEach(t, func(t *testing.T, e env) {
+		for _, end := range []string{"commit", "duplicate", "cancel"} {
+			t.Run(end, func(t *testing.T) {
+				data := []byte("staged " + end)
+				if end == "duplicate" {
+					put(t, e.store, data)
+				}
+				u, err := e.store.NewUpload(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r, err := u.(StagedOpener).OpenStaged()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer r.Close()
+				buf := make([]byte, len(data))
+				if n, err := r.ReadAt(buf, 0); n != 0 || err != io.EOF {
+					t.Fatalf("ReadAt on an empty upload = %d, %v", n, err)
+				}
+				// Bytes written after the reader opened are visible to it.
+				u.Write(data[:3])
+				if n, _ := r.ReadAt(buf, 0); n != 3 || string(buf[:3]) != string(data[:3]) {
+					t.Fatalf("read %d bytes %q of a partial upload", n, buf[:n])
+				}
+				u.Write(data[3:])
+				switch end {
+				case "cancel":
+					err = u.Cancel()
+				default:
+					_, err = u.Commit(ctx, FromBytes(data))
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The reader outlives the upload's end.
+				if n, err := r.ReadAt(buf, 0); n != len(data) || string(buf) != string(data) {
+					t.Fatalf("after %s: read %d bytes %q, %v", end, n, buf[:n], err)
+				}
+				if _, err := u.(StagedOpener).OpenStaged(); !errors.Is(err, ErrUploadClosed) {
+					t.Errorf("OpenStaged after the upload ended: %v, want ErrUploadClosed", err)
+				}
+			})
+		}
+	})
+}
