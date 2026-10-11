@@ -234,6 +234,26 @@ type Answer[T any] struct {
 // ends. With no answers and no failure it returns neither.
 func Consult[T any](ctx context.Context, v *Virtual, members []Member, name string,
 	ask func(context.Context, Member) (T, error), notFound func(error) bool) ([]Answer[T], error) {
+	return consult(ctx, v, members, name, ask, notFound, false)
+}
+
+// First is Consult for what a format takes from one member only, such as
+// a pointer that the first member that has the name defines (npm
+// dist-tags, Go's @latest), or a version's files, which come from the
+// first member that has the version: it returns the first answer, and
+// asks no member after it. ok is false if no member has the package.
+func First[T any](ctx context.Context, v *Virtual, members []Member, name string,
+	ask func(context.Context, Member) (T, error), notFound func(error) bool) (a Answer[T], ok bool, err error) {
+	out, err := consult(ctx, v, members, name, ask, notFound, true)
+	if err != nil || len(out) == 0 {
+		return a, false, err
+	}
+	return out[0], true, nil
+}
+
+// consult is Consult, which with first stops at the first answer.
+func consult[T any](ctx context.Context, v *Virtual, members []Member, name string,
+	ask func(context.Context, Member) (T, error), notFound func(error) bool, first bool) ([]Answer[T], error) {
 	var out []Answer[T]
 	var failure error
 	for _, m := range members {
@@ -241,6 +261,9 @@ func Consult[T any](ctx context.Context, v *Virtual, members []Member, name stri
 		switch {
 		case err == nil:
 			out = append(out, Answer[T]{m, val})
+			if first {
+				return out, nil
+			}
 		case notFound(err):
 		case ctx.Err() != nil:
 			return nil, ctx.Err()

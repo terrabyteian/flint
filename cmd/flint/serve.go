@@ -23,6 +23,7 @@ import (
 	"github.com/terrabyteian/flint/internal/fsys"
 	"github.com/terrabyteian/flint/internal/gc"
 	"github.com/terrabyteian/flint/internal/generic"
+	"github.com/terrabyteian/flint/internal/gomod"
 	"github.com/terrabyteian/flint/internal/maven"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
@@ -412,6 +413,24 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		return nil, err
 	}
 	npmRegistry.Register(srv)
+	goRepos, err := gomod.New(gomod.Options{
+		Repositories: cfg.Repositories,
+		// The go command sends basic credentials, or the headers of a
+		// GOAUTH command, and knows no token service.
+		Authorizer:     authz.Authorizer(auth.Challenge{Style: auth.ChallengeBasic}),
+		Actor:          authz.Actor,
+		Logger:         logger,
+		Metrics:        reg,
+		Upstream:       upOpts,
+		Paths:          paths,
+		Docs:           docs,
+		ProxyMetrics:   proxyMetrics,
+		VirtualMetrics: virtualMetrics,
+	})
+	if err != nil {
+		return nil, err
+	}
+	goRepos.Register(srv)
 
 	var backups *backup.Manager
 	if cfg.Backup.Directory != "" {

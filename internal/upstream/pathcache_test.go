@@ -534,3 +534,226 @@ func TestPathCacheRedirectPolicy(t *testing.T) {
 	e.restartPath(0, upstream.Policy{AllowHosts: []string{strings.TrimPrefix(cdn.URL, "http://")}})
 	e.want("/remote/download/asset.tar.gz", http.StatusOK, "release")
 }
+
+func TestPathCacheRead(t *testing.T) {
+	e := newPathEnv(t, 0, upstream.Policy{})
+	rp := e.repos["remote"]
+	route := func(path string) *upstream.Route {
+		return &upstream.Route{Kind: upstream.Immutable, Path: path, URL: e.files.URL + "/" + path, Expect: upstream.Expect{Size: -1}}
+	}
+	e.files.put("/record", []byte("signed record"))
+	b, result, err := e.pc.Read(ctx, rp, route("record"), "tester", 100)
+	if err != nil || string(b) != "signed record" || result != upstream.ResultFetched {
+		t.Fatalf("Read = %q, %s, %v", b, result, err)
+	}
+	e.settle()
+	if rec, _ := e.pc.Lookup(rp, "record"); rec == nil {
+		t.Error("Read did not cache the content")
+	}
+	e.files.took()
+	b, result, err = e.pc.Read(ctx, rp, route("record"), "tester", 100)
+	if err != nil || string(b) != "signed record" || result != upstream.ResultHit {
+		t.Errorf("cached Read = %q, %s, %v", b, result, err)
+	}
+	if got := e.files.took(); len(got) != 0 {
+		t.Errorf("requests for cached content: %q", got)
+	}
+	// It is served as Serve caches it, the other way round too.
+	e.want("/remote/record", http.StatusOK, "signed record")
+	e.files.put("/served", []byte("served first"))
+	e.want("/remote/served", http.StatusOK, "served first")
+	e.settle()
+	if b, result, err := e.pc.Read(ctx, rp, route("served"), "tester", 100); err != nil || string(b) != "served first" || result != upstream.ResultHit {
+		t.Errorf("Read of served content = %q, %s, %v", b, result, err)
+	}
+	// Larger than the limit, cached or not.
+	if _, _, err := e.pc.Read(ctx, rp, route("record"), "tester", 5); !errors.Is(err, upstream.ErrTooLarge) {
+		t.Errorf("cached content over the limit: %v", err)
+	}
+	e.files.put("/big", bytes.Repeat([]byte("b"), 1000))
+	if _, _, err := e.pc.Read(ctx, rp, route("big"), "tester", 10); !errors.Is(err, upstream.ErrTooLarge) {
+		t.Errorf("content over the limit: %v", err)
+	}
+	// Not found, and remembered.
+	e.files.took()
+	if _, _, err := e.pc.Read(ctx, rp, route("missing"), "tester", 100); !errors.Is(err, upstream.ErrNotFound) {
+		t.Errorf("missing content: %v", err)
+	}
+	e.want("/remote/missing", http.StatusNotFound, "")
+	if got := e.files.took(); len(got) != 1 {
+		t.Errorf("requests: %q, want one for the missing content", got)
+	}
+	// Verified, with the check, before it is returned or cached.
+	z := moduleZip(t, goModule.files)
+	e.files.put("/m.zip", z)
+	bad := route("m.zip")
+	bad.Expect.Check = upstream.CheckGoZipH1(goModule.goModH1)
+	if _, _, err := e.pc.Read(ctx, rp, bad, "tester", 1<<20); !errors.Is(err, upstream.ErrDigestMismatch) {
+		t.Errorf("content failing its check: %v", err)
+	}
+	if rec, _ := e.pc.Lookup(rp, "m.zip"); rec != nil {
+		t.Error("content failing its check was cached")
+	}
+	// Under disk pressure it is read through, still checked.
+	e.free.Store(0)
+	e.clock.Add(time.Second)
+	good := route("m.zip")
+	good.Expect.Check = upstream.CheckGoZipH1(goModule.zipH1)
+	if b, result, err := e.pc.Read(ctx, rp, good, "tester", 1<<20); err != nil || !bytes.Equal(b, z) || result != upstream.ResultPassthrough {
+		t.Errorf("Read under disk pressure = %d bytes, %s, %v", len(b), result, err)
+	}
+	if _, _, err := e.pc.Read(ctx, rp, bad, "tester", 1<<20); !errors.Is(err, upstream.ErrDigestMismatch) {
+		t.Errorf("content failing its check under disk pressure: %v", err)
+	}
+	if rec, _ := e.pc.Lookup(rp, "m.zip"); rec != nil {
+		t.Error("content was cached under disk pressure")
+	}
+}
+
+func TestPathCacheDoc(t *testing.T) {
+	e := newPathEnv(t, 0, upstream.Policy{})
+	rp := e.repos["remote"]
+	var validated []string
+	route := &upstream.Route{Kind: upstream.Mutable, Path: "@latest", URL: e.files.URL + "/@latest", ContentType: "application/json",
+		Validate: func(ctx context.Context, d *upstream.Doc) error {
+			b := e.read(d)
+			validated = append(validated, b)
+			if !strings.HasPrefix(b, "v") {
+				return errors.New("not a version")
+			}
+			return nil
+		},
+		Also: func(ctx context.Context, d *upstream.Doc) string { return e.read(d) + ".info" }}
+	e.files.put("/@latest", []byte("v1"))
+	d, err := e.pc.Doc(ctx, rp, route, "tester")
+	if err != nil || e.read(d) != "v1" || d.Result != upstream.ResultFetched {
+		t.Fatalf("Doc = %+v, %v", d, err)
+	}
+	// The document is cached as the immutable content Also names.
+	rec, err := e.pc.Lookup(rp, "v1.info")
+	if err != nil || rec == nil || rec.Digest != d.Digest || rec.ContentType != "application/json" {
+		t.Fatalf("v1.info = %+v, %v", rec, err)
+	}
+	e.want("/remote/v1.info", http.StatusOK, "v1")
+	// A document that fails validation is not cached or served: the
+	// cached copy is.
+	e.clock.Add(docWindow)
+	e.files.put("/@latest", []byte("garbage"))
+	if d, err := e.pc.Doc(ctx, rp, route, "tester"); err != nil || e.read(d) != "v1" || d.Result != upstream.ResultStale {
+		t.Errorf("Doc after an invalid document = %+v, %v", d, err)
+	}
+	if rec, _ := e.pc.Lookup(rp, "garbage.info"); rec != nil {
+		t.Error("an invalid document was cached as immutable content")
+	}
+	e.files.put("/@latest", []byte("v2"))
+	e.clock.Add(upstream.DefaultOfflineFor)
+	if d, err := e.pc.Doc(ctx, rp, route, "tester"); err != nil || e.read(d) != "v2" {
+		t.Errorf("Doc = %+v, %v", d, err)
+	}
+	if rec, _ := e.pc.Lookup(rp, "v2.info"); rec == nil {
+		t.Error("v2.info was not cached")
+	}
+	if !slices.Equal(validated, []string{"v1", "garbage", "v2"}) {
+		t.Errorf("validated %q", validated)
+	}
+	// Something cached already is not replaced.
+	e.files.put("/v3.info", []byte("the upstream's v3.info"))
+	e.want("/remote/v3.info", http.StatusOK, "the upstream's v3.info")
+	e.settle()
+	e.files.put("/@latest", []byte("v3"))
+	e.clock.Add(docWindow)
+	if _, err := e.pc.Doc(ctx, rp, route, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	e.want("/remote/v3.info", http.StatusOK, "the upstream's v3.info")
+	// Not found, and remembered.
+	route.Path, route.URL = "missing", e.files.URL+"/missing"
+	if _, err := e.pc.Doc(ctx, rp, route, "tester"); !errors.Is(err, upstream.ErrNotFound) {
+		t.Errorf("a missing document: %v", err)
+	}
+	e.files.took()
+	if _, err := e.pc.Doc(ctx, rp, route, "tester"); !errors.Is(err, upstream.ErrNotFound) {
+		t.Errorf("a missing document: %v", err)
+	}
+	if got := e.files.took(); len(got) != 0 {
+		t.Errorf("requests for a remembered missing document: %q", got)
+	}
+}
+
+// read returns a document's content.
+func (e *pathEnv) read(d *upstream.Doc) string {
+	e.t.Helper()
+	f, err := e.c.Open(ctx, d)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestPathCacheRouteClient(t *testing.T) {
+	e := newPathEnv(t, 0, upstream.Policy{})
+	rp := e.repos["remote"]
+	second := newFileUpstream(t)
+	client := newClient(t, second.URL, upstream.Options{Now: e.clock.Now})
+	second.put("/tile/0", []byte("tile"))
+	second.put("/latest", []byte("tree 1"))
+	serve := func(rt *upstream.Route) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		e.pc.Serve(w, httptest.NewRequest(http.MethodGet, "/remote/"+rt.Path, nil), rp, rt, "tester")
+		return w
+	}
+	tile := &upstream.Route{Kind: upstream.Immutable, Path: "sumdb/tile/0", URL: second.URL + "/tile/0", Expect: upstream.Expect{Size: -1}, Client: client}
+	if w := serve(tile); w.Code != http.StatusOK || w.Body.String() != "tile" {
+		t.Fatalf("immutable content of the second upstream: %d %q", w.Code, w.Body)
+	}
+	latest := &upstream.Route{Kind: upstream.Mutable, Path: "sumdb/latest", URL: second.URL + "/latest", Client: client, Revalidate: time.Second}
+	if w := serve(latest); w.Code != http.StatusOK || w.Body.String() != "tree 1" {
+		t.Fatalf("a document of the second upstream: %d %q", w.Code, w.Body)
+	}
+	if got := e.files.took(); len(got) != 0 {
+		t.Errorf("the repository's upstream got requests: %q", got)
+	}
+	// The route's revalidation window applies, not the repository's.
+	second.put("/latest", []byte("tree 2"))
+	e.clock.Add(time.Second)
+	if w := serve(latest); w.Body.String() != "tree 2" {
+		t.Errorf("after the route's window: %q", w.Body)
+	}
+	// The second upstream being down does not mark the first offline.
+	second.set(func(u *fileUpstream) { u.down = true })
+	second.put("/tile/1", []byte("tile 1"))
+	tile.Path, tile.URL = "sumdb/tile/1", second.URL+"/tile/1"
+	if w := serve(tile); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("immutable content of an unreachable upstream: %d", w.Code)
+	}
+	if !client.Offline() || rp.Client.Offline() {
+		t.Errorf("offline: the route's client %v, the repository's %v", client.Offline(), rp.Client.Offline())
+	}
+}
+
+func TestPathCacheCheck(t *testing.T) {
+	e := newPathEnv(t, 0, upstream.Policy{})
+	z := moduleZip(t, goModule.files)
+	e.files.put("/m.zip", z)
+	// Content with a check is sent only once it passed, so a failure is
+	// an error status, not a response cut off.
+	e.expect["m.zip"] = upstream.Expect{Size: -1, Check: upstream.CheckGoZipH1(goModule.goModH1)}
+	if status, _, err := e.fetch(http.MethodGet, "/remote/m.zip"); err != nil || status != http.StatusBadGateway {
+		t.Errorf("content failing its check: %d, %v; want 502", status, err)
+	}
+	e.settle()
+	if rec, _ := e.pc.Lookup(e.repos["remote"], "m.zip"); rec != nil {
+		t.Error("content failing its check was cached")
+	}
+	e.expect["m.zip"] = upstream.Expect{Size: -1, Check: upstream.CheckGoZipH1(goModule.zipH1)}
+	e.want("/remote/m.zip", http.StatusOK, string(z))
+	e.settle()
+	if rec, _ := e.pc.Lookup(e.repos["remote"], "m.zip"); rec == nil {
+		t.Error("content passing its check was not cached")
+	}
+}

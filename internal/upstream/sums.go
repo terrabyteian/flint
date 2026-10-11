@@ -65,6 +65,9 @@ type Expect struct {
 	// match, such as computing the Go h1: hash of a module zip. It reads
 	// the content through r, size bytes long. An error fails the fetch;
 	// one that should count as a mismatch wraps ErrDigestMismatch.
+	// Content with a check is sent to a client only once it passed, so
+	// a failure is answered with an error status, not a response cut
+	// off.
 	Check func(ctx context.Context, r io.ReaderAt, size int64) error
 	// FromResponse, if not nil, is called once the upstream has answered,
 	// before the content is read, with the response's headers. It returns

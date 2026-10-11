@@ -162,6 +162,7 @@ const (
 	FormatCargo   = "cargo"
 	FormatNPM     = "npm"
 	FormatMaven   = "maven"
+	FormatGo      = "go"
 	TypeHosted    = "hosted"
 	TypeProxy     = "proxy"
 	TypeVirtual   = "virtual"
@@ -201,6 +202,9 @@ type Repository struct {
 	// Maven holds the settings of a Maven repository. Maven repositories
 	// only.
 	Maven *Maven `json:"maven,omitempty"`
+	// Go configures a Go module proxy repository's checksum database.
+	// Go proxy repositories only.
+	Go *Go `json:"go,omitempty"`
 }
 
 // Proxy configures the upstream registry a proxy repository caches.
@@ -217,6 +221,8 @@ type Proxy struct {
 	// "sparse+https://index.crates.io/"; the "sparse+" prefix is optional.
 	// For Maven, it is the repository's base URL, such as
 	// "https://repo.maven.apache.org/maven2".
+	// For Go, it is a module proxy's URL, as GOPROXY names it, such as
+	// "https://proxy.golang.org".
 	URL string `json:"url"`
 	// Username and PasswordFile, if set, authenticate to the upstream.
 	// PasswordFile holds the password or access token, such as a mounted
@@ -687,7 +693,8 @@ func validateProxy(v *validator, path, format string, p *Proxy) {
 // checkUpstreamURL checks an upstream's URL: a registry's base URL for
 // OCI, or a URL that may have a path: a simple index URL for PyPI, a base
 // URL for generic files, a sparse index URL, which may also have the
-// "sparse+" prefix, for Cargo, and a repository's base URL for Maven.
+// "sparse+" prefix, for Cargo, a repository's base URL for Maven, and a
+// module proxy's URL for Go.
 func checkUpstreamURL(s, format string) error {
 	if format == FormatCargo {
 		s = strings.TrimPrefix(s, "sparse+")
