@@ -625,8 +625,9 @@ jobs:
         npm: ["10.9.9", "11.20.0"]
     env:
       PNPM_VERSION: "12.8.2"
-      YARN_VERSION: "1.22.22"
-      YARN_BERRY_VERSION: "4.18.1"
+      # Not YARN_*: Yarn Berry reads those as settings and rejects unknown ones.
+      CLASSIC_YARN_VERSION: "1.22.22"
+      BERRY_YARN_VERSION: "4.18.1"
       BUN_VERSION: "1.4.2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -642,8 +643,8 @@ jobs:
       - name: Install npm, pnpm, Yarn classic, Yarn Berry, and Bun
         run: |
           npm install --global "npm@${{ matrix.npm }}"
-          npm install --prefix "$RUNNER_TEMP/clients" --no-audit --no-fund "pnpm@$PNPM_VERSION" "yarn@$YARN_VERSION" \
-            "@yarnpkg/cli-dist@$YARN_BERRY_VERSION" "bun@$BUN_VERSION"
+          npm install --prefix "$RUNNER_TEMP/clients" --no-audit --no-fund "pnpm@$PNPM_VERSION" "yarn@$CLASSIC_YARN_VERSION" \
+            "@yarnpkg/cli-dist@$BERRY_YARN_VERSION" "bun@$BUN_VERSION"
           # Yarn classic and Berry both install a yarn command; Berry runs
           # as yarn-berry.
           modules=$RUNNER_TEMP/clients/node_modules

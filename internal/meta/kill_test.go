@@ -35,7 +35,6 @@ func TestKillChild(t *testing.T) {
 		fmt.Printf("%c %d %d %d\n", kind, g, i, seq)
 		mu.Unlock()
 	}
-	fmt.Println("ready")
 	w.run(s, 1<<30)
 	select {} // wait to be killed
 }
@@ -63,7 +62,7 @@ func TestProcessKill(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
-		ready := make(chan struct{})
+		acked := make(chan struct{})
 		done := make(chan int)
 		go func() {
 			acks := 0
@@ -72,15 +71,13 @@ func TestProcessKill(t *testing.T) {
 				var kind byte
 				var g, i int
 				var seq Seq
-				if sc.Text() == "ready" {
-					close(ready)
-					continue
-				}
 				if _, err := fmt.Sscanf(sc.Text(), "%c %d %d %d", &kind, &g, &i, &seq); err != nil {
 					t.Errorf("child: %s", sc.Text())
 					continue
 				}
-				acks++
+				if acks++; acks == 1 {
+					close(acked)
+				}
 				w.mu.Lock()
 				switch kind {
 				case 'w':
@@ -93,11 +90,13 @@ func TestProcessKill(t *testing.T) {
 			}
 			done <- acks
 		}()
+		// Kill only after the first acknowledgment, so a slow start under
+		// -race cannot leave nothing to check.
 		select {
-		case <-ready:
+		case <-acked:
 		case <-time.After(60 * time.Second):
 			cmd.Process.Kill()
-			t.Fatal("child did not start")
+			t.Fatal("the child acknowledged nothing within 60s")
 		}
 		time.Sleep(time.Duration(20+r.IntN(200)) * time.Millisecond)
 		if err := cmd.Process.Kill(); err != nil {
@@ -105,9 +104,6 @@ func TestProcessKill(t *testing.T) {
 		}
 		cmd.Wait()
 		acks := <-done
-		if acks == 0 {
-			t.Fatalf("iteration %d: the child acknowledged nothing before it was killed", it)
-		}
 		s, err := Open(dir, Options{Logger: quiet})
 		if err != nil {
 			t.Fatalf("iteration %d: reopening after SIGKILL: %v", it, err)
