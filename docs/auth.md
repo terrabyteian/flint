@@ -94,7 +94,7 @@ Registry requests use the Docker token authentication flow:
 1. A request without valid credentials gets `401` with a challenge naming the token endpoint and the scope it needs:
    `WWW-Authenticate: Bearer realm="https://registry.example/auth/token",service="flint",scope="repository:docker-local/app:pull,push"`.
    The realm uses the scheme and host the client addressed, through trusted proxies as configured.
-2. The client requests a token from `GET /auth/token?service=flint&scope=...`, with HTTP basic credentials (a password or an API token) or none for anonymous access.
+2. The client requests a token from `GET /auth/token?service=flint&scope=...`, with a password or an API token, in any of the [forms above](#api-tokens), or none for anonymous access.
    containerd's OAuth 2 password grant, `POST /auth/token` with `grant_type=password`, works the same way.
 3. flint answers with a JSON Web Token, signed with Ed25519, that grants each requested action the client's role allows and leaves out the rest:
    `{"token": "...", "access_token": "...", "token_type": "Bearer", "expires_in": 300, "issued_at": "..."}`.
