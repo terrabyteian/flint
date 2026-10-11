@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/terrabyteian/flint/internal/auth"
 	"github.com/terrabyteian/flint/internal/blob"
 	"github.com/terrabyteian/flint/internal/config"
+	"github.com/terrabyteian/flint/internal/fsys"
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
@@ -82,7 +84,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		return err
 	}
 
-	srv, registry, err := newServer(cfg, logger, store, blobs)
+	srv, registry, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
 	if err != nil {
 		return err
 	}
@@ -126,8 +128,9 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 
 // newServer builds the HTTP server and its metrics over open stores. The
 // format and auth packages register their routes, middleware, and
-// readiness checks on it here, using store and blobs.
-func newServer(cfg *config.Config, logger *slog.Logger, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, error) {
+// readiness checks on it here, using store and blobs. fsy is the data
+// directory's filesystem.
+func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, error) {
 	reg := metrics.NewRegistry()
 	metrics.RegisterRuntime(reg, version)
 	registerStoreMetrics(reg, store)
@@ -148,14 +151,37 @@ func newServer(cfg *config.Config, logger *slog.Logger, store meta.Store, blobs 
 	if err != nil {
 		return nil, nil, err
 	}
+
+	authz, err := auth.New(auth.Options{
+		Store:   store,
+		KeyDir:  filepath.Join(cfg.DataDir, "auth"),
+		FS:      fsy,
+		Config:  cfg,
+		Logger:  logger,
+		Metrics: reg,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if b := cfg.Auth.BootstrapAdmin; b != nil {
+		if _, err := authz.Bootstrap(ctx, b.Username, b.PasswordFile); err != nil {
+			return nil, nil, err
+		}
+	} else if ok, err := authz.HasAdmin(); err != nil {
+		return nil, nil, err
+	} else if !ok {
+		logger.Warn("no administrator exists; set auth.bootstrapAdmin in the configuration to create one")
+	}
+	authz.Register(srv)
+
 	registry, err := oci.New(oci.Options{
 		Meta:         store,
 		Blobs:        blobs,
 		Repositories: cfg.Repositories,
-		// Every request is allowed until authentication lands.
-		Authorizer: oci.AllowAll{},
-		Logger:     logger,
-		Metrics:    reg,
+		Authorizer:   authz,
+		Actor:        authz.Actor,
+		Logger:       logger,
+		Metrics:      reg,
 	})
 	if err != nil {
 		return nil, nil, err

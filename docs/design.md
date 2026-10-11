@@ -90,6 +90,7 @@ The format packages translate protocol requests into blob and metadata operation
   meta/wal/<seq>.log           write-ahead log segments, named by first sequence number
   meta/snapshots/<seq>.snap    index snapshots, named by the last sequence number they contain
   meta/consumers/<name>        durable checkpoint of each registered log consumer
+  auth/token-signing.key       Ed25519 key that signs the Docker token service's bearer tokens, generated on first start
   audit/                       append-only audit stream of batch origins and touched keys, never values (M4)
 ```
 
@@ -170,6 +171,7 @@ Illustrative v1 key space:
 | `gc\0doomed\0<digest>` | doomed set of the running sweep; cleared when the sweep ends | `internal/gc` |
 | `auth\0user\0<username>` | user record | `internal/auth` |
 | `auth\0token\0<token-id>` | token record with hashed secret | `internal/auth` |
+| `auth\0usertoken\0<username>\0<token-id>` | empty; indexes a user's tokens | `internal/auth` |
 
 An index on disk can later replace the in-memory one behind the same interface if the record count outgrows RAM.
 
@@ -375,7 +377,7 @@ Power-cut testing on a VM or with dm-flakey is out of scope for now.
 ## Interfaces for the M1 OCI and auth tasks
 
 `internal/oci` and `internal/auth` are built in parallel as separate M1 tasks.
-`internal/oci` consumes authorization through this interface, which `internal/auth` implements; until it lands, `flint serve` wires in `oci.AllowAll`.
+`internal/oci` consumes authorization through this interface, which `internal/auth` implements, including the optional `CatalogAuthorizer`; `flint serve` wires `internal/auth`'s service in. `oci.AllowAll` remains for tests.
 
 ```go
 // Authorizer decides whether a request may act on a repository.
@@ -490,12 +492,15 @@ Dependency-confusion protection is on by default: once a hosted member repositor
 ## Auth and permissions
 
 - **Identities.** Local users with passwords and groups, and OIDC login, in v1. LDAP is deferred. Passwords are hashed with PBKDF2-HMAC-SHA256 (`crypto/pbkdf2`) at a high iteration count, since bcrypt and Argon2 live outside the standard library.
-- **API tokens.** Random, high-entropy secrets, shown once and stored only as a SHA-256 hash. Tokens expire and carry a subset of their owner's permissions, never more.
-- **Docker clients.** A built-in bearer-token service implements the Docker token authentication flow, issuing short-lived JWTs scoped to repositories and actions (pull, push, delete).
+- **API tokens.** Random, high-entropy secrets, shown once and stored only as a SHA-256 hash. Tokens can be given an expiry and carry a subset of their owner's permissions, never more: on each use the owner's current role is capped by the token's scopes.
+- **Docker clients.** A built-in bearer-token service implements the Docker token authentication flow, issuing short-lived JWTs scoped to repositories and actions (pull, push, delete). The JWTs are hand-written and signed with an Ed25519 key generated on first start and kept in the data directory. Each registry request also checks the subject's current permissions, so deleting a user or revoking a token takes effect before the JWT expires.
 - **PyPI clients.** HTTP basic auth with the `__token__` username convention and an API token as the password.
-- **Permissions.** Per-repository roles (`read`, `write`, `delete`, `admin`) are granted to users or groups. Grants can target a pattern such as `team-a-*`. One global `admin` role administers everything. Anonymous pull is a per-repository setting, off by default.
+- **Permissions.** Per-repository roles (`read` < `write` < `delete` < `admin`) are granted to users or groups. Grants can target a pattern such as `team-a-*`. One global `admin` role administers everything. Anonymous pull is a per-repository setting, off by default.
+- **First administrator.** Created at startup from a password file named in the configuration when no administrator exists, so Kubernetes can mount it from a Secret.
 - **SAML.** Never hand-written. SAML depends on XML signature verification and canonicalization, a long-running source of authentication bypasses even in mature libraries; writing it from scratch would be irresponsible. Enterprises that need SAML run an OIDC bridge such as Keycloak or Dex.
 - **Later.** GitHub Actions trusted publishing shortly after v1; LDAP after that.
+
+[auth.md](auth.md) describes the client-visible behavior and the admin API.
 
 ## Operations
 

@@ -44,6 +44,22 @@ func TestExampleConfig(t *testing.T) {
 	if len(c.Repositories) != 2 || !c.Repositories[1].ImmutableTags || len(c.Auth.Permissions) != 2 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
+	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
+		t.Errorf("unexpected auth settings: %+v", c.Auth)
+	}
+}
+
+func TestValidUserName(t *testing.T) {
+	for _, s := range []string{"a", "alice", "ci-bot", "first.last", "a_b", "me@example.com", "0", strings.Repeat("a", 64)} {
+		if !ValidUserName(s) {
+			t.Errorf("ValidUserName(%q) = false", s)
+		}
+	}
+	for _, s := range []string{"", "Alice", "__token__", "_a", ".a", "-a", "a:b", "a b", "a/b", "é", strings.Repeat("a", 65)} {
+		if ValidUserName(s) {
+			t.Errorf("ValidUserName(%q) = true", s)
+		}
+	}
 }
 
 // TestExampleDocumented keeps the example in docs/configuration.md
@@ -159,9 +175,13 @@ func TestValidation(t *testing.T) {
 				"auth.permissions[0]: must name at least one user or group"}},
 		{"permission bad pattern", `{"dataDir": "/d", "auth": {"permissions": [{"repositories": ["Team/*"], "role": "read", "users": ["a"]}]}}`,
 			[]string{`auth.permissions[0].repositories[0]: "Team/*"`}},
-		{"permission blank subject", `{"dataDir": "/d", "auth": {"permissions": [{"repositories": ["*"], "role": "read", "users": [" "], "groups": [""]}]}}`,
-			[]string{"auth.permissions[0].users[0]: is empty", "auth.permissions[0].groups[0]: is empty"}},
+		{"permission bad subjects", `{"dataDir": "/d", "auth": {"permissions": [{"repositories": ["*"], "role": "read", "users": [" ", "Alice"], "groups": ["", "__token__"]}]}}`,
+			[]string{`auth.permissions[0].users[0]: " " is not a valid name`, `auth.permissions[0].users[1]: "Alice"`,
+				`auth.permissions[0].groups[0]: ""`, `auth.permissions[0].groups[1]: "__token__"`}},
 		{"permission good", `{"dataDir": "/d", "auth": {"permissions": [{"repositories": ["team-*"], "role": "delete", "groups": ["g"]}]}}`, nil},
+		{"bootstrap admin default name", `{"dataDir": "/d", "auth": {"bootstrapAdmin": {"passwordFile": "/run/secrets/pw"}}}`, nil},
+		{"bootstrap admin incomplete", `{"dataDir": "/d", "auth": {"bootstrapAdmin": {"username": "Root"}}}`,
+			[]string{`auth.bootstrapAdmin.username: "Root"`, "auth.bootstrapAdmin.passwordFile: is required"}},
 		{"all problems reported", `{"listen": "x", "log": {"level": "loud"}}`,
 			[]string{"listen:", "dataDir: is required", "log.level:"}},
 	}

@@ -25,6 +25,10 @@
     }
   ],
   "auth": {
+    "bootstrapAdmin": {
+      "username": "admin",
+      "passwordFile": "/etc/flint/admin/password"
+    },
     "permissions": [
       {
         "repositories": ["docker-local", "releases"],

@@ -82,6 +82,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- fail (printf "config.%s is set by the chart; use containerPort, persistence, and tls instead" $field) }}
 {{- end }}
 {{- end }}
+{{- if hasKey (.Values.config.auth | default dict) "bootstrapAdmin" }}
+{{- fail "config.auth.bootstrapAdmin is set by the chart; use bootstrapAdmin instead" }}
+{{- end }}
+{{- if and .Values.bootstrapAdmin.enabled (not .Values.bootstrapAdmin.existingSecret) }}
+{{- fail "bootstrapAdmin.enabled needs bootstrapAdmin.existingSecret, a Secret holding the password" }}
+{{- end }}
 {{- end }}
 
 {{/* flint's JSON configuration: the config value plus the fields the chart owns. */}}
@@ -91,6 +97,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- $_ = set $config "dataDir" "/var/lib/flint" }}
 {{- if .Values.tls.enabled }}
 {{- $_ = set $config "tls" (dict "certFile" "/etc/flint/tls/tls.crt" "keyFile" "/etc/flint/tls/tls.key") }}
+{{- end }}
+{{- if .Values.bootstrapAdmin.enabled }}
+{{- $auth := get $config "auth" | default dict }}
+{{- $_ = set $auth "bootstrapAdmin" (dict "username" .Values.bootstrapAdmin.username "passwordFile" "/etc/flint/admin/password") }}
+{{- $_ = set $config "auth" $auth }}
 {{- end }}
 {{- toPrettyJson $config }}
 {{- end }}

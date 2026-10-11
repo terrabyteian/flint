@@ -68,8 +68,7 @@ type CatalogAuthorizer interface {
 	AuthorizeCatalog(w http.ResponseWriter, r *http.Request) (visible func(repo string) bool, ok bool)
 }
 
-// AllowAll is an Authorizer that allows every request, for tests and for
-// deployments without authentication.
+// AllowAll is an Authorizer that allows every request, for tests.
 type AllowAll struct{}
 
 // Authorize allows the request.

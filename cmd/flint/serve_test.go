@@ -180,8 +180,9 @@ func TestServeSmoke(t *testing.T) {
 	if code, body := get(t, client, base+"/readyz"); code != 200 || body != "ok\n" {
 		t.Errorf("/readyz = %d %q", code, body)
 	}
-	if code, body := get(t, client, base+"/v2/"); code != 200 || body != "{}" {
-		t.Errorf("/v2/ = %d %q, want the OCI API base check", code, body)
+	// The OCI API base check asks anonymous clients to authenticate.
+	if code, body := get(t, client, base+"/v2/"); code != 401 || !strings.Contains(body, "UNAUTHORIZED") {
+		t.Errorf("/v2/ = %d %q, want a 401 challenge", code, body)
 	}
 	if code, _ := get(t, client, base+"/nope"); code != 404 {
 		t.Errorf("/nope = %d, want 404", code)
@@ -195,7 +196,7 @@ func TestServeSmoke(t *testing.T) {
 		"flint_meta_sequence 0\n",
 		`flint_build_info{version="dev",goversion="go`,
 		`flint_http_requests_total{method="GET",route="GET /healthz",code="200"} 1` + "\n",
-		`flint_http_requests_total{method="GET",route="oci.base",code="200"} 1` + "\n",
+		`flint_http_requests_total{method="GET",route="oci.base",code="401"} 1` + "\n",
 		`flint_http_requests_total{method="GET",route="unmatched",code="404"} 1` + "\n",
 		"go_goroutines ",
 	} {
@@ -324,7 +325,7 @@ func TestPoisonedStoreStaysReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, _, err := newServer(cfg, slog.New(slog.DiscardHandler), store, blobs)
+	srv, _, err := newServer(context.Background(), cfg, slog.New(slog.DiscardHandler), m, store, blobs)
 	if err != nil {
 		t.Fatal(err)
 	}

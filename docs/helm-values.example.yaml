@@ -24,6 +24,13 @@ config:
         role: write
         groups: ["ci"]
 
+# The first administrator's password, from a Secret created beforehand:
+#   kubectl create secret generic flint-admin --namespace flint \
+#     --from-literal=password="$(openssl rand -base64 24)"
+bootstrapAdmin:
+  enabled: true
+  existingSecret: flint-admin
+
 containerPort: 8443
 
 service:

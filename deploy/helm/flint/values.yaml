@@ -35,6 +35,18 @@ config:
   auth:
     permissions: []
 
+# The first administrator, which flint creates at startup while no
+# administrator exists (docs/auth.md). Its password is the key "password" of
+# an existing Secret, mounted at /etc/flint/admin; flint reads it only while no
+# administrator exists, so the Secret may be deleted afterwards. Without
+# it, flint starts with no administrator and logs a warning.
+bootstrapAdmin:
+  enabled: false
+  username: admin
+  # The Secret holding the password, such as one made with
+  #   kubectl create secret generic flint-admin --from-literal=password=...
+  existingSecret: ""
+
 # The port flint listens on in the container.
 containerPort: 5000
 

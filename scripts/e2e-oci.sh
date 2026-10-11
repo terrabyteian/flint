@@ -4,14 +4,17 @@
 # pushed by docker, a cross-repository copy, and an OCI artifact with a
 # referrer (oras). It fails on the first mismatch.
 #
-# Usage: scripts/e2e-oci.sh <host:port> <namespace>
+# Usage: E2E_USERNAME=<user> E2E_PASSWORD=<secret> scripts/e2e-oci.sh <host:port> <namespace>
 #   <namespace> is a configured hosted OCI repository, such as "e2e".
+#   E2E_PASSWORD is the user's password or an API token; the user needs the
+#   delete role on <namespace>.
 # Requires crane, oras, docker, and jq on PATH; set E2E_SKIP_DOCKER=1 to
-# skip the docker steps.
+# skip the docker steps. It first checks that an anonymous push is refused,
+# then logs each client in.
 set -euo pipefail
 
-if [ $# -ne 2 ]; then
-	echo "usage: $0 <host:port> <namespace>" >&2
+if [ $# -ne 2 ] || [ -z "${E2E_USERNAME:-}" ] || [ -z "${E2E_PASSWORD:-}" ]; then
+	echo "usage: E2E_USERNAME=<user> E2E_PASSWORD=<secret> $0 <host:port> <namespace>" >&2
 	exit 2
 fi
 reg=$1
@@ -25,6 +28,18 @@ fail() {
 }
 crane() { command crane --insecure "$@"; }
 oras_() { command oras "$@" --plain-http; }
+
+step "log in"
+echo anonymous >"$work/anonymous.txt"
+tar -C "$work" -cf "$work/anonymous.tar" anonymous.txt
+if crane append --oci-empty-base -f "$work/anonymous.tar" -t "$reg/$ns/anonymous:v1" >/dev/null 2>&1; then
+	fail "an anonymous push succeeded"
+fi
+printf '%s' "$E2E_PASSWORD" | command crane auth login "$reg" -u "$E2E_USERNAME" --password-stdin
+printf '%s' "$E2E_PASSWORD" | oras_ login "$reg" -u "$E2E_USERNAME" --password-stdin
+if [ "${E2E_SKIP_DOCKER:-}" != 1 ]; then
+	printf '%s' "$E2E_PASSWORD" | docker login "$reg" -u "$E2E_USERNAME" --password-stdin
+fi
 
 step "multi-arch image with crane"
 for arch in amd64 arm64; do
