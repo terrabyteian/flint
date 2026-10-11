@@ -194,11 +194,14 @@ if [[ $clients == *" yarn-berry "* ]]; then
 	dir=$(client_dir berry)
 	rm "$dir/.npmrc"
 	# Like pnpm, Yarn holds back versions published less than a day ago.
+	# Yarn turns on immutable installs in CI, and this project starts
+	# with no lockfile, so the install must be allowed to write one.
 	cat >"$dir/.yarnrc.yml" <<EOF
 npmRegistryServer: "$registry"
 npmAuthToken: "$E2E_TOKEN"
 npmAlwaysAuth: true
 npmMinimalAgeGate: 0
+enableImmutableInstalls: false
 unsafeHttpWhitelist: ["${reg%:*}"]
 nodeLinker: node-modules
 enableGlobalCache: false
