@@ -32,7 +32,7 @@ type MarkFunc func(key, value []byte) ([]blob.Digest, error)
 type Marker map[string]MarkFunc
 
 // ownMarker is the gc package's own keys, which reference nothing.
-var ownMarker = Marker{EpochKey: nil, doomedPrefix: nil, lastKey: nil}
+var ownMarker = Marker{EpochKey: nil, DoomedPrefix: nil, lastKey: nil}
 
 // prefix is one registered key prefix.
 type prefix struct {

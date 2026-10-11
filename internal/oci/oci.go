@@ -4,7 +4,9 @@
 // manifests and indexes, Docker schema 2 manifests and manifest lists),
 // the referrers API, paginated tag and catalog listings, and deletes.
 // Proxy repositories cache an upstream registry and are read-only; see
-// proxy.go.
+// proxy.go. Hosted repositories with helmIndex also serve the Helm charts
+// pushed to them as a classic Helm chart repository at /helm/; see
+// helm.go.
 //
 // Clients address an image as <repository>/<name>: the first path
 // component is a repository declared in the configuration, and the rest
@@ -101,8 +103,20 @@ type Options struct {
 	// FetchIdleTimeout is how long a proxy's blob fetch waits for the
 	// upstream to send more; zero means upstream.DefaultIdleTimeout.
 	FetchIdleTimeout time.Duration
+	// Fetcher, if set, fetches proxied blobs, shared with other formats'
+	// proxy repositories; nil means a new one with FetchIdleTimeout.
+	Fetcher *upstream.Fetcher
+	// ProxyMetrics, if set, are the proxy metrics shared with other
+	// formats' proxy repositories; nil registers them on Metrics, with
+	// the fetches in flight and, with a proxy repository, the disk
+	// pressure of Space.
+	ProxyMetrics *upstream.Metrics
 	// Authorizer authorizes every request. Required.
 	Authorizer Authorizer
+	// HelmAuthorizer, if set, authorizes the Helm view's requests instead,
+	// so they can be answered in the challenge style Helm clients expect:
+	// they send HTTP basic credentials and know no token service.
+	HelmAuthorizer Authorizer
 	// Logger receives failures; nil means slog.Default().
 	Logger *slog.Logger
 	// Metrics, if set, receives the OCI metrics.
@@ -119,6 +133,7 @@ type Options struct {
 type repository struct {
 	name          string
 	immutableTags bool
+	helmIndex     bool       // serve the Helm view
 	proxy         *proxyRepo // nil for a hosted repository
 }
 
@@ -128,9 +143,11 @@ type Handler struct {
 	blobs blob.Store
 	repos map[string]*repository
 	auth  Authorizer
-	log   *slog.Logger
-	actor func(*http.Request) string
-	now   func() time.Time
+	// helmAuth authorizes the Helm view: Options.HelmAuthorizer, or auth.
+	helmAuth Authorizer
+	log      *slog.Logger
+	actor    func(*http.Request) string
+	now      func() time.Time
 
 	// Blob links' reads, which garbage collection counts like link times,
 	// and when the handler started, before which it knows no reads; see
@@ -153,6 +170,11 @@ type Handler struct {
 	validated     map[string]time.Time // tag key: when the upstream last confirmed it
 	listings      listingCache
 	evictKick     chan struct{}
+
+	// The Helm view.
+	helmMu     sync.Mutex
+	helmViews  map[string]*helmView // by repository and path; only views with charts
+	helmBuilds upstream.Group[*helmView]
 
 	proxyResults   *metrics.Counter
 	upstreamErrors *metrics.Counter
@@ -179,17 +201,25 @@ func New(opts Options) (*Handler, error) {
 		blobs:     opts.Blobs,
 		repos:     map[string]*repository{},
 		auth:      opts.Authorizer,
+		helmAuth:  opts.HelmAuthorizer,
 		log:       opts.Logger,
 		actor:     opts.Actor,
 		now:       opts.Now,
 		space:     opts.Space,
-		fetcher:   upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout),
+		fetcher:   opts.Fetcher,
 		validated: map[string]time.Time{},
 		evictKick: make(chan struct{}, 1),
 		linkReads: map[string]time.Time{},
+		helmViews: map[string]*helmView{},
 	}
 	if h.log == nil {
 		h.log = slog.Default()
+	}
+	if h.helmAuth == nil {
+		h.helmAuth = h.auth
+	}
+	if h.fetcher == nil {
+		h.fetcher = upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout)
 	}
 	if h.now == nil {
 		h.now = time.Now
@@ -211,7 +241,7 @@ func New(opts Options) (*Handler, error) {
 		}
 		switch rc.Type {
 		case config.TypeHosted:
-			h.repos[rc.Name] = &repository{name: rc.Name, immutableTags: rc.ImmutableTags}
+			h.repos[rc.Name] = &repository{name: rc.Name, immutableTags: rc.ImmutableTags, helmIndex: rc.HelmIndex}
 		case config.TypeProxy:
 			if rc.Proxy == nil {
 				return nil, fmt.Errorf("oci: proxy repository %s has no upstream", rc.Name)
@@ -234,35 +264,19 @@ func New(opts Options) (*Handler, error) {
 		"Manifests pushed, by repository.", "repository")
 	h.linkConflicts = reg.Counter("flint_oci_link_retries_total",
 		"Link batches retried after a metadata precondition failed.").With()
-	h.proxyResults = reg.Counter("flint_proxy_requests_total",
-		"Pulls from proxy repositories, by repository and result: hit (served from the cache), "+
-			"revalidated (served after the upstream confirmed a tag or listing), fetched (fetched from the upstream and cached), "+
-			"passthrough (fetched from the upstream without caching), stale (served from the cache because the upstream failed).",
-		"repository", "result")
-	h.upstreamErrors = reg.Counter("flint_proxy_upstream_errors_total",
-		"Proxy requests to upstream registries that failed, by repository.", "repository")
-	h.upstreamBytes = reg.Counter("flint_proxy_upstream_bytes_total",
-		"Bytes proxy repositories fetched from upstream registries, by repository.", "repository")
-	h.evictions = reg.Counter("flint_proxy_evictions_total",
-		"Cached items proxy repositories evicted to stay within their size limits, by repository.", "repository")
-	h.cachedBytes = reg.Gauge("flint_proxy_cached_bytes",
-		"Bytes cached by size-limited proxy repositories, by repository.", "repository")
-	fetcher := h.fetcher
-	reg.GaugeFunc("flint_proxy_fetches_in_flight", "Blobs proxy repositories are fetching from upstream registries.",
-		func() float64 { return float64(fetcher.Active()) })
-	if h.space != nil && h.hasProxy {
+	pm := opts.ProxyMetrics
+	if pm == nil {
 		space := h.space
-		reg.GaugeFunc("flint_proxy_disk_pressure",
-			"1 while the data directory's free space is below proxyCache.minFreeSpace and proxy repositories pass new content through without caching it, else 0.",
-			func() float64 {
-				if space.Pressure() {
-					return 1
-				}
-				return 0
-			})
-		reg.GaugeFunc("flint_data_free_bytes", "Free bytes on the data directory's filesystem, as last measured.",
-			func() float64 { return float64(space.Free()) })
+		if !h.hasProxy {
+			space = nil
+		}
+		pm = upstream.NewMetrics(reg, h.fetcher, space)
 	}
+	h.proxyResults = pm.Requests
+	h.upstreamErrors = pm.UpstreamErrors
+	h.upstreamBytes = pm.UpstreamBytes
+	h.evictions = pm.Evictions
+	h.cachedBytes = pm.CachedBytes
 	if err := h.loadTrackers(); err != nil {
 		return nil, err
 	}
@@ -275,11 +289,11 @@ func (h *Handler) loadTrackers() error {
 	v := h.view()
 	defer v.Release()
 	for _, c := range h.trackers() {
-		if err := c.load(v); err != nil {
-			return fmt.Errorf("oci: loading the cache of proxy repository %s: %w", c.repo, err)
+		if err := loadTracker(c, v); err != nil {
+			return fmt.Errorf("oci: loading the cache of proxy repository %s: %w", c.Repo(), err)
 		}
-		h.cachedBytes.With(c.repo).Set(float64(c.size()))
-		if c.size() > c.limit {
+		h.cachedBytes.With(c.Repo()).Set(float64(c.Size()))
+		if c.Size() > c.Limit() {
 			select {
 			case h.evictKick <- struct{}{}:
 			default:
@@ -289,9 +303,11 @@ func (h *Handler) loadTrackers() error {
 	return nil
 }
 
-// Register mounts the handler at /v2/ on a server.
+// Register mounts the handler at /v2/ on a server, and the Helm view at
+// /helm/.
 func (h *Handler) Register(s interface{ Handle(string, http.Handler) }) {
 	s.Handle("/v2/", h)
+	s.Handle("/helm/", http.HandlerFunc(h.serveHelm))
 }
 
 // repoName is a parsed, validated repository name.

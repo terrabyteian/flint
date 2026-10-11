@@ -810,7 +810,7 @@ func (c *Collector) clearDoomed(ctx context.Context, actor string) (int, error) 
 	for {
 		var keys [][]byte
 		v := c.meta.View()
-		v.Scan([]byte(doomedPrefix), nil, func(k []byte, _ meta.Record) bool {
+		v.Scan([]byte(DoomedPrefix), nil, func(k []byte, _ meta.Record) bool {
 			keys = append(keys, bytes.Clone(k))
 			return len(keys) < doomBatch
 		})

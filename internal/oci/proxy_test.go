@@ -706,8 +706,8 @@ func TestProxySizeLimitPersistence(t *testing.T) {
 	// The pull times survive a restart, which loads the cached items; a
 	// lower limit then evicts the older image first, tags included.
 	h := pe.newHandler(1500, nil)
-	if got := h.repos["small"].proxy.cache.size(); got != pe.h.repos["small"].proxy.cache.size() {
-		t.Errorf("reloaded size %d, want %d", got, pe.h.repos["small"].proxy.cache.size())
+	if got := h.repos["small"].proxy.cache.Size(); got != pe.h.repos["small"].proxy.cache.Size() {
+		t.Errorf("reloaded size %d, want %d", got, pe.h.repos["small"].proxy.cache.Size())
 	}
 	select {
 	case <-h.evictKick:

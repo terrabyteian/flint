@@ -7,6 +7,9 @@ It runs while flint keeps serving pulls and pushes; there is no read-only mode.
 
 [The design](design.md#cleanup-and-data-safety) records the guarantees and how the collector meets them.
 
+> **PyPI repositories are not covered yet.** Garbage collection does not yet know what PyPI's metadata records reference, so on a server that holds any PyPI records, from a hosted, proxy, or virtual PyPI repository, every run refuses to delete anything and reports the `pypi` records as unregistered.
+> No data is at risk; garbage collection simply reclaims nothing on such a server until PyPI registers with it, which a follow-up change does.
+
 ## What is kept, and what is reclaimed
 
 A blob is **referenced**, and kept, while any of these records points at it, in any repository:
@@ -114,7 +117,7 @@ Scheduled runs are recorded with the actor `system`.
 
 - **Nothing referenced is deleted.** A run decides what to delete from the metadata, then checks again, after it has announced what it is about to delete, against the latest metadata and every view pinned with the store, such as a running backup's; it deletes only what all of them leave unreferenced.
 - **Pushes during a run.** A push of content that the run is deleting at that moment, which only happens to content stored more than the grace period ago and no longer referenced, is refused with `503 UNAVAILABLE` and `Retry-After`, as are a manifest push and a cross-repository mount of it; a mount falls back to a normal upload. Clients retry, and the retry succeeds once the run is past that content. A pull through a proxy repository serves the stored copy and fetches it again next time.
-- **Unknown records stop the run.** Every part of flint that writes metadata registers what its records reference with the garbage collector. A record of a kind nobody registered, such as one written by a newer version of flint, or a record that cannot be read, makes the run refuse to delete anything and report it, rather than guess. Upgrade or roll back to a flint that knows the records.
+- **Unknown records stop the run.** Every part of flint that writes metadata registers what its records reference with the garbage collector. A record of a kind nobody registered, such as one written by a newer version of flint, or a record that cannot be read, makes the run refuse to delete anything and report it, rather than guess. Upgrade or roll back to a flint that knows the records. Until PyPI registers with the garbage collector, PyPI records cause this refusal; see the note at the top.
 - **Crashes.** A crash during a run leaves no damage: what was deleted was unreferenced, and at the next start flint forgets the run's unfinished work, so pushes of that content work again. The next run reclaims what is left.
 - **Nothing silently.** Each run logs its start and its outcome, each removed blob link is logged with its repository name and digest, and each deleted blob is logged with its digest, size, and commit time. The metadata log also records the blobs each run set out to delete, and the report of the last run.
 

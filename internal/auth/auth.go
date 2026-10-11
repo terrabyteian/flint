@@ -28,6 +28,12 @@
 // repository path, so a grant on "docker-local" covers
 // "docker-local/team/app".
 //
+// # PyPI clients
+//
+// PyPI clients send HTTP basic credentials with every request: a user
+// name and password, or "__token__" and an API token. Permit checks
+// them for the pypi package.
+//
 // # Docker token authentication
 //
 // Registry requests carry a short-lived JSON Web Token from the token
@@ -38,7 +44,22 @@
 // directory. Authorize checks a request against a token's granted scope
 // and the subject's current permissions, so revoking a user or token takes
 // effect at once rather than when the JWT expires. Registry requests may
-// also present basic credentials, a password or an API token, directly.
+// also present a password or an API token directly.
+//
+// # Package clients
+//
+// Besides basic credentials, an API token is accepted as "Authorization:
+// Bearer <token>", told apart from the token service's JWTs by its
+// "flint_" prefix; as "Authorization: <token>" with no scheme; and in the
+// X-NuGet-ApiKey header. Each family of routes answers refusals in its
+// clients' challenge style through an Authorizer: the Docker Bearer
+// challenge for the registry API, Basic, Cargo, or a plain 401. A format
+// can mint an API token for a client's login command with LoginToken,
+// put signed download URLs, from SignURL, in the metadata it serves to
+// clients that send no credentials for downloads, and check them with
+// VerifySignedURL. AuthorizeVirtual applies the rule for virtual
+// repositories: reading needs read on the virtual repository only, and
+// publishing needs write on its publishTo member.
 package auth
 
 import (
@@ -85,8 +106,8 @@ const bearerTTL = 5 * time.Minute
 type Options struct {
 	// Store holds users and tokens. Required.
 	Store meta.Store
-	// KeyDir is the directory of the token-signing key, normally
-	// <data>/auth. Required.
+	// KeyDir is the directory of the token-signing and URL-signing keys,
+	// normally <data>/auth. Required.
 	KeyDir string
 	// FS is the filesystem of KeyDir; nil means fsys.OS.
 	FS fsys.FS
@@ -110,6 +131,9 @@ type Service struct {
 	store      meta.Store
 	policy     *policy
 	signer     *signer
+	urlKey     []byte      // signs download URLs
+	docker     *Authorizer // the registry API's authorizer
+	loginTTL   time.Duration
 	log        *slog.Logger
 	now        func() time.Time
 	iterations int
@@ -127,8 +151,8 @@ type Service struct {
 	issued   *metrics.CounterSeries
 }
 
-// New returns a Service, loading the token-signing key from KeyDir or
-// generating and storing one on first start.
+// New returns a Service, loading the token-signing and URL-signing keys
+// from KeyDir or generating and storing them on first start.
 func New(opts Options) (*Service, error) {
 	if opts.Store == nil || opts.KeyDir == "" {
 		return nil, errors.New("auth: Options.Store and Options.KeyDir are required")
@@ -159,8 +183,20 @@ func New(opts Options) (*Service, error) {
 		log:        opts.Logger,
 		now:        opts.Now,
 		iterations: opts.PasswordIterations,
+		loginTTL:   config.DefaultLoginTokenTTL,
 		verified:   newVerifiedCache(passwordCacheTTL, 10000),
 		hashing:    make(chan struct{}, runtime.GOMAXPROCS(0)),
+	}
+	s.docker = s.Authorizer(Challenge{Style: ChallengeDocker})
+	if opts.Config != nil && opts.Config.Auth.LoginTokenTTL.Duration > 0 {
+		s.loginTTL = opts.Config.Auth.LoginTokenTTL.Duration
+	}
+	var urlKeyCreated bool
+	if s.urlKey, urlKeyCreated, err = loadOrCreateURLKey(opts.FS, opts.KeyDir); err != nil {
+		return nil, err
+	}
+	if urlKeyCreated {
+		s.log.Info("generated the URL-signing key", "path", filepath.Join(opts.KeyDir, urlKeyFileName))
 	}
 	if s.dummy, err = hashPassword("flint-unknown-user", s.iterations); err != nil {
 		return nil, err
@@ -169,7 +205,7 @@ func New(opts Options) (*Service, error) {
 		s.log.Info("generated the token-signing key", "path", filepath.Join(opts.KeyDir, keyFileName), "kid", s.signer.kid)
 	}
 	s.attempts = opts.Metrics.Counter("flint_auth_attempts_total",
-		"Credential checks, by method (password, token, jwt) and result (success, failure).", "method", "result")
+		"Credential checks, by method (password, token, jwt, url) and result (success, failure).", "method", "result")
 	s.issued = opts.Metrics.Counter("flint_auth_tokens_issued_total",
 		"Bearer tokens issued by the Docker token service.").With()
 	return s, nil
@@ -203,9 +239,9 @@ type Principal struct {
 
 // credential kinds a request can present.
 const (
-	credNone  = iota // no Authorization header
-	credBasic        // basic, with a password or an API token
-	credJWT          // bearer, with a token from the token service
+	credNone   = iota // no credentials
+	credDirect        // a password or an API token, presented directly
+	credJWT           // bearer, with a token from the token service
 )
 
 // credentials is what a request authenticated as.
@@ -217,15 +253,32 @@ type credentials struct {
 
 var anonymous = &Principal{}
 
-// errBadCredentials means a request presented credentials that are wrong,
-// expired, or revoked.
-var errBadCredentials = errors.New("invalid credentials")
+// ErrInvalidCredentials means a request presented credentials that are
+// wrong, expired, or revoked.
+var ErrInvalidCredentials = errors.New("invalid credentials")
 
-// authenticate resolves a request's Authorization header. With acceptJWT
-// false, a bearer token from the token service is not accepted.
+// NuGetAPIKeyHeader carries an API token as NuGet clients send it for
+// pushes and deletes.
+const NuGetAPIKeyHeader = "X-NuGet-ApiKey"
+
+// authenticate resolves a request's credentials. They are, in the
+// Authorization header:
+//
+//   - "Basic" with a user name and a password or an API token;
+//   - "Bearer" with an API token, told apart by its "flint_" prefix;
+//   - "Bearer" with a token from the token service, unless acceptJWT is
+//     false;
+//   - an API token alone, with no scheme.
+//
+// Without an Authorization header, an API token in the X-NuGet-ApiKey
+// header is used.
 func (s *Service) authenticate(r *http.Request, acceptJWT bool) (credentials, error) {
 	h := r.Header.Get("Authorization")
 	if h == "" {
+		if key := r.Header.Get(NuGetAPIKeyHeader); key != "" {
+			p, err := s.checkAPIToken(strings.TrimSpace(key), "")
+			return credentials{kind: credDirect, principal: p}, err
+		}
 		return credentials{kind: credNone, principal: anonymous}, nil
 	}
 	scheme, param, _ := strings.Cut(h, " ")
@@ -234,18 +287,24 @@ func (s *Service) authenticate(r *http.Request, acceptJWT bool) (credentials, er
 	case strings.EqualFold(scheme, "Basic"):
 		user, pw, ok := parseBasic(param)
 		if !ok {
-			return credentials{kind: credBasic}, errBadCredentials
+			return credentials{kind: credDirect}, ErrInvalidCredentials
 		}
 		p, err := s.checkBasic(r.Context(), user, pw)
-		return credentials{kind: credBasic, principal: p}, err
+		return credentials{kind: credDirect, principal: p}, err
+	case strings.EqualFold(scheme, "Bearer") && strings.HasPrefix(param, tokenStringPrefix):
+		p, err := s.checkAPIToken(param, "")
+		return credentials{kind: credDirect, principal: p}, err
 	case strings.EqualFold(scheme, "Bearer"):
 		if !acceptJWT {
-			return credentials{kind: credJWT}, errBadCredentials
+			return credentials{kind: credJWT}, ErrInvalidCredentials
 		}
 		p, c, err := s.checkJWT(param)
 		return credentials{kind: credJWT, principal: p, jwt: c}, err
+	case param == "" && strings.HasPrefix(scheme, tokenStringPrefix):
+		p, err := s.checkAPIToken(scheme, "")
+		return credentials{kind: credDirect, principal: p}, err
 	}
-	return credentials{kind: credBasic}, errBadCredentials
+	return credentials{kind: credDirect}, ErrInvalidCredentials
 }
 
 // parseBasic decodes basic credentials. Unlike net/http's BasicAuth, it
@@ -280,7 +339,7 @@ func (s *Service) checkPassword(ctx context.Context, name, pw string) (*Principa
 	if len(pw) > MaxPasswordLen {
 		// No stored password is this long; do not spend a derivation on it.
 		s.attempts.With("password", "failure").Inc()
-		return nil, errBadCredentials
+		return nil, ErrInvalidCredentials
 	}
 	u, err := s.getUser(name)
 	if err != nil && !errors.Is(err, errNoSuchUser) {
@@ -296,7 +355,7 @@ func (s *Service) checkPassword(ctx context.Context, name, pw string) (*Principa
 	}
 	if !ok || u == nil || len(u.Password) == 0 {
 		s.attempts.With("password", "failure").Inc()
-		return nil, errBadCredentials
+		return nil, ErrInvalidCredentials
 	}
 	s.attempts.With("password", "success").Inc()
 	p := userPrincipal(u)
@@ -336,7 +395,7 @@ func (s *Service) checkAPIToken(secret, owner string) (*Principal, error) {
 		if owner != "" {
 			return nil, errNoSuchToken
 		}
-		return nil, errBadCredentials
+		return nil, ErrInvalidCredentials
 	}
 	t, err := s.getToken(id)
 	if errors.Is(err, errNoSuchToken) {
@@ -344,7 +403,7 @@ func (s *Service) checkAPIToken(secret, owner string) (*Principal, error) {
 		if owner != "" {
 			return nil, errNoSuchToken
 		}
-		return nil, errBadCredentials
+		return nil, ErrInvalidCredentials
 	}
 	if err != nil {
 		return nil, err
@@ -352,7 +411,7 @@ func (s *Service) checkAPIToken(secret, owner string) (*Principal, error) {
 	sum := sha256.Sum256([]byte(secret))
 	if subtle.ConstantTimeCompare(sum[:], t.Hash) != 1 || (owner != "" && owner != t.Owner) {
 		s.attempts.With("token", "failure").Inc()
-		return nil, errBadCredentials
+		return nil, ErrInvalidCredentials
 	}
 	p, err := s.tokenPrincipal(t)
 	if err != nil {
@@ -367,11 +426,11 @@ func (s *Service) checkAPIToken(secret, owner string) (*Principal, error) {
 // token is still valid and its owner still exists.
 func (s *Service) tokenPrincipal(t *token) (*Principal, error) {
 	if t.expired(s.now()) {
-		return nil, errBadCredentials
+		return nil, ErrInvalidCredentials
 	}
 	u, err := s.getUser(t.Owner)
 	if errors.Is(err, errNoSuchUser) {
-		return nil, errBadCredentials
+		return nil, ErrInvalidCredentials
 	}
 	if err != nil {
 		return nil, err
@@ -389,7 +448,7 @@ func (s *Service) checkJWT(tok string) (*Principal, *claims, error) {
 	c, err := s.signer.verify(tok, Issuer, Issuer, s.now())
 	if err != nil {
 		s.attempts.With("jwt", "failure").Inc()
-		return nil, nil, errBadCredentials
+		return nil, nil, ErrInvalidCredentials
 	}
 	p := anonymous
 	switch {
@@ -398,7 +457,7 @@ func (s *Service) checkJWT(tok string) (*Principal, *claims, error) {
 		if terr == nil && t.Owner == c.Subject {
 			p, err = s.tokenPrincipal(t)
 		} else if terr == nil || errors.Is(terr, errNoSuchToken) {
-			err = errBadCredentials
+			err = ErrInvalidCredentials
 		} else {
 			err = terr
 		}
@@ -406,7 +465,7 @@ func (s *Service) checkJWT(tok string) (*Principal, *claims, error) {
 		var u *user
 		u, err = s.getUser(c.Subject)
 		if errors.Is(err, errNoSuchUser) {
-			err = errBadCredentials
+			err = ErrInvalidCredentials
 		} else if err == nil {
 			p = userPrincipal(u)
 		}
@@ -429,27 +488,13 @@ func (s *Service) Role(p *Principal, repo string) Role {
 	return s.policy.role(p, repoOf(repo))
 }
 
-// permits reports whether the credentials allow every action on repo.
-func (s *Service) permits(c credentials, repo string, actions []string) bool {
-	role := s.Role(c.principal, repo)
-	for _, a := range actions {
-		need, ok := actionRole(a)
-		if !ok || role < need {
-			return false
-		}
-		if c.kind == credJWT && !c.jwt.allows(repo, a) {
-			return false
-		}
-	}
-	return true
-}
-
 // Authorize reports whether the request may perform every action ("pull",
 // "push", "delete") on repository repo, a flint repository or a path
 // within one. When it returns false it has written the response: 401 with
 // a Docker-compatible Bearer challenge naming the scope the client needs a
-// token for, or 403 if the client authenticated with basic credentials
-// that lack the permission.
+// token for, or 403 if the client presented a password or an API token
+// that lacks the permission. It is the registry API's authorizer; other
+// route families use an Authorizer with their own challenge style.
 //
 // With repo empty and no actions, it checks only that the request carries
 // valid credentials, a bearer token from the token service included, as
@@ -457,34 +502,42 @@ func (s *Service) permits(c credentials, repo string, actions []string) bool {
 //
 // When it returns true, it records the principal in r's context for Actor.
 func (s *Service) Authorize(w http.ResponseWriter, r *http.Request, repo string, actions ...string) bool {
-	c, err := s.authenticate(r, true)
+	return s.docker.Authorize(w, r, repo, actions...)
+}
+
+// Allowed reports whether the request's credentials permit every action
+// on repo, without writing a response; for example, to filter a listing
+// or to decide whether a cross-repository mount may read its source.
+// Invalid credentials permit nothing.
+func (s *Service) Allowed(r *http.Request, repo string, actions ...string) bool {
+	return s.docker.Allowed(r, repo, actions...)
+}
+
+// Permit reports, as an HTTP status, whether the request's credentials,
+// or their absence, allow every action on repository repo, for clients
+// that authenticate with basic credentials on every request, such as
+// PyPI clients: http.StatusOK; StatusUnauthorized when the
+// request has no valid credentials and needs some; StatusForbidden when
+// its credentials lack the permission; or StatusInternalServerError.
+// Bearer tokens from the token service are not accepted. The caller
+// writes the response. With StatusOK, Permit records the principal in
+// r's context for Actor.
+func (s *Service) Permit(r *http.Request, repo string, actions ...string) int {
+	c, err := s.authenticate(r, false)
 	switch {
-	case err != nil && !errors.Is(err, errBadCredentials):
+	case err != nil && !errors.Is(err, ErrInvalidCredentials):
 		s.log.Error("authentication failed", "err", err)
-		writeRegistryError(w, http.StatusInternalServerError, "UNKNOWN", "internal error")
-		return false
+		return http.StatusInternalServerError
 	case err != nil:
-		s.challenge(w, r, repoScope(repo, actions), "invalid_token")
-		return false
-	case repo == "" && len(actions) == 0:
+		return http.StatusUnauthorized
+	case !s.permits(c, checksFor(repo, actions)):
 		if c.kind == credNone {
-			s.challenge(w, r, "", "")
-			return false
+			return http.StatusUnauthorized
 		}
-	case !s.permits(c, repo, actions):
-		switch c.kind {
-		case credNone:
-			s.challenge(w, r, repoScope(repo, actions), "")
-		case credJWT:
-			s.challenge(w, r, repoScope(repo, actions), "insufficient_scope")
-		default:
-			writeRegistryError(w, http.StatusForbidden, "DENIED", "requested access to the resource is denied")
-		}
-		return false
+		return http.StatusForbidden
 	}
-	logPrincipal(r.Context(), c.principal)
-	*r = *r.WithContext(context.WithValue(r.Context(), principalKey{}, c.principal))
-	return true
+	admit(r, c.principal)
+	return http.StatusOK
 }
 
 type principalKey struct{}
@@ -493,20 +546,24 @@ type principalKey struct{}
 // metadata batches the request writes: the user, the user and API token,
 // or "anonymous".
 func (s *Service) Actor(r *http.Request) string {
-	p, _ := r.Context().Value(principalKey{}).(*Principal)
+	p := PrincipalOf(r)
 	if p == nil || p.User == "" {
 		return "anonymous"
 	}
 	return actorOf(p)
 }
 
-// Allowed reports whether the request's credentials permit every action
-// on repo, without writing a response; for example, to filter a listing
-// or to decide whether a cross-repository mount may read its source.
-// Invalid credentials permit nothing.
-func (s *Service) Allowed(r *http.Request, repo string, actions ...string) bool {
-	c, err := s.authenticate(r, true)
-	return err == nil && s.permits(c, repo, actions)
+// PrincipalOf returns the principal an authorizer admitted r as, or nil
+// if none has.
+func PrincipalOf(r *http.Request) *Principal {
+	p, _ := r.Context().Value(principalKey{}).(*Principal)
+	return p
+}
+
+// admit records that r is admitted as p, in the log and in r's context.
+func admit(r *http.Request, p *Principal) {
+	logPrincipal(r.Context(), p)
+	*r = *r.WithContext(context.WithValue(r.Context(), principalKey{}, p))
 }
 
 // catalogScope is the token scope that lists repositories.
@@ -521,7 +578,7 @@ const catalogScope = "registry:catalog:*"
 func (s *Service) AuthorizeCatalog(w http.ResponseWriter, r *http.Request) (func(repo string) bool, bool) {
 	c, err := s.authenticate(r, true)
 	switch {
-	case err != nil && !errors.Is(err, errBadCredentials):
+	case err != nil && !errors.Is(err, ErrInvalidCredentials):
 		s.log.Error("authentication failed", "err", err)
 		writeRegistryError(w, http.StatusInternalServerError, "UNKNOWN", "internal error")
 		return nil, false
@@ -564,6 +621,12 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request, scope, errCo
 // realm returns the token endpoint's URL as the client addresses this
 // server, honoring trusted proxies.
 func (s *Service) realm(r *http.Request) string {
+	return baseURL(r) + TokenPath
+}
+
+// baseURL returns the scheme and host the client addresses this server
+// by, honoring trusted proxies, as in "https://registry.example".
+func baseURL(r *http.Request) string {
 	info := server.Info(r.Context())
 	scheme, host := info.Scheme, info.Host
 	if scheme == "" {
@@ -573,7 +636,7 @@ func (s *Service) realm(r *http.Request) string {
 		}
 		host = r.Host
 	}
-	return scheme + "://" + host + TokenPath
+	return scheme + "://" + host
 }
 
 // writeRegistryError writes an OCI distribution error response.

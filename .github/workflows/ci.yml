@@ -223,6 +223,68 @@ jobs:
           path: ${{ runner.temp }}/conformance
           if-no-files-found: ignore
 
+  helm:
+    name: Helm repository with Helm ${{ matrix.helm }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Helm 3 before 3.17 reads the JSON index as YAML; later releases
+        # and Helm 4 detect JSON.
+        helm: [v3.16.4, v3.22.0, v4.3.0]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ matrix.helm }}
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "charts", "format": "oci", "type": "hosted", "helmIndex": true}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [{"repositories": ["charts"], "role": "write", "groups": ["ci"]}]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Create a CI user and API token
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          token=$(curl -fsS -u "ci-bot:$bot_password" http://127.0.0.1:5000/api/v1/tokens \
+            -d '{"name": "e2e", "expiresIn": "2h"}' | jq -r .token)
+          echo "::add-mask::$token"
+          echo "E2E_TOKEN=$token" >>"$GITHUB_ENV"
+      - name: Push with helm push and install from the classic repository
+        env:
+          E2E_USERNAME: ci-bot
+        run: E2E_PASSWORD="$E2E_TOKEN" scripts/e2e-helm.sh 127.0.0.1:5000 charts
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"
+
   proxy:
     name: Proxy end to end
     runs-on: ubuntu-latest
@@ -276,6 +338,91 @@ jobs:
           done
       - name: Pull again from the cache
         run: E2E_STATE_DIR="$RUNNER_TEMP/e2e-proxy" scripts/e2e-proxy.sh offline 127.0.0.1:5000 dockerhub ghcr
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"
+
+  pypi:
+    name: PyPI end to end
+    runs-on: ubuntu-latest
+    env:
+      PIP_VERSION: "26.2.1"
+      TWINE_VERSION: "7.0.0"
+      UV_VERSION: "0.12.17"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # CI-only tools: they never ship in flint, so the zero-dependency rule
+      # does not apply.
+      - name: Install pip, twine, and uv
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet "pip==$PIP_VERSION" "twine==$TWINE_VERSION" "uv==$UV_VERSION"
+          echo "$RUNNER_TEMP/tools/bin" >>"$GITHUB_PATH"
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "pypi-local", "format": "pypi", "type": "hosted"},
+              {"name": "pypi", "format": "pypi", "type": "proxy", "anonymousPull": true,
+               "proxy": {"url": "https://pypi.org/simple/", "revalidateAfter": "1s"}},
+              {"name": "pypi-all", "format": "pypi", "type": "virtual", "anonymousPull": true,
+               "virtual": {"members": ["pypi-local", "pypi"]}}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [{"repositories": ["pypi-local"], "role": "write", "groups": ["ci"]}]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/flint.pid"
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Create a CI user and API token
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          token=$(curl -fsS -u "ci-bot:$bot_password" http://127.0.0.1:5000/api/v1/tokens \
+            -d '{"name": "e2e", "expiresIn": "2h"}' | jq -r .token)
+          echo "::add-mask::$token"
+          echo "E2E_TOKEN=$token" >>"$GITHUB_ENV"
+      - name: Publish with twine and uv, install with pip and uv
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-pypi" E2E_ADMIN="admin:$ADMIN_PASSWORD" \
+            scripts/e2e-pypi.sh online 127.0.0.1:5000 pypi-local pypi pypi-all
+      - name: Restart flint with its upstream unreachable
+        run: |
+          pid=$(cat "$RUNNER_TEMP/flint.pid")
+          kill "$pid"
+          while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+          # Every upstream request now goes to a proxy that refuses connections.
+          HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 NO_PROXY= \
+            "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >>"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Install again from the cache
+        run: |
+          E2E_STATE_DIR="$RUNNER_TEMP/e2e-pypi" E2E_ADMIN="admin:$ADMIN_PASSWORD" \
+            scripts/e2e-pypi.sh offline 127.0.0.1:5000 pypi-local pypi pypi-all
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"

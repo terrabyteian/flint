@@ -16,8 +16,9 @@ import (
 const (
 	// EpochKey is the GC epoch counter's key. Link batches require it
 	// unchanged; see Guard.
-	EpochKey     = "gc\x00epoch"
-	doomedPrefix = "gc\x00doomed\x00"
+	EpochKey = "gc\x00epoch"
+	// DoomedPrefix starts the keys of the doomed set.
+	DoomedPrefix = "gc\x00doomed\x00"
 	lastKey      = "gc\x00last"
 )
 
@@ -26,12 +27,12 @@ const (
 const recordFormat = 1
 
 // DoomedKey returns the key of digest d's entry in the doomed set.
-func DoomedKey(d blob.Digest) []byte { return []byte(doomedPrefix + d.String()) }
+func DoomedKey(d blob.Digest) []byte { return []byte(DoomedPrefix + d.String()) }
 
 // ErrDoomed means a link batch would link a blob that a running sweep
 // is about to delete. The link must fail with an error the client can
 // retry; once the sweep ends, the blob can be stored and linked again.
-var ErrDoomed = errors.New("gc: the blob is being garbage collected")
+var ErrDoomed = errors.New("gc: the blob is being reclaimed")
 
 // Guard applies the garbage-collection precondition to a batch b that
 // makes the blobs ds visible (a link batch). It reads the GC epoch and

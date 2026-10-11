@@ -825,8 +825,8 @@ func TestGCProxyEviction(t *testing.T) {
 	if r.Deleted != (gc.Count{Blobs: 3, Bytes: 3000}) || r.Pruned != 2 {
 		t.Fatalf("report = %+v", r)
 	}
-	if cache := pe.h.repos["small"].proxy.cache; cache.size() != 0 {
-		t.Errorf("the repository still counts %d bytes", cache.size())
+	if cache := pe.h.repos["small"].proxy.cache; cache.Size() != 0 {
+		t.Errorf("the repository still counts %d bytes", cache.Size())
 	}
 	checkReferencedStored(t, pe.meta, pe.blobs)
 	// Evicted content is fetched again.

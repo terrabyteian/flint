@@ -23,10 +23,7 @@ const maxLinkAttempts = 4
 // running is caught by its doomed entry.
 func gcGuard(v meta.View, b *meta.Batch, ds ...blob.Digest) error {
 	if err := gc.Guard(v, b, ds...); err != nil {
-		if errors.Is(err, gc.ErrDoomed) {
-			return errRetry
-		}
-		return err
+		return errRetry
 	}
 	return nil
 }

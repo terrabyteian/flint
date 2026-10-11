@@ -41,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -140,9 +141,10 @@ type Client struct {
 	log          *slog.Logger
 	now          func() time.Time
 
-	mu           sync.Mutex
-	tokens       map[string]token // by scope
-	offlineUntil time.Time
+	mu            sync.Mutex
+	tokens        map[string]token // by scope
+	offlineUntil  time.Time
+	basicAccepted atomic.Bool // the upstream accepted basic credentials
 }
 
 // token is a bearer token and when it stops being used.
@@ -274,10 +276,30 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	u := *c.base
 	u.Path = path
 	u.RawQuery = query.Encode()
-	op := method + " " + path
+	return c.do(ctx, method, &u, header, scope)
+}
+
+// GetURL fetches an absolute http or https URL, such as a package file
+// that an index links to, which may be on another host, such as a
+// content delivery network. It retries and fails as Do does. Only the
+// upstream's own scheme and host are sent credentials or have their
+// authentication challenges answered; a 401 from anywhere else is
+// ErrDenied.
+func (c *Client) GetURL(ctx context.Context, rawURL string, header http.Header) (*http.Response, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return nil, &Error{Op: "GET " + rawURL, Err: fmt.Errorf("%q is not an http or https URL", rawURL)}
+	}
+	u.Fragment, u.RawFragment = "", ""
+	return c.do(ctx, http.MethodGet, u, header, "")
+}
+
+// do sends a request for u; see Do.
+func (c *Client) do(ctx context.Context, method string, u *url.URL, header http.Header, scope string) (*http.Response, error) {
+	op := method + " " + u.Path
 	var lastErr error
 	for attempt := 1; ; attempt++ {
-		resp, err := c.send(ctx, method, &u, header, scope)
+		resp, err := c.send(ctx, method, u, header, scope)
 		retryAfter := time.Duration(0)
 		switch {
 		case err == nil && !retryable(resp.StatusCode):
@@ -331,9 +353,18 @@ func (c *Client) ctxError(op string, ctx context.Context) error {
 // Network failures are *Errors wrapping ErrUnavailable.
 func (c *Client) send(ctx context.Context, method string, u *url.URL, header http.Header, scope string) (*http.Response, error) {
 	op := method + " " + u.Path
+	own := strings.EqualFold(u.Scheme, c.base.Scheme) && strings.EqualFold(u.Host, c.base.Host)
 	auth := ""
-	if tok, ok := c.cachedToken(scope); ok {
+	if tok, ok := c.cachedToken(scope); ok && own {
 		auth = "Bearer " + tok
+	} else if own && c.username != "" && c.basicAccepted.Load() {
+		// The upstream took basic credentials before: send them at once
+		// rather than waiting for its challenge.
+		pw, err := c.password()
+		if err != nil {
+			return nil, &Error{Op: op, Err: err}
+		}
+		auth = "Basic " + basicAuth(c.username, pw)
 	}
 	resp, err := c.roundTrip(ctx, method, u.String(), header, auth)
 	if err != nil {
@@ -341,6 +372,11 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		return resp, nil
+	}
+	if !own {
+		drain(resp)
+		return nil, &Error{Op: op, Status: http.StatusUnauthorized,
+			Err: fmt.Errorf("%w: %s asks for credentials, which flint sends only to %s", ErrDenied, u.Host, c.base.Host)}
 	}
 	ch, ok := parseChallenge(resp.Header.Values("WWW-Authenticate"))
 	drain(resp)
@@ -370,7 +406,11 @@ func (c *Client) send(ctx context.Context, method string, u *url.URL, header htt
 	}
 	if ch.scheme == "basic" && resp.StatusCode == http.StatusUnauthorized {
 		drain(resp)
+		c.basicAccepted.Store(false)
 		return nil, &Error{Op: op, Status: http.StatusUnauthorized, Err: fmt.Errorf("%w: the upstream refused the credentials", ErrAuth)}
+	}
+	if ch.scheme == "basic" {
+		c.basicAccepted.Store(true)
 	}
 	return resp, nil
 }

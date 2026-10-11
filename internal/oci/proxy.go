@@ -65,11 +65,11 @@ const (
 
 // Results of proxy requests, for the flint_proxy_requests_total metric.
 const (
-	resultHit         = "hit"         // served from the cache without asking the upstream
-	resultRevalidated = "revalidated" // served after the upstream confirmed it
-	resultFetched     = "fetched"     // fetched from the upstream and cached
-	resultPassthrough = "passthrough" // fetched from the upstream, not cached
-	resultStale       = "stale"       // served from the cache because the upstream failed
+	resultHit         = upstream.ResultHit
+	resultRevalidated = upstream.ResultRevalidated
+	resultFetched     = upstream.ResultFetched
+	resultPassthrough = upstream.ResultPassthrough
+	resultStale       = upstream.ResultStale
 )
 
 // errPassThrough means content must be passed through, not cached.
@@ -80,7 +80,7 @@ type proxyRepo struct {
 	client     *upstream.Client
 	dockerHub  bool
 	revalidate time.Duration
-	cache      *cacheTracker // nil without a size limit
+	cache      *upstream.CacheTracker // nil without a size limit
 }
 
 // dockerHubHost is the host of Docker Hub's registry API.
@@ -103,7 +103,7 @@ func newProxyRepo(rc config.Repository, defaults upstream.Options) (*proxyRepo, 
 		return nil, err
 	}
 	if pc.SizeLimit.Bytes > 0 {
-		p.cache = newCacheTracker(rc.Name, pc.SizeLimit.Bytes)
+		p.cache = upstream.NewCacheTracker(rc.Name, pc.SizeLimit.Bytes)
 	}
 	return p, nil
 }
@@ -206,7 +206,7 @@ func (h *Handler) upstreamError(rn *repoName, err error, notFound *apiError) err
 // and it must fit the repository's size limit. If it may, release ends
 // the space reservation once the content is stored.
 func (h *Handler) admit(rn *repoName, size int64) (release func(), ok bool) {
-	if c := rn.cfg.proxy.cache; c != nil && size > c.limit {
+	if c := rn.cfg.proxy.cache; c != nil && size > c.Limit() {
 		return nil, false
 	}
 	if h.space == nil {
@@ -258,7 +258,7 @@ func (h *Handler) proxyGetBlob(w http.ResponseWriter, r *http.Request, rn *repoN
 			// served without being linked, as if passed through. So is a
 			// blob garbage collection is deleting (errRetry), while it
 			// lasts; the next pull fetches it again.
-			if c := p.cache; c == nil || info.Size <= c.limit {
+			if c := p.cache; c == nil || info.Size <= c.Limit() {
 				if err := h.linkProxyBlob(ctx, h.actor(r), rn, d, info.Size); err != nil && err != errRetry {
 					h.writeError(w, r, err)
 					return
@@ -353,7 +353,7 @@ func (h *Handler) fetchBlob(w http.ResponseWriter, r *http.Request, rn *repoName
 			h.log.Warn("caching a proxied blob failed", "repository", rn.full, "digest", d.String(), "err", err)
 		}
 	}
-	fe, _ := h.fetcher.Fetch(rn.repo+"\x00"+up+"\x00"+d.String(), d, open, done)
+	fe, _ := h.fetcher.Fetch("oci\x00"+rn.repo+"\x00"+up+"\x00"+d.String(), d, open, done)
 	defer fe.Release()
 	size, err := fe.Wait(ctx)
 	if errors.Is(err, errPassThrough) {

@@ -22,6 +22,7 @@ import (
 	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/metrics"
 	"github.com/terrabyteian/flint/internal/oci"
+	"github.com/terrabyteian/flint/internal/pypi"
 	"github.com/terrabyteian/flint/internal/server"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
@@ -98,7 +99,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 		return err
 	}
 
-	srv, registry, backups, collector, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
+	srv, formats, backups, collector, err := newServer(ctx, cfg, logger, fsys.OS, store, blobs)
 	if err != nil {
 		return err
 	}
@@ -112,8 +113,12 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	// first.
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
 	var janitors sync.WaitGroup
-	janitors.Go(func() { registry.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
-	janitors.Go(func() { registry.RunProxy(janitorCtx) })
+	janitors.Go(func() { formats.oci.RunJanitor(janitorCtx, oci.JanitorInterval, oci.UploadMaxAge) })
+	janitors.Go(func() { formats.oci.RunProxy(janitorCtx) })
+	janitors.Go(func() { formats.pypi.RunProxy(janitorCtx) })
+	if formats.space != nil {
+		janitors.Go(func() { formats.space.Run(janitorCtx, upstream.SpaceCheckInterval) })
+	}
 	janitors.Go(func() { collector.RunSchedule(janitorCtx) })
 	defer func() {
 		stopJanitor()
@@ -147,6 +152,14 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 	return nil
 }
 
+// formats are the package format handlers newServer builds, and the
+// free-space watcher their proxy repositories share.
+type formats struct {
+	oci   *oci.Handler
+	pypi  *pypi.Handler
+	space *upstream.Space // nil without proxy repositories
+}
+
 // newServer builds the HTTP server and its metrics over open stores. The
 // format and auth packages register their routes, middleware, and
 // readiness checks on it here, using store and blobs, and the garbage
@@ -154,7 +167,7 @@ func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) (er
 // metadata. fsy is the data directory's filesystem. The backup manager is
 // nil unless backups are configured; the caller closes it, and the
 // collector, before the stores.
-func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *oci.Handler, *backup.Manager, *gc.Collector, error) {
+func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy fsys.FS, store meta.Store, blobs blob.Store) (*server.Server, *formats, *backup.Manager, *gc.Collector, error) {
 	reg := metrics.NewRegistry()
 	metrics.RegisterRuntime(reg, version)
 	registerStoreMetrics(reg, store)
@@ -209,7 +222,31 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 			break
 		}
 	}
+	// Proxy repositories of every format share one fetcher and one set of
+	// proxy metrics.
+	fetcher := upstream.NewFetcher(blobs, 0)
+	proxyMetrics := upstream.NewMetrics(reg, fetcher, space)
+	upOpts := upstream.Options{UserAgent: "flint/" + version}
 	registry, err := oci.New(oci.Options{
+		Meta:         store,
+		Blobs:        blobs,
+		Repositories: cfg.Repositories,
+		Authorizer:   authz,
+		// Helm clients send basic credentials and know no token service.
+		HelmAuthorizer: authz.Authorizer(auth.Challenge{Style: auth.ChallengeBasic}),
+		Actor:          authz.Actor,
+		Logger:         logger,
+		Metrics:        reg,
+		Upstream:       upOpts,
+		Space:          space,
+		Fetcher:        fetcher,
+		ProxyMetrics:   proxyMetrics,
+	})
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	registry.Register(srv)
+	index, err := pypi.New(pypi.Options{
 		Meta:         store,
 		Blobs:        blobs,
 		Repositories: cfg.Repositories,
@@ -217,14 +254,16 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Actor:        authz.Actor,
 		Logger:       logger,
 		Metrics:      reg,
-		Upstream:     upstream.Options{UserAgent: "flint/" + version},
+		Upstream:     upOpts,
 		Space:        space,
 		Now:          now,
+		Fetcher:      fetcher,
+		ProxyMetrics: proxyMetrics,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	registry.Register(srv)
+	index.Register(srv)
 
 	var backups *backup.Manager
 	if cfg.Backup.Directory != "" {
@@ -259,12 +298,12 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	}
 	authz.HandleAdmin(srv, gc.StatusPattern, collector.HandleStatus)
 	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
-	return srv, registry, backups, collector, nil
+	return srv, &formats{oci: registry, pypi: index, space: space}, backups, collector, nil
 }
 
 // blobReferences report the blobs every format package's records
 // reference, for backups to check that they hold them all.
-var blobReferences = []backup.References{oci.References}
+var blobReferences = []backup.References{oci.References, pypi.References}
 
 // registerStoreMetrics exposes the metadata store's counters and health.
 func registerStoreMetrics(reg *metrics.Registry, store meta.Store) {

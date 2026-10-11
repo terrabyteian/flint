@@ -84,8 +84,9 @@ type env struct {
 
 var testRepos = []config.Repository{
 	{Name: "hosted", Format: config.FormatOCI, Type: config.TypeHosted},
-	{Name: "frozen", Format: config.FormatOCI, Type: config.TypeHosted, ImmutableTags: true},
+	{Name: "frozen", Format: config.FormatOCI, Type: config.TypeHosted, ImmutableTags: true, HelmIndex: true},
 	{Name: "other", Format: config.FormatOCI, Type: config.TypeHosted},
+	{Name: "charts", Format: config.FormatOCI, Type: config.TypeHosted, HelmIndex: true},
 }
 
 func newEnv(t *testing.T) *env {

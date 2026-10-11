@@ -272,8 +272,8 @@ func doomed(ms meta.Store) []string {
 	var out []string
 	v := ms.View()
 	defer v.Release()
-	v.Scan([]byte(doomedPrefix), nil, func(k []byte, _ meta.Record) bool {
-		out = append(out, string(k[len(doomedPrefix):]))
+	v.Scan([]byte(DoomedPrefix), nil, func(k []byte, _ meta.Record) bool {
+		out = append(out, string(k[len(DoomedPrefix):]))
 		return true
 	})
 	return out

@@ -36,6 +36,11 @@ const (
 	nsGen      = "oci\x00mgen\x00"
 
 	recordFormat = 1 // the schema version byte that starts every value
+
+	// manifestFormat is the schema version of manifest records, which
+	// version 2 extended with the push time. Version 1 records still
+	// decode, with no push time.
+	manifestFormat = 2
 )
 
 // prefix returns ns + repo \0 name \0.
@@ -89,9 +94,13 @@ type dec struct {
 	err error
 }
 
-func newDec(b []byte) *dec {
+func newDec(b []byte) *dec { return newDecMax(b, recordFormat) }
+
+// newDecMax is newDec for a record whose schema versions run from
+// recordFormat to max.
+func newDecMax(b []byte, max byte) *dec {
 	d := &dec{b: b}
-	if len(b) == 0 || b[0] != recordFormat {
+	if len(b) == 0 || b[0] < recordFormat || b[0] > max {
 		d.err = errBadRecord
 		return d
 	}
@@ -218,6 +227,7 @@ type manifestRecord struct {
 	Subject      blob.Digest // zero if the manifest has no subject
 	Annotations  string      // the manifest's annotations as a JSON object, or ""
 	Refs         []manifestRef
+	Pushed       time.Time // when the record was first written; zero if a version 1 record or a proxy's
 }
 
 // manifestRef is a blob or child manifest a manifest references; garbage
@@ -228,7 +238,7 @@ type manifestRef struct {
 }
 
 func (m *manifestRecord) encode() []byte {
-	e := newEnc().str(m.MediaType).uvarint(uint64(m.Size)).str(m.ArtifactType)
+	e := enc{manifestFormat}.str(m.MediaType).uvarint(uint64(m.Size)).str(m.ArtifactType)
 	if m.Subject.IsZero() {
 		e = append(e, 0)
 	} else {
@@ -238,11 +248,15 @@ func (m *manifestRecord) encode() []byte {
 	for _, r := range m.Refs {
 		e = append(e, byte(r.Kind)).digest(r.Digest)
 	}
-	return e
+	var pushed int64 // 0 for no time
+	if !m.Pushed.IsZero() {
+		pushed = m.Pushed.UnixNano()
+	}
+	return e.varint(pushed)
 }
 
 func decodeManifest(b []byte) (*manifestRecord, error) {
-	d := newDec(b)
+	d := newDecMax(b, manifestFormat)
 	m := &manifestRecord{MediaType: d.str(), Size: int64(d.uvarint()), ArtifactType: d.str()}
 	if d.byte() == 1 {
 		m.Subject = d.digest()
@@ -255,6 +269,11 @@ func decodeManifest(b []byte) (*manifestRecord, error) {
 	m.Refs = make([]manifestRef, 0, n)
 	for range n {
 		m.Refs = append(m.Refs, manifestRef{Kind: refKind(d.byte()), Digest: d.digest()})
+	}
+	if d.err == nil && b[0] >= 2 {
+		if pushed := d.varint(); pushed != 0 {
+			m.Pushed = time.Unix(0, pushed)
+		}
 	}
 	if err := d.done(); err != nil {
 		return nil, err
