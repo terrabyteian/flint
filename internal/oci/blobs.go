@@ -83,14 +83,22 @@ func (h *Handler) statExists(ctx context.Context, ds ...blob.Digest) func(int) e
 	}
 }
 
-// lookupBlob returns the size of blob d as linked in rn.
+// lookupBlob returns the size of blob d as linked in rn, for a read of
+// the blob, and records the read: garbage collection keeps a link read
+// within the grace period. The lookup and the record happen together
+// with respect to the link's removal (linkPruner.Remove), so a read that
+// finds the link keeps it.
 func (h *Handler) lookupBlob(rn *repoName, d blob.Digest) (int64, bool, error) {
+	key := blobKey(rn, d)
+	h.linkMu.Lock()
+	defer h.linkMu.Unlock()
 	v := h.view()
 	defer v.Release()
-	rec, ok := v.Get(blobKey(rn, d))
+	rec, ok := v.Get(key)
 	if !ok {
 		return 0, false, nil
 	}
+	h.linkReads[string(key)] = h.now()
 	size, _, err := decodeBlobLink(rec.Value)
 	return size, true, err
 }
@@ -165,12 +173,11 @@ func (h *Handler) deleteBlob(w http.ResponseWriter, r *http.Request, rn *repoNam
 		h.writeError(w, r, err)
 		return
 	}
-	_, ok, err := h.lookupBlob(rn, d)
-	if err == nil && !ok {
-		err = blobUnknown(d)
-	}
-	if err != nil {
-		h.writeError(w, r, err)
+	v := h.view()
+	_, ok := v.Get(blobKey(rn, d))
+	v.Release()
+	if !ok {
+		h.writeError(w, r, blobUnknown(d))
 		return
 	}
 	var b meta.Batch

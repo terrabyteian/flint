@@ -174,7 +174,7 @@ func TestGCMarkerCoversEveryRecord(t *testing.T) {
 		return true
 	})
 	v.Release()
-	for _, ns := range []string{nsBlob, nsManifest, nsTag, nsReferrer, nsUpload, nsPulled} {
+	for _, ns := range []string{nsBlob, nsManifest, nsTag, nsReferrer, nsUpload, nsGen, nsPulled} {
 		if !keys[ns] {
 			t.Errorf("the test wrote no %q keys", ns)
 		}
@@ -300,8 +300,10 @@ func TestGCEndToEnd(t *testing.T) {
 	checkReferencedStored(t, ge.meta, ge.blobs)
 
 	// Deleting b leaves its signature, whose subject need not exist; the
-	// signature keeps its own blobs, not b's.
+	// signature keeps its own blobs, not b's, once the pulls above are
+	// past the grace period.
 	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+b.digest.String(), nil), http.StatusAccepted, "")
+	ge.clock.advance(past)
 	collect(t, ge.gc)
 	for _, d := range []blob.Digest{b.digest, blob.FromBytes(b.config), blob.FromBytes(b.layer)} {
 		if stored(t, ge.blobs, d) {
@@ -348,7 +350,9 @@ func TestGCExpiredLinks(t *testing.T) {
 	if err != nil || dry.State != gc.StateSucceeded || dry.Pruned != 2 || dry.Deleted.Blobs != 2 {
 		t.Fatalf("dry run = %+v, %v", dry, err)
 	}
-	want(t, ge.do("GET", "/v2/hosted/app/blobs/"+xConfig.String(), nil), http.StatusOK, "")
+	if !linked(ge.meta, "hosted/app", xConfig) {
+		t.Fatal("the dry run removed x's config link")
+	}
 
 	// x's config link and the source link of the mounted blob expired;
 	// x's manifest and config are reclaimed.
@@ -364,11 +368,13 @@ func TestGCExpiredLinks(t *testing.T) {
 	want(t, ge.do("GET", "/v2/hosted/app/manifests/multi", nil), http.StatusOK, "")
 	checkReferencedStored(t, ge.meta, ge.blobs)
 
-	// Deleting y in hosted/app expires its links there; other/copy keeps
-	// its blobs.
+	// Deleting y in hosted/app expires its links there, once the pulls
+	// above are past the grace period; other/copy keeps its blobs. The
+	// mounted blob's link, never used by a manifest, expires too.
 	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+y.digest.String(), nil), http.StatusAccepted, "")
+	ge.clock.advance(past)
 	r = collect(t, ge.gc)
-	if r.Pruned != 2 || r.Deleted.Blobs != 0 {
+	if r.Pruned != 3 || r.Deleted.Blobs != 1 || stored(t, ge.blobs, early) {
 		t.Fatalf("report = %+v", r)
 	}
 	want(t, ge.do("GET", "/v2/hosted/app/blobs/"+blob.FromBytes(y.layer).String(), nil), http.StatusNotFound, codeBlobUnknown)
@@ -376,10 +382,20 @@ func TestGCExpiredLinks(t *testing.T) {
 	checkReferencedStored(t, ge.meta, ge.blobs)
 }
 
+// linked reports whether d is linked in the repository name full.
+func linked(ms meta.Store, full string, d blob.Digest) bool {
+	repo, name, _ := strings.Cut(full, "/")
+	v := ms.View()
+	defer v.Release()
+	_, ok := v.Get(blobKey(&repoName{repo: repo, name: name}, d))
+	return ok
+}
+
 // TestGCLinkPruneRace interleaves a push of a manifest that references
 // expired links with their removal; exactly one of them wins. A push that
-// commits after the run found the links expired rewrites them, so the
-// run keeps them; a push that read the links before the run removed them
+// commits after the run found the links expired writes its repository
+// name's generation key, so the run keeps them; a push that read the links
+// before the run removed them
 // fails, as if the blobs had not been pushed, and succeeds once they are.
 func TestGCLinkPruneRace(t *testing.T) {
 	ge := newGCEnv(t)
@@ -431,6 +447,125 @@ func TestGCLinkPruneRace(t *testing.T) {
 	ge.h.linkHook = nil
 	want(t, ge.pushImage("hosted/app", "v1", img), http.StatusCreated, "")
 	ge.pullImage("hosted/app", "v1", img)
+}
+
+// TestGCParallelPushes pushes manifests that share a layer and the OCI
+// empty config into one repository name at once, each reading its view
+// before any commits: none of them conflicts with another.
+func TestGCParallelPushes(t *testing.T) {
+	ge := newGCEnv(t)
+	const n = 8
+	empty := []byte("{}")
+	shared := []byte("shared layer")
+	ge.pushBlob("hosted/app", empty)
+	ge.pushBlob("hosted/app", shared)
+	var manifests [][]byte
+	for i := range n {
+		own := []byte(fmt.Sprintf("layer %d", i))
+		ge.pushBlob("hosted/app", own)
+		manifests = append(manifests, mustJSON(map[string]any{
+			"schemaVersion": 2, "mediaType": mtOCIManifest, "artifactType": "application/vnd.example",
+			"config": desc("application/vnd.oci.empty.v1+json", empty),
+			"layers": []any{desc("application/octet-stream", shared), desc("application/octet-stream", own)},
+		}))
+	}
+	var arrived sync.WaitGroup
+	arrived.Add(n)
+	all := make(chan struct{})
+	go func() { arrived.Wait(); close(all) }()
+	var once sync.Map
+	ge.h.linkHook = func(ds []blob.Digest) {
+		if _, again := once.LoadOrStore(ds[0], true); !again {
+			arrived.Done()
+		}
+		<-all
+	}
+	conflicts := ge.meta.Stats().Conflicts
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i, m := range manifests {
+		wg.Go(func() {
+			codes[i] = ge.do("PUT", "/v2/hosted/app/manifests/v"+fmt.Sprint(i), m, "Content-Type", mtOCIManifest).Code
+		})
+	}
+	wg.Wait()
+	for i, code := range codes {
+		if code != http.StatusCreated {
+			t.Errorf("push %d = %d", i, code)
+		}
+	}
+	if got := ge.meta.Stats().Conflicts - conflicts; got != 0 {
+		t.Errorf("%d pushes conflicted", got)
+	}
+}
+
+// TestGCRebuildReusesOldLinks deletes an image and pushes a rebuild that
+// shares its base layer, as clients do: they find the base layer's old
+// link with a HEAD and push only the manifest. A run before the manifest
+// arrives, or one that found the link expired before the HEAD, keeps the
+// link, so the manifest push succeeds.
+func TestGCRebuildReusesOldLinks(t *testing.T) {
+	ge := newGCEnv(t)
+	layerType := "application/vnd.oci.image.layer.v1.tar+gzip"
+	a := newImage("a", nil)
+	b := newImage("b", map[string]any{"layers": []any{desc(layerType, a.layer)}})
+	b.layer = a.layer
+	base := blob.FromBytes(a.layer)
+	head := func(d blob.Digest) {
+		want(t, ge.do("HEAD", "/v2/hosted/app/blobs/"+d.String(), nil), http.StatusOK, "")
+	}
+	want(t, ge.pushImage("hosted/app", "v1", a), http.StatusCreated, "")
+	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+a.digest.String(), nil), http.StatusAccepted, "")
+	ge.clock.advance(past)
+
+	// The HEAD comes before the run, which removes only a's config link.
+	head(base)
+	ge.pushBlob("hosted/app", b.config)
+	if r := collect(t, ge.gc); r.Pruned != 1 || !linked(ge.meta, "hosted/app", base) {
+		t.Fatalf("report = %+v", r)
+	}
+	want(t, ge.do("PUT", "/v2/hosted/app/manifests/v2", b.manifest, "Content-Type", mtOCIManifest), http.StatusCreated, "")
+	ge.pullImage("hosted/app", "v2", b)
+
+	// The HEADs come after the run found the links expired, before it
+	// removes them.
+	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+b.digest.String(), nil), http.StatusAccepted, "")
+	ge.clock.advance(past)
+	ge.setHook(func(s gc.Step) {
+		if s == gc.StepMarked {
+			head(base)
+			head(blob.FromBytes(b.config))
+		}
+	})
+	if r := collect(t, ge.gc); r.Pruned != 0 {
+		t.Fatalf("report = %+v", r)
+	}
+	want(t, ge.do("PUT", "/v2/hosted/app/manifests/v2", b.manifest, "Content-Type", mtOCIManifest), http.StatusCreated, "")
+	ge.pullImage("hosted/app", "v2", b)
+	checkReferencedStored(t, ge.meta, ge.blobs)
+}
+
+// TestGCLinksAfterRestart keeps every link for the grace period after the
+// handler starts, since it knows no reads from before.
+func TestGCLinksAfterRestart(t *testing.T) {
+	ge := newGCEnv(t)
+	img := newImage("restarted", nil)
+	want(t, ge.pushImage("hosted/app", "v1", img), http.StatusCreated, "")
+	want(t, ge.do("DELETE", "/v2/hosted/app/manifests/"+img.digest.String(), nil), http.StatusAccepted, "")
+	ge.clock.advance(past)
+	h, err := New(Options{Meta: ge.meta, Blobs: ge.blobs, Repositories: testRepos, Authorizer: ge.auth,
+		Logger: quiet, Now: ge.clock.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newCollector(t, h, ge.clock.now, nil)
+	if r := collect(t, c); r.Pruned != 0 || r.Deleted.Blobs != 1 || !linked(ge.meta, "hosted/app", blob.FromBytes(img.layer)) {
+		t.Fatalf("report after the restart = %+v", r)
+	}
+	ge.clock.advance(past)
+	if r := collect(t, c); r.Pruned != 2 || r.Deleted.Blobs != 2 {
+		t.Fatalf("report a grace period after the restart = %+v", r)
+	}
 }
 
 // garbage stores content as an unreferenced blob past the grace period:

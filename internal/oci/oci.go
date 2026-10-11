@@ -132,6 +132,13 @@ type Handler struct {
 	actor func(*http.Request) string
 	now   func() time.Time
 
+	// Blob links' reads, which garbage collection counts like link times,
+	// and when the handler started, before which it knows no reads; see
+	// GCPruner.
+	linkMu    sync.Mutex
+	linkReads map[string]time.Time // by blob link key
+	started   time.Time
+
 	uploadBytes   *metrics.Counter
 	manifestPuts  *metrics.Counter
 	linkConflicts *metrics.CounterSeries
@@ -179,6 +186,7 @@ func New(opts Options) (*Handler, error) {
 		fetcher:   upstream.NewFetcher(opts.Blobs, opts.FetchIdleTimeout),
 		validated: map[string]time.Time{},
 		evictKick: make(chan struct{}, 1),
+		linkReads: map[string]time.Time{},
 	}
 	if h.log == nil {
 		h.log = slog.Default()
@@ -186,6 +194,7 @@ func New(opts Options) (*Handler, error) {
 	if h.now == nil {
 		h.now = time.Now
 	}
+	h.started = h.now()
 	if h.actor == nil {
 		h.actor = clientActor
 	}

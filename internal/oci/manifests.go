@@ -235,10 +235,7 @@ func (h *Handler) putManifest(w http.ResponseWriter, r *http.Request, rn *repoNa
 		}
 		rec := pm.record
 		rec.Refs = refs
-		b.Put(manifestKey(rn, d), rec.encode())
-		if !rec.Subject.IsZero() {
-			b.Put(referrerKey(rn, rec.Subject, d), newEnc())
-		}
+		putManifestRecord(b, rn, d, &rec)
 		for _, t := range tags {
 			cur, ok := v.Get(tagKey(rn, t))
 			if ok && rn.cfg.immutableTags {
@@ -290,9 +287,6 @@ func (h *Handler) putManifest(w http.ResponseWriter, r *http.Request, rn *repoNa
 // with the size its descriptor claims. It requires each of them to be
 // unchanged when b commits, so a concurrent delete cannot leave the
 // manifest pointing at nothing, and returns the references for the record.
-// It also rewrites each blob link unchanged, so garbage collection, which
-// removes a link nothing references only if it is still at the version it
-// found, cannot remove one this manifest now references.
 func checkReferences(v meta.View, b *meta.Batch, rn *repoName, pm *parsedManifest) ([]manifestRef, error) {
 	refs := make([]manifestRef, 0, len(pm.blobs)+len(pm.members))
 	seen := map[manifestRef]bool{}
@@ -318,7 +312,6 @@ func checkReferences(v meta.View, b *meta.Batch, rn *repoName, pm *parsedManifes
 		if r := (manifestRef{refBlob, d}); !seen[r] {
 			seen[r] = true
 			b.Require(key, rec.Version)
-			b.Put(key, bytes.Clone(rec.Value))
 			refs = append(refs, r)
 		}
 	}
@@ -343,6 +336,20 @@ func checkReferences(v meta.View, b *meta.Batch, rn *repoName, pm *parsedManifes
 		}
 	}
 	return refs, nil
+}
+
+// putManifestRecord adds to b the record of manifest d in rn, with its
+// referrers entry, and a write of rn's manifest generation key, which
+// garbage collection requires unchanged when it removes a link of rn that
+// no manifest references, so it cannot remove one this manifest
+// references. The write requires nothing, so manifest pushes never
+// conflict with each other.
+func putManifestRecord(b *meta.Batch, rn *repoName, d blob.Digest, rec *manifestRecord) {
+	b.Put(manifestKey(rn, d), rec.encode())
+	if !rec.Subject.IsZero() {
+		b.Put(referrerKey(rn, rec.Subject, d), newEnc())
+	}
+	b.Put(prefix(nsGen, rn), newEnc())
 }
 
 // lookupManifest resolves a tag or digest reference in view v.

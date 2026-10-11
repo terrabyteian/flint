@@ -16,12 +16,14 @@
 //
 // A package may also register a Pruner for records that keep blobs alive
 // only for a while, such as blob links no manifest references once they
-// are older than the grace period. Marking skips the records the pruners
-// find expired in its view; unless the run refuses, it then removes them,
-// each only if it is still at the version marking read. A removal only
-// takes a reference away, so it needs no other precondition: the blobs
-// it leaves unreferenced are swept below like any other, and a record
-// written meanwhile, such as a link a manifest push rewrites, stays.
+// are past the grace period. Marking skips the records the pruners find
+// expired in its view; unless the run refuses, it then removes them
+// through their pruner, each only if it, and the records it requires,
+// are still at the versions marking read. A removal only takes a
+// reference away, so it needs no epoch precondition: the blobs it leaves
+// unreferenced are swept below like any other, and a record that a write
+// meanwhile made unexpired, such as a link a manifest pushed meanwhile
+// references, stays.
 //
 // # Sweeping
 //
@@ -110,8 +112,9 @@ const (
 	DefaultGracePeriod = 24 * time.Hour
 	// MinGracePeriod is the shortest grace period allowed. It covers the
 	// time between a blob's commit and its link batch many times over,
-	// the time a push takes between linking its blobs and pushing the
-	// manifest that references them, which pruners count from the link,
+	// the time a push takes between linking or checking its blobs and
+	// pushing the manifest that references them, which the OCI pruner
+	// counts from the link's write or read,
 	// and clock adjustments on the server.
 	MinGracePeriod = time.Hour
 	// DefaultRoundSize is how many blobs a sweep round dooms at most by
@@ -628,7 +631,7 @@ func (c *Collector) collect(ctx context.Context, r *Report) error {
 		c.update(r, func(r *Report) { r.Pruned = int64(len(stale)) })
 		return c.dryRun(ctx, r, cands, skip)
 	}
-	if err := c.prune(ctx, r, stale); err != nil {
+	if err := c.prune(ctx, r, cutoff, stale); err != nil {
 		return err
 	}
 	c.hook(StepPruned)

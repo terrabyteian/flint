@@ -20,11 +20,11 @@ Everything else in the blob store is **unreferenced**.
 Garbage collection deletes an unreferenced blob once its grace period is over: by default 24 hours after the blob was stored.
 The grace period keeps a blob that a push stored a moment ago, but has not linked yet, out of reach.
 
-A blob link **expires** once it is older than the grace period, counted from when it was linked, and no manifest stored in its repository name is that blob or lists it, as a config, a layer, or a child manifest.
+A blob link **expires** once no manifest stored in its repository name is that blob or lists it, as a config, a layer, or a child manifest, and none of these happened within the grace period: the blob was pushed to, mounted into, or cached by the repository name; a blob `HEAD` or `GET` in the repository name read the link; flint started. Reads are kept in memory, so after a restart every link waits a full grace period again.
 Each run first removes the expired links, and logs each; the blobs only they referenced are then unreferenced.
 So deleting an image's manifest, as every client does, reclaims its config and layers too, unless another manifest in the repository name, or anything in another repository, still uses them.
-The grace period keeps the links of a push whose manifest has not arrived yet.
-A link a manifest is pushed against while the run removes it either stays, or the push fails as if the blob had not been pushed, and succeeds once the client pushes it again.
+The grace period keeps the links of a push whose manifest has not arrived yet: the links it wrote, and the links it found already there with a `HEAD`, as clients do for the layers an image shares with earlier ones.
+A link a manifest is pushed against while the run removes it either stays, or the push fails with `MANIFEST_BLOB_UNKNOWN`, as if the blob had not been pushed, and succeeds once the client pushes it again; that happens only when the push neither wrote nor read the link within the grace period.
 
 What a delete reclaims follows from these rules:
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # e2e-gc.sh runs garbage collection with flint gc on a running flint
 # after scripts/e2e-oci.sh, and in CI the conformance suite, pushed and
-# deleted content. It runs twice, around a restart of flint that moves
-# its clock past the garbage collector's grace period:
+# deleted content. It runs twice, around a move of flint's clock past the
+# garbage collector's grace period:
 #
 #   delete   pushes an image and deletes it as clients do, by its
 #            manifest only.
@@ -15,10 +15,11 @@
 #
 # Usage: E2E_STATE_DIR=<dir> E2E_USERNAME=<admin> E2E_PASSWORD_FILE=<file> \
 #          scripts/e2e-gc.sh delete|collect <flint binary> <data dir> <host:port> <namespace>
-#   Between the two, restart flint with its clock at least the grace
-#   period ahead: build it with "go build -tags e2e" and set
-#   FLINT_E2E_CLOCK_OFFSET, such as to 72h. E2E_USERNAME needs the global
-#   admin role; E2E_STATE_DIR keeps the deleted image for the collect run.
+#   flint must be built with "go build -tags e2e" and run with
+#   FLINT_E2E_CLOCK_FILE set to a file; between the two, write a duration
+#   of at least the grace period, such as 72h, to that file. E2E_USERNAME
+#   needs the global admin role; E2E_STATE_DIR keeps the deleted image for
+#   the collect run.
 #   collect reads the blob store in <data dir>, so it runs on the server's
 #   host.
 # Requires crane, oras, jq, and sha256sum or shasum on PATH.

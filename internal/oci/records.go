@@ -21,6 +21,7 @@ import (
 //	oci\0tag\0<repo>\0<name>\0<tag>                         tag: manifest digest
 //	oci\0referrer\0<repo>\0<name>\0<subject>\0<digest>      referrer index entry
 //	oci\0upload\0<id>                                       upload session
+//	oci\0mgen\0<repo>\0<name>\0                            manifest generation: empty
 //
 // <repo> is the configured repository and <name> the image name below it,
 // so "docker-local/team/app" is repo "docker-local", name "team/app".
@@ -32,6 +33,7 @@ const (
 	nsTag      = "oci\x00tag\x00"
 	nsReferrer = "oci\x00referrer\x00"
 	nsUpload   = "oci\x00upload\x00"
+	nsGen      = "oci\x00mgen\x00"
 
 	recordFormat = 1 // the schema version byte that starts every value
 )

@@ -577,10 +577,7 @@ func (h *Handler) cacheManifest(ctx context.Context, actor string, rn *repoName,
 		target = rn.full + ":" + tag + "@" + d.String()
 	}
 	err = h.commitLink(ctx, []blob.Digest{d}, func(v meta.View, b *meta.Batch) error {
-		b.Put(manifestKey(rn, d), rec.encode())
-		if !rec.Subject.IsZero() {
-			b.Put(referrerKey(rn, rec.Subject, d), newEnc())
-		}
+		putManifestRecord(b, rn, d, &rec)
 		if tag != "" {
 			b.Put(tagKey(rn, tag), encodeTag(d))
 		}
