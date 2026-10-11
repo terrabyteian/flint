@@ -35,7 +35,7 @@ echo '{"dataDir": "/tmp/flint-data"}' > /tmp/flint.json
 
 [docs/configuration.md](docs/configuration.md) describes the configuration file.
 
-Releases publish a multi-arch `FROM scratch` image to `ghcr.io/terrabyteian/flint` and static binaries, signed with cosign; see [releasing](docs/releasing.md) for how to cut and verify one.
+Releases publish a multi-arch `FROM scratch` image to `ghcr.io/terrabyteian/flint`, a Helm chart to `oci://ghcr.io/terrabyteian/charts/flint`, and static binaries, signed with cosign; see [installing with Helm](docs/helm.md), and [releasing](docs/releasing.md) for how to cut and verify a release.
 
 ## Contributing
 

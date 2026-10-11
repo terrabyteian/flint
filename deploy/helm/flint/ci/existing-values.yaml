@@ -1,0 +1,15 @@
+# An existing TLS secret and claim, a NodePort service, and no preStop wait.
+fullnameOverride: registry
+image:
+  tag: v0.1.0
+service:
+  type: NodePort
+tls:
+  enabled: true
+  existingSecret: registry-tls
+persistence:
+  existingClaim: registry-data
+lifecycle:
+  preStopSleepSeconds: 0
+serviceAccount:
+  create: false

@@ -1,0 +1,54 @@
+# Example values for the flint Helm chart: HTTPS on a LoadBalancer address,
+# with a certificate from cert-manager. See docs/helm.md. CI renders it and
+# checks the configuration it produces with flint config check.
+#
+#   helm install flint oci://ghcr.io/terrabyteian/charts/flint \
+#     --version 0.1.0 --namespace flint --create-namespace \
+#     --values helm-values.example.yaml
+
+config:
+  log:
+    level: info
+  repositories:
+    - name: docker-local
+      format: oci
+      type: hosted
+    - name: releases
+      format: oci
+      type: hosted
+      immutableTags: true
+      anonymousPull: true
+  auth:
+    permissions:
+      - repositories: ["docker-local", "releases"]
+        role: write
+        groups: ["ci"]
+
+containerPort: 8443
+
+service:
+  type: LoadBalancer
+  port: 443
+  loadBalancerIP: 192.168.1.50
+  # Keep client addresses, which flint logs, instead of the node's.
+  externalTrafficPolicy: Local
+
+tls:
+  enabled: true
+  certManager:
+    enabled: true
+    issuerRef:
+      name: local-ca
+      kind: ClusterIssuer
+    dnsNames: ["registry.example.internal"]
+    ipAddresses: ["192.168.1.50"]
+
+persistence:
+  size: 50Gi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 1Gi

@@ -1,0 +1,89 @@
+# Exercises every optional part of the chart in CI.
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+imagePullSecrets:
+  - name: ghcr
+config:
+  log:
+    level: debug
+  shutdownTimeout: 20s
+  trustedProxies: ["10.42.0.0/16", "192.168.1.10"]
+  repositories:
+    - name: docker-local
+      format: oci
+      type: hosted
+    - name: releases
+      format: oci
+      type: hosted
+      immutableTags: true
+      anonymousPull: true
+  auth:
+    permissions:
+      - repositories: ["docker-local", "releases"]
+        role: write
+        groups: ["ci"]
+containerPort: 8443
+service:
+  type: LoadBalancer
+  port: 443
+  nodePort: 30443
+  loadBalancerIP: 192.168.1.50
+  loadBalancerSourceRanges: ["192.168.0.0/16"]
+  externalTrafficPolicy: Local
+  annotations:
+    metallb.universe.tf/allow-shared-ip: flint
+tls:
+  enabled: true
+  certManager:
+    enabled: true
+    issuerRef:
+      name: local-ca
+    dnsNames: ["flint.example.internal"]
+    ipAddresses: ["192.168.1.50"]
+    duration: 2160h
+    renewBefore: 360h
+persistence:
+  storageClass: "-"
+  size: 50Gi
+  annotations:
+    example.com/backup: "true"
+lifecycle:
+  preStopSleepSeconds: 10
+terminationGracePeriodSeconds: 45
+serviceAccount:
+  annotations:
+    example.com/owner: platform
+networkPolicy:
+  enabled: true
+  from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    - ipBlock:
+        cidr: 192.168.0.0/16
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+podAnnotations:
+  example.com/scrape: "true"
+podLabels:
+  team: platform
+priorityClassName: system-cluster-critical
+nodeSelector:
+  kubernetes.io/arch: arm64
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: registry
+    effect: NoSchedule
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/os
+              operator: In
+              values: ["linux"]

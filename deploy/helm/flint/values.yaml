@@ -1,0 +1,170 @@
+# Default values for the flint chart. docs/helm.md describes installation.
+
+image:
+  repository: ghcr.io/terrabyteian/flint
+  # tag defaults to the chart's appVersion, which is the release version.
+  tag: ""
+  # digest, such as sha256:..., pins the image and takes precedence over tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# flint's configuration file, written as YAML and rendered to the JSON file
+# flint serve reads. The fields are those of docs/configuration.md, except
+# listen, dataDir, and tls, which the chart sets from containerPort, the data
+# volume, and the tls values below. flint rejects unknown fields and invalid
+# values at startup; check a rendered configuration with flint config check.
+config:
+  log:
+    level: info
+  # Keep shutdownTimeout plus lifecycle.preStopSleepSeconds below
+  # terminationGracePeriodSeconds, so a shutdown finishes before the kubelet
+  # kills the container.
+  shutdownTimeout: 25s
+  # Proxies, as IP addresses or CIDR prefixes, whose X-Forwarded-* headers
+  # flint believes, such as an ingress controller's pod network.
+  trustedProxies: []
+  repositories: []
+  # - name: docker-local
+  #   format: oci
+  #   type: hosted
+  auth:
+    permissions: []
+
+# The port flint listens on in the container.
+containerPort: 5000
+
+service:
+  # ClusterIP, NodePort, or LoadBalancer.
+  type: ClusterIP
+  port: 5000
+  # nodePort for type NodePort or LoadBalancer; empty lets Kubernetes choose.
+  nodePort: null
+  # loadBalancerIP requests a fixed address from load balancers that honor it.
+  loadBalancerIP: ""
+  loadBalancerSourceRanges: []
+  # externalTrafficPolicy for NodePort and LoadBalancer: Cluster or Local.
+  # Local keeps the client address, which flint logs.
+  externalTrafficPolicy: ""
+  annotations: {}
+  labels: {}
+
+tls:
+  # Serve HTTPS from a certificate in a kubernetes.io/tls secret, mounted at
+  # /etc/flint/tls. flint reloads it when the secret changes. Without TLS,
+  # flint serves plain HTTP, for example behind a TLS-terminating proxy.
+  enabled: false
+  # An existing kubernetes.io/tls secret. Leave empty to have cert-manager
+  # issue one with certManager below.
+  existingSecret: ""
+  certManager:
+    # Create a cert-manager Certificate whose secret flint serves.
+    enabled: false
+    issuerRef:
+      name: ""
+      # ClusterIssuer or Issuer.
+      kind: ClusterIssuer
+      group: cert-manager.io
+    # Names in the certificate. The service's cluster DNS names are added.
+    dnsNames: []
+    ipAddresses: []
+    # duration and renewBefore, as Go durations; empty uses the issuer's.
+    duration: ""
+    renewBefore: ""
+    privateKey:
+      algorithm: ECDSA
+      size: 256
+      rotationPolicy: Always
+    # secretName defaults to <fullname>-tls.
+    secretName: ""
+
+persistence:
+  # Keep the data directory on a PersistentVolumeClaim. Disabled, the data
+  # directory is an emptyDir and is lost with the pod.
+  enabled: true
+  # Use an existing claim instead of the StatefulSet's claim template.
+  existingClaim: ""
+  # storageClass for the claim; empty uses the cluster default, and "-"
+  # requests no storage class.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+lifecycle:
+  # Seconds the container waits before flint begins shutting down, so the
+  # pod leaves Service endpoints before flint stops accepting connections.
+  # 0 disables the wait.
+  preStopSleepSeconds: 5
+
+terminationGracePeriodSeconds: 40
+
+probes:
+  liveness:
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 0
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+  # startup allows failureThreshold * periodSeconds for flint to replay its
+  # metadata log before the liveness probe starts.
+  startup:
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 150
+
+serviceAccount:
+  create: true
+  # name defaults to the fullname when create is true, and to "default" when
+  # it is false.
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+networkPolicy:
+  # Create a NetworkPolicy that admits traffic only to flint's port.
+  enabled: false
+  # Peers allowed to reach flint, as NetworkPolicy "from" entries. Empty
+  # admits every source.
+  from: []
+  # - namespaceSelector:
+  #     matchLabels:
+  #       kubernetes.io/metadata.name: monitoring
+
+resources: {}
+# requests:
+#   cpu: 100m
+#   memory: 128Mi
+# limits:
+#   memory: 512Mi
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}

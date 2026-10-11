@@ -18,6 +18,7 @@ const usage = `usage: flint <command> [flags]
 
 commands:
   serve      run the registry server (flint serve -config <file>)
+  config     check a configuration file (flint config check <file>)
   version    print the flint version
 `
 
@@ -40,6 +41,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		defer stop()
 		context.AfterFunc(ctx, stop)
 		return serve(ctx, args[1:], stderr)
+	case "config":
+		return configCmd(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "flint %s\n", version)
 		return 0
