@@ -50,8 +50,10 @@ Pulling through a [virtual repository](configuration.md#virtual-repository-setti
 
 For PyPI repositories, installing is pulling and publishing is pushing; yanking and deleting files need `delete`.
 
-Permissions apply to flint repositories: the first component of an image path, or the repository of a PyPI URL.
-A grant on `docker-local` covers `host/docker-local/team/app`, and one on `pypi-local` covers `host/pypi/pypi-local/...`.
+For generic files repositories, downloading and listing are pulling, uploading a file is pushing, and deleting one needs `delete`; in a repository with `generic.allowOverwrite`, replacing a file with different content needs only `write`.
+
+Permissions apply to flint repositories: the first component of an image path, or the repository of a PyPI or generic files URL.
+A grant on `docker-local` covers `host/docker-local/team/app`, one on `pypi-local` covers `host/pypi/pypi-local/...`, and one on `files` covers `host/generic/files/...`.
 
 ## API tokens
 
@@ -137,7 +139,7 @@ Every route family accepts the same credentials, and answers a request without v
 | Style | Challenge | Used by |
 | --- | --- | --- |
 | Docker | `WWW-Authenticate: Bearer realm=...,service="flint",scope=...` | The registry API at `/v2/`, as described above |
-| Basic | `WWW-Authenticate: Basic realm="flint"` | Clients that wait for a challenge before they send credentials, such as Maven and Gradle, and Helm chart repositories |
+| Basic | `WWW-Authenticate: Basic realm="flint"` | Clients that wait for a challenge before they send credentials, such as Maven, Gradle, and wget, and Helm chart and generic files repositories |
 | Cargo | `WWW-Authenticate: Cargo login_url="..."` | Cargo, which shows the user where to get a token |
 | Plain | none | npm, which then tells the user to log in |
 
@@ -162,6 +164,12 @@ Deleting the file invalidates every signed URL at the next start.
 A virtual repository serves a merged view of its member repositories.
 Reading through it needs `read` on the virtual repository only, since the view is what its administrator composed: a client needs no role on the members.
 Publishing through it needs `write`, and deleting needs `delete`, on the member it publishes to (`publishTo`); a virtual repository without one refuses publishes.
+
+### Generic files repositories
+
+[Generic files repositories](generic.md#credentials) at `/generic/<repository>/` use the Basic style.
+curl and wget send a password or an API token as HTTP basic credentials (`curl -u`, `wget --user --password`, or a `.netrc` file), and scripts may send an API token as `Authorization: Bearer <token>` instead.
+curl sends basic credentials with the first request; wget waits for the challenge.
 
 ### Helm chart repositories
 

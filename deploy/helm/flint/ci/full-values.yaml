@@ -56,6 +56,26 @@ config:
       virtual:
         members: [pypi-local, private-index, pypi]
         dependencyConfusionProtection: true
+    - name: files
+      format: generic
+      type: hosted
+      generic:
+        allowOverwrite: true
+    - name: tool-releases
+      format: generic
+      type: proxy
+      generic:
+        immutable: true
+      proxy:
+        url: https://github.com/acme/tool/releases/download/
+        sizeLimit: 50GiB
+        allowHosts: [release-assets.githubusercontent.com, objects.githubusercontent.com]
+    - name: files-all
+      format: generic
+      type: virtual
+      virtual:
+        members: [files, {name: tool-releases, exclude: ["internal/*"]}]
+        publishTo: files
   proxyCache:
     minFreeSpace: 20GiB
   gc:

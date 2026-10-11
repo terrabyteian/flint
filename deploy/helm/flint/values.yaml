@@ -61,6 +61,20 @@ config:
   #   type: virtual
   #   virtual:
   #     members: [pypi-local, pypi]
+  # # Generic files: a hosted repository for curl and wget, and a proxy of
+  # # a project's release downloads, cached forever (docs/generic.md).
+  # - name: files
+  #   format: generic
+  #   type: hosted
+  # - name: tool-releases
+  #   format: generic
+  #   type: proxy
+  #   generic:
+  #     immutable: true
+  #   proxy:
+  #     url: https://github.com/acme/tool/releases/download/
+  #     # GitHub redirects release downloads to these hosts.
+  #     allowHosts: [release-assets.githubusercontent.com, objects.githubusercontent.com]
   auth:
     permissions: []
   # proxyCache:

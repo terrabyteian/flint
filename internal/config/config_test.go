@@ -46,7 +46,7 @@ func TestExampleConfig(t *testing.T) {
 	if got := c.Proxies(); !reflect.DeepEqual(got, wantProxies) {
 		t.Errorf("Proxies() = %v, want %v", got, wantProxies)
 	}
-	if len(c.Repositories) != 7 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
+	if len(c.Repositories) != 9 || !c.Repositories[1].ImmutableTags || !c.Repositories[1].HelmIndex || len(c.Auth.Permissions) != 3 {
 		t.Errorf("unexpected repositories or permissions: %+v", c)
 	}
 	if p := c.Repositories[2].Proxy; p == nil || p.URL != "https://registry-1.docker.io" || p.RevalidateAfter.Duration != 5*time.Minute ||
@@ -59,6 +59,10 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if v := c.Repositories[6].Virtual; v == nil || !v.Protected() || len(v.Members) != 2 || !c.Repositories[6].AnonymousPull {
 		t.Errorf("unexpected virtual repository: %+v", c.Repositories[6])
+	}
+	if g := c.Repositories[8].Generic; c.Repositories[7].Format != FormatGeneric || g == nil || !g.Immutable ||
+		len(c.Repositories[8].Proxy.AllowHosts) != 2 {
+		t.Errorf("unexpected generic repositories: %+v", c.Repositories[7:])
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
@@ -223,6 +227,31 @@ func TestValidation(t *testing.T) {
 			{"name": "p", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple/"}},
 			{"name": "v", "format": "pypi", "type": "virtual", "virtual": {"publishTo": "h", "members": [
 				{"name": "h", "include": ["acme-*", "tool"]}, {"name": "p", "exclude": ["acme-*", "@scope/*", "com.acme:*"]}]}}]}`, nil},
+		{"generic good", `{"dataDir": "/d", "repositories": [
+			{"name": "files", "format": "generic", "type": "hosted"},
+			{"name": "scratch", "format": "generic", "type": "hosted", "generic": {"allowOverwrite": true}},
+			{"name": "releases", "format": "generic", "type": "proxy", "generic": {"immutable": true},
+			 "proxy": {"url": "https://github.com/acme/tool/releases/download/", "sizeLimit": "10GiB",
+			  "allowHosts": ["release-assets.githubusercontent.com"]}},
+			{"name": "mirror", "format": "generic", "type": "proxy", "proxy": {"url": "https://downloads.example.com"}},
+			{"name": "generic-all", "format": "generic", "type": "virtual", "generic": {},
+			 "virtual": {"publishTo": "files", "members": ["files", {"name": "releases", "exclude": ["internal/*"]}, "mirror"]}}]}`, nil},
+		{"generic problems", `{"dataDir": "/d", "repositories": [
+			{"name": "h", "format": "generic", "type": "hosted", "generic": {"immutable": true}},
+			{"name": "p", "format": "generic", "type": "proxy", "generic": {"allowOverwrite": true},
+			 "proxy": {"url": "https://example.com/files/?x=1", "sizeLimit": "1GiB"}},
+			{"name": "o", "format": "oci", "type": "hosted", "generic": {}},
+			{"name": "v", "format": "generic", "type": "virtual", "generic": {"immutable": true}, "virtual": {"members": ["o"]}}]}`,
+			[]string{"repositories[0].generic.immutable: is only allowed for a proxy repository",
+				"repositories[1].generic.allowOverwrite: is only allowed for a hosted repository",
+				`repositories[1].proxy.url: "https://example.com/files/?x=1" must not have a query or fragment`,
+				"repositories[1].proxy.sizeLimit: needs generic.immutable",
+				"repositories[2].generic: is only allowed for a repository of format generic",
+				"repositories[3].generic.immutable: is only allowed for a proxy repository",
+				`repositories[3].virtual.members[0]: "o" is a oci repository, not generic`}},
+		{"generic unknown setting", `{"dataDir": "/d", "repositories": [
+			{"name": "h", "format": "generic", "type": "hosted", "generic": {"allowOverwite": true}}]}`,
+			[]string{`unknown field "allowOverwite"`}},
 		{"virtual member problems", `{"dataDir": "/d", "repositories": [
 			{"name": "h", "format": "pypi", "type": "hosted"},
 			{"name": "p", "format": "pypi", "type": "proxy", "proxy": {"url": "https://pypi.org/simple/"}},
@@ -546,7 +575,7 @@ func TestFormatSettings(t *testing.T) {
 				v.addf(path, "is required")
 			}
 		}})
-	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "test"}) {
+	if got := Formats(); !slices.Equal(got, []string{"oci", "pypi", "generic", "test"}) {
 		t.Errorf("Formats() = %q", got)
 	}
 	_, err := Parse([]byte(`{"dataDir": "/d", "repositories": [
