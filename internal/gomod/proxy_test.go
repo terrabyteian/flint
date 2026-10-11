@@ -338,6 +338,53 @@ func TestSumDBProof(t *testing.T) {
 	e.get(base+"/latest", http.StatusOK, latest)
 }
 
+// TestSumDBProofReuse checks that proofs reuse the tiles of the latest
+// tree proven, and replace a corrupt cached tile with a verified one.
+func TestSumDBProofReuse(t *testing.T) {
+	e := newEnv(t)
+	var ms []*module
+	for i := range 300 {
+		ms = append(ms, newModule(t, fmt.Sprintf("example.com/m%d", i), "v1.0.0"))
+	}
+	e.up.add(ms...)
+	e.db.add(ms...)
+	base := "/go/goproxy/sumdb/sum.example.com"
+
+	// A tile the database once served corrupt, cached through a
+	// client's request, is fetched again when a proof needs it, and
+	// replaced by the tile that passes.
+	tile, _ := e.db.tile("8/0/000")
+	e.db.set(func(db *sumDB) { db.tiles["8/0/000"] = bytes.Repeat([]byte{1}, 256*32) })
+	e.get(base+"/tile/8/0/000", http.StatusOK, "")
+	e.db.set(func(db *sumDB) { clear(db.tiles) })
+	e.get("/go/goproxy/example.com/m5/@v/v1.0.0.zip", http.StatusOK, string(ms[5].zip))
+	e.settle()
+	e.db.set(func(db *sumDB) { db.down = true })
+	e.get(base+"/tile/8/0/000", http.StatusOK, string(tile))
+	e.db.set(func(db *sumDB) { db.down = false })
+
+	// Records of the latest tree proven, and its tree head, are proven
+	// with the tiles already read: the database is asked for the
+	// lookups and the tree head alone.
+	e.db.took()
+	e.get("/go/goproxy/example.com/m6/@v/v1.0.0.zip", http.StatusOK, string(ms[6].zip))
+	e.get("/go/goproxy/example.com/m299/@v/v1.0.0.mod", http.StatusOK, string(ms[299].mod))
+	e.get(base+"/latest", http.StatusOK, "")
+	if got := e.db.took(); !slices.Equal(got, []string{"/lookup/example.com/m6@v1.0.0", "/lookup/example.com/m299@v1.0.0", "/latest"}) {
+		t.Errorf("checksum database requests for the tree proven: %q", got)
+	}
+	// A newer tree's partial tiles are read once.
+	n := newModule(t, "example.com/n", "v1.0.0")
+	e.up.add(n)
+	e.db.add(n)
+	e.get("/go/goproxy/example.com/n/@v/v1.0.0.zip", http.StatusOK, string(n.zip))
+	e.get("/go/goproxy/example.com/m7/@v/v1.0.0.zip", http.StatusOK, string(ms[7].zip))
+	if got := e.db.took(); !slices.Equal(got, []string{"/lookup/example.com/n@v1.0.0", "/tile/8/0/001.p/45", "/tile/8/1/000.p/1",
+		"/lookup/example.com/m7@v1.0.0"}) {
+		t.Errorf("checksum database requests for a newer tree: %q", got)
+	}
+}
+
 func TestRequests(t *testing.T) {
 	e := newEnv(t)
 	for _, path := range []string{

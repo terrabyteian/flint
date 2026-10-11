@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -208,8 +209,15 @@ func TestRealProof(t *testing.T) {
 	if err := p.Includes(ctx, r); err != nil {
 		t.Errorf("the record: %v", err)
 	}
-	if err := p.Consistent(ctx, latest); err != nil {
-		t.Errorf("the latest tree head: %v", err)
+	lp, err := NewProver(ctx, latest, read)
+	if err != nil {
+		t.Fatalf("the latest tree head: %v", err)
+	}
+	if err := lp.Consistent(ctx, r.Tree); err != nil {
+		t.Errorf("the record's tree head and the latest: %v", err)
+	}
+	if err := lp.Includes(ctx, r); err != nil {
+		t.Errorf("the record in the latest tree: %v", err)
 	}
 	// A record with other hashes, under the genuine signed tree head,
 	// is not in the tree.
@@ -319,12 +327,17 @@ func TestProver(t *testing.T) {
 				}
 			}
 		}
-		for _, other := range []int64{1, size / 2, size - 1, size, size + 1, n} {
-			if other == 0 || other > n {
+		for _, other := range []int64{1, size / 2, size - 1, size} {
+			if other == 0 {
 				continue
 			}
 			if err := p.Consistent(ctx, l.tree(other)); err != nil {
 				t.Errorf("trees of %d and %d: %v", size, other, err)
+			}
+		}
+		if size < n {
+			if err := p.Consistent(ctx, l.tree(size+1)); err == nil || errors.Is(err, ErrBadNote) {
+				t.Errorf("tree of %d proving a larger tree: %v", size, err)
 			}
 		}
 		// Partial tiles come without a check, full ones with one.
@@ -349,7 +362,7 @@ func TestProver(t *testing.T) {
 	}
 	fork := newTestLog(n)
 	fork.records[500] = []byte("example.com/evil v1.0.0 h1:zip=\n")
-	for _, size := range []int64{501, 1000, n} {
+	for _, size := range []int64{501, 1000} {
 		if err := p.Consistent(ctx, fork.tree(size)); !errors.Is(err, ErrBadNote) {
 			t.Errorf("a fork of %d records: %v, want ErrBadNote", size, err)
 		}
@@ -370,6 +383,27 @@ func TestProver(t *testing.T) {
 	}
 	// A full tile that does not match the tile above it is refused,
 	// even if its reader skipped the check.
+	p, err = NewProver(ctx, l.tree(n), l.reader(&reads, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// It is safe for concurrent use.
+	var mu sync.Mutex
+	locked := l.reader(&reads, false)
+	p.read = func(c context.Context, path string, check func([]byte) error) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return locked(c, path, check)
+	}
+	var wg sync.WaitGroup
+	for id := int64(0); id < n; id += n / 16 {
+		wg.Go(func() {
+			if err := p.Includes(ctx, &Record{ID: id, data: l.records[id]}); err != nil {
+				t.Errorf("record %d, concurrently: %v", id, err)
+			}
+		})
+	}
+	wg.Wait()
 	p, err = NewProver(ctx, l.tree(n), l.reader(&reads, false))
 	if err != nil {
 		t.Fatal(err)

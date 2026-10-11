@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strconv"
+	"sync"
 )
 
 // A checksum database's log is a Merkle tree over its records, as RFC
@@ -115,11 +116,13 @@ type tileID struct {
 
 // A Prover reads the authentic hashes of a tree's nodes from the
 // database's tiles, to check that the tree contains records and is
-// consistent with other trees of the database. It is not safe for
-// concurrent use.
+// consistent with smaller trees of the database. It keeps the tiles it
+// read, so it reads each once, and is safe for concurrent use.
 type Prover struct {
-	tree  Tree
-	read  TileReader
+	tree Tree
+	read TileReader
+
+	mu    sync.Mutex
 	tiles map[tileID][]Hash
 }
 
@@ -176,31 +179,20 @@ func (p *Prover) Includes(ctx context.Context, r *Record) error {
 	return nil
 }
 
-// Consistent checks that other, a tree head the database signed, is of
-// the same log as p's tree: the tree with fewer records is the start of
-// the other.
-func (p *Prover) Consistent(ctx context.Context, other Tree) error {
-	older, newer := other, p
-	switch {
-	case other.N == p.tree.N:
-		if other.Hash != p.tree.Hash {
-			return fmt.Errorf("%w: two trees of %d records with different hashes", ErrBadNote, other.N)
-		}
-		return nil
-	case other.N > p.tree.N:
-		var err error
-		if newer, err = NewProver(ctx, other, p.read); err != nil {
-			return err
-		}
-		older = p.tree
+// Consistent checks that older, a tree head the database signed with
+// no more records than p's tree, is of the same log: its records are the
+// start of p's tree.
+func (p *Prover) Consistent(ctx context.Context, older Tree) error {
+	if older.N > p.tree.N {
+		return fmt.Errorf("sumdb: the tree of %d records cannot prove the tree of %d records", p.tree.N, older.N)
 	}
-	h, err := newer.treeHash(ctx, older.N)
+	h, err := p.treeHash(ctx, older.N)
 	if err != nil {
 		return err
 	}
 	if h != older.Hash {
 		return fmt.Errorf("%w: the tree of %d records is not the start of the tree of %d records", ErrBadNote,
-			older.N, newer.tree.N)
+			older.N, p.tree.N)
 	}
 	return nil
 }
@@ -250,7 +242,10 @@ func (p *Prover) node(ctx context.Context, l int, k int64) (Hash, error) {
 // tree: a partial tile NewProver read, or a full tile, read and checked
 // against the node the tile above it holds.
 func (p *Prover) tile(ctx context.Context, t int, i int64) ([]Hash, error) {
-	if hs, ok := p.tiles[tileID{t, i}]; ok {
+	p.mu.Lock()
+	hs, ok := p.tiles[tileID{t, i}]
+	p.mu.Unlock()
+	if ok {
 		return hs, nil
 	}
 	want, err := p.node(ctx, (t+1)*tileHeight, i)
@@ -273,7 +268,9 @@ func (p *Prover) tile(ctx context.Context, t int, i int64) ([]Hash, error) {
 	if err != nil {
 		return nil, err
 	}
-	hs, _ := parseTile(b, tileWidth, path)
+	hs, _ = parseTile(b, tileWidth, path)
+	p.mu.Lock()
 	p.tiles[tileID{t, i}] = hs
+	p.mu.Unlock()
 	return hs, nil
 }

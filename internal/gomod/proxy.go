@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/terrabyteian/flint/internal/config"
+	"github.com/terrabyteian/flint/internal/meta"
 	"github.com/terrabyteian/flint/internal/repo"
 	"github.com/terrabyteian/flint/internal/sumdb"
 	"github.com/terrabyteian/flint/internal/upstream"
@@ -41,9 +42,12 @@ import (
 //     database's public key verifies the signature of its tree head,
 //     the database's tiles prove that the tree contains the record, and
 //     that the tree is consistent with the latest tree head the
-//     repository has seen since flint started. A full tile is cached
-//     once it is proven too; a partial tile, read to prove a tree, is
-//     not. The signed tree head (latest) is a document revalidated
+//     repository has seen since flint started. The tiles of that latest
+//     tree are kept, so records of it, and of the trees before it, are
+//     proven without fetching its partial tiles again. A full tile is
+//     cached once it is proven too, and a cached one that fails its
+//     proof is fetched again and replaced; a partial tile, read to
+//     prove a tree, is not cached. The signed tree head (latest) is a document revalidated
 //     every minute, replaced only by one proven consistent with it. The
 //     database is fetched from go.sumdb.url, not from the module proxy,
 //     which need not proxy it.
@@ -83,10 +87,10 @@ type proxyRepo struct {
 	verifier   *sumdb.Verifier
 	noSumCheck []string
 
-	// latest is the latest tree head of the checksum database seen, or
-	// nil; every tree head trusted is consistent with it.
+	// latest proves the latest tree head of the checksum database seen,
+	// or is nil; every tree head trusted is consistent with it.
 	mu     sync.Mutex
-	latest *sumdb.Tree
+	latest *sumdb.Prover
 }
 
 func newProxyRepo(rc config.Repository, defaults upstream.Options) (*proxyRepo, error) {
@@ -278,7 +282,7 @@ func (h *Handler) checkSum(p *proxyRepo, req *request, actor string) func(ctx co
 // database.
 func (h *Handler) lookup(ctx context.Context, p *proxyRepo, mod, ver, escMod, escVer, actor string) (*sumdb.Record, error) {
 	rt := h.sumdbRoute(p, "lookup/"+escMod+"@"+escVer)
-	rt.Expect.Check = h.checkLookup(p, mod, ver, actor)
+	rt.Expect.Check = h.checkLookup(p, mod, ver)
 	b, _, err := h.paths.Read(ctx, p.path, rt, actor, maxLookup)
 	if err != nil {
 		return nil, err
@@ -290,7 +294,7 @@ func (h *Handler) lookup(ctx context.Context, p *proxyRepo, mod, ver, escMod, es
 // version ver in p's checksum database: it must be the module version's
 // record, with a tree head the database signed, in that tree, which must
 // be consistent with the latest one p has seen.
-func (h *Handler) checkLookup(p *proxyRepo, mod, ver, actor string) func(ctx context.Context, r io.ReaderAt, size int64) error {
+func (h *Handler) checkLookup(p *proxyRepo, mod, ver string) func(ctx context.Context, r io.ReaderAt, size int64) error {
 	return func(ctx context.Context, r io.ReaderAt, size int64) error {
 		b, err := readAt(r, size, maxLookup, "a lookup")
 		if err != nil {
@@ -299,13 +303,10 @@ func (h *Handler) checkLookup(p *proxyRepo, mod, ver, actor string) func(ctx con
 		rec, err := p.verifier.OpenLookup(b, mod, ver)
 		var pt *sumdb.Prover
 		if err == nil {
-			pt, err = sumdb.NewProver(ctx, rec.Tree, h.readTile(p, actor))
+			pt, err = h.prover(ctx, p, rec.Tree)
 		}
 		if err == nil {
 			err = pt.Includes(ctx, rec)
-		}
-		if err == nil {
-			err = h.trust(ctx, p, pt)
 		}
 		if errors.Is(err, sumdb.ErrBadNote) {
 			return fmt.Errorf("%w: %v", upstream.ErrDigestMismatch, err)
@@ -314,26 +315,38 @@ func (h *Handler) checkLookup(p *proxyRepo, mod, ver, actor string) func(ctx con
 	}
 }
 
-// trust checks that the tree pt proves, which p's checksum database
-// signed, is consistent with the latest tree head p has seen, and makes
-// it the latest if it is newer.
-func (h *Handler) trust(ctx context.Context, p *proxyRepo, pt *sumdb.Prover) error {
+// prover returns the Prover of a tree that contains tree, a tree head
+// p's checksum database signed, once tree is proven consistent with the
+// latest tree head p has seen: the latest's, if tree is no larger, or
+// else tree's own, which becomes the latest.
+func (h *Handler) prover(ctx context.Context, p *proxyRepo, tree sumdb.Tree) (*sumdb.Prover, error) {
+	var pt *sumdb.Prover
 	for {
 		p.mu.Lock()
 		latest := p.latest
 		p.mu.Unlock()
+		if latest != nil && tree.N <= latest.Tree().N {
+			if err := latest.Consistent(ctx, tree); err != nil {
+				return nil, err
+			}
+			return latest, nil
+		}
+		if pt == nil {
+			var err error
+			if pt, err = sumdb.NewProver(ctx, tree, h.readTile(p)); err != nil {
+				return nil, err
+			}
+		}
 		if latest != nil {
-			if err := pt.Consistent(ctx, *latest); err != nil {
-				return err
+			if err := pt.Consistent(ctx, latest.Tree()); err != nil {
+				return nil, err
 			}
 		}
 		p.mu.Lock()
 		if p.latest == latest {
-			if t := pt.Tree(); latest == nil || t.N > latest.N {
-				p.latest = &t
-			}
+			p.latest = pt
 			p.mu.Unlock()
-			return nil
+			return pt, nil
 		}
 		// Another tree became the latest meanwhile: check against it.
 		p.mu.Unlock()
@@ -341,15 +354,17 @@ func (h *Handler) trust(ctx context.Context, p *proxyRepo, pt *sumdb.Prover) err
 }
 
 // readTile returns the reader of the tiles of p's checksum database,
-// which proves its answers: through the cache clients' tile requests
-// use for a full tile, which is cached only once its check passes, and
-// never cached for a partial one.
-func (h *Handler) readTile(p *proxyRepo, actor string) sumdb.TileReader {
+// which proves its answers, as flint's own work: through the cache
+// clients' tile requests use for a full tile, which is cached only once
+// its check passes, and fetched again and replaced if the cached copy
+// fails it, and never cached for a partial one.
+func (h *Handler) readTile(p *proxyRepo) sumdb.TileReader {
 	return func(ctx context.Context, path string, check func([]byte) error) ([]byte, error) {
 		rt := h.sumdbRoute(p, path)
 		if check == nil {
 			rt.Kind = upstream.PassThrough
 		} else {
+			rt.Recheck = true
 			rt.Expect.Check = func(_ context.Context, r io.ReaderAt, size int64) error {
 				b, err := readAt(r, size, maxTile, "a tile")
 				if err == nil {
@@ -360,7 +375,7 @@ func (h *Handler) readTile(p *proxyRepo, actor string) sumdb.TileReader {
 				return err
 			}
 		}
-		b, _, err := h.paths.Read(ctx, p.path, rt, actor, maxTile)
+		b, _, err := h.paths.Read(ctx, p.path, rt, meta.ActorSystem, maxTile)
 		return b, err
 	}
 }
@@ -400,19 +415,14 @@ func (h *Handler) serveSumDB(w http.ResponseWriter, r *http.Request, p *proxyRep
 	case sub == "latest":
 		rt = h.sumdbRoute(p, sub)
 		rt.Kind, rt.ContentType, rt.MaxSize, rt.Revalidate = upstream.Mutable, ctText, maxNote, sumdbRevalidate
-		actor := h.actor(r)
 		rt.Validate = func(ctx context.Context, d *upstream.Doc) error {
 			b, err := h.readDoc(ctx, d, maxNote)
 			var tree sumdb.Tree
 			if err == nil {
 				tree, err = p.verifier.OpenTree(b)
 			}
-			var pt *sumdb.Prover
 			if err == nil {
-				pt, err = sumdb.NewProver(ctx, tree, h.readTile(p, actor))
-			}
-			if err == nil {
-				err = h.trust(ctx, p, pt)
+				_, err = h.prover(ctx, p, tree)
 			}
 			return err
 		}
@@ -425,7 +435,7 @@ func (h *Handler) serveSumDB(w http.ResponseWriter, r *http.Request, p *proxyRep
 			return
 		}
 		rt = h.sumdbRoute(p, sub)
-		rt.ContentType, rt.Expect.Check = ctText, h.checkLookup(p, mod, ver, h.actor(r))
+		rt.ContentType, rt.Expect.Check = ctText, h.checkLookup(p, mod, ver)
 	case strings.HasPrefix(sub, "tile/") && validTile(strings.TrimPrefix(sub, "tile/")):
 		rt = h.sumdbRoute(p, sub)
 		rt.ContentType = "application/octet-stream"

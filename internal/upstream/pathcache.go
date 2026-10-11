@@ -210,6 +210,11 @@ type Route struct {
 	// repository's client, for a protocol that spans two upstreams, such
 	// as Go's module proxy and checksum database.
 	Client *Client
+	// Recheck makes Read run Expect.Check on a cached copy too, for
+	// content cached without it, such as by a route without the check:
+	// a copy that fails as a mismatch is fetched again, and replaced by
+	// one that passes.
+	Recheck bool
 	// Revalidate, if positive, is the revalidation window of mutable
 	// content instead of the repository's.
 	Revalidate time.Duration
@@ -725,14 +730,18 @@ func (pc *PathCache) Read(ctx context.Context, rp *PathRepo, rt *Route, actor st
 			return nil, "", tooLarge(rt, max)
 		}
 		b, err := pc.readBlob(ctx, f.Digest, f.Size)
+		if err == nil && rt.Recheck {
+			err = rt.Expect.Check(ctx, bytes.NewReader(b), int64(len(b)))
+		}
 		if err == nil {
 			pc.limits.Touch(rp.tracker, FileKey(rp.Name, rt.Path))
 			return b, ResultHit, nil
 		}
-		if !errors.Is(err, blob.ErrNotFound) {
+		if !errors.Is(err, blob.ErrNotFound) && !errors.Is(err, ErrDigestMismatch) {
 			return nil, "", err
 		}
-		// Linked but missing from the store: fetch it again.
+		// Linked but missing from the store, or failing its check: fetch
+		// it again.
 	}
 	if err := pc.remembered(rp, rt); err != nil {
 		return nil, "", err

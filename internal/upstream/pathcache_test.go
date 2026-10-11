@@ -600,6 +600,25 @@ func TestPathCacheRead(t *testing.T) {
 	if rec, _ := e.pc.Lookup(rp, "fresh"); rec != nil {
 		t.Error("pass-through content was cached")
 	}
+	// With Recheck, a cached copy failing the check is fetched again,
+	// and replaced by the copy that passes.
+	recheck := route("record")
+	recheck.Recheck = true
+	recheck.Expect.Check = func(_ context.Context, r io.ReaderAt, size int64) error {
+		b := make([]byte, size)
+		r.ReadAt(b, 0)
+		if string(b) != "changed record" {
+			return upstream.ErrDigestMismatch
+		}
+		return nil
+	}
+	if b, result, err := e.pc.Read(ctx, rp, recheck, "tester", 100); err != nil || string(b) != "changed record" || result != upstream.ResultFetched {
+		t.Errorf("Read of a cached copy failing its check = %q, %s, %v", b, result, err)
+	}
+	e.settle()
+	if b, result, err := e.pc.Read(ctx, rp, route("record"), "tester", 100); err != nil || string(b) != "changed record" || result != upstream.ResultHit {
+		t.Errorf("Read after the copy was replaced = %q, %s, %v", b, result, err)
+	}
 	// Verified, with the check, before it is returned or cached.
 	z := moduleZip(t, goModule.files)
 	e.files.put("/m.zip", z)
