@@ -58,7 +58,7 @@ A token uses its owner's global `admin` role only if it was created with `"admin
 Deleting the owner, demoting an administrator, or revoking or expiring the token takes effect on the next request.
 
 Wherever a password is accepted, an API token is accepted too: with the owner's user name, or with the user name `__token__` as PyPI clients send it.
-Registry and admin API requests also accept a token as `Authorization: Bearer flint_...`.
+API tokens are presented only as HTTP basic credentials.
 
 ## Docker clients
 
@@ -93,7 +93,7 @@ echo "$TOKEN" | crane auth login registry.example -u ci-bot --password-stdin
 ## Admin API
 
 The admin API serves JSON under `/api/v1/`.
-Every request authenticates with HTTP basic credentials (a password or an API token) or a bearer API token; tokens from the Docker token endpoint are not accepted.
+Every request authenticates with HTTP basic credentials, a password or an API token; tokens from the Docker token endpoint are not accepted.
 Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`.
 Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user or token), `409` (the user exists, or the change would remove the last administrator), or `413` (the body is over 64 KiB).
 Request bodies are strict JSON: unknown fields are errors.

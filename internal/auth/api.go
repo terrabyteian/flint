@@ -13,8 +13,8 @@ import (
 )
 
 // The admin API serves JSON under /api/v1/. Every request authenticates
-// with basic credentials (a password or an API token) or a bearer API
-// token; tokens from the Docker token service are not accepted. Managing
+// with basic credentials, a password or an API token; tokens from the
+// Docker token service are not accepted. Managing
 // users and groups needs the global admin role. Creating an API token,
 // creating or updating a user or its groups, and setting a password need
 // a password, even with an admin token: a token cannot mint further

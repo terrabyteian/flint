@@ -53,9 +53,6 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 		var c credentials
 		c, err = s.authenticate(r, false)
 		p = c.principal
-		if err == nil && c.kind == credAPIKey {
-			err = errBadCredentials // a bearer API token is for the registry and admin API, not here
-		}
 		scopes = r.URL.Query()["scope"]
 	}
 	if errors.Is(err, errBadCredentials) {

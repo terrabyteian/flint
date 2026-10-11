@@ -252,8 +252,11 @@ func TestAPITokenCredentials(t *testing.T) {
 			t.Errorf("%s with basic token: %d", user, resp.status)
 		}
 	}
-	if resp := e.do(request{path: "/test/pull/docker-local/app", bearer: full}); resp.status != http.StatusOK {
-		t.Errorf("bearer API token: %d", resp.status)
+	// An API token is not accepted as a bearer token anywhere.
+	for _, path := range []string{"/test/pull/docker-local/app", "/test/base", TokenPath, "/api/v1/user"} {
+		if resp := e.do(request{path: path, bearer: full}); resp.status != http.StatusUnauthorized {
+			t.Errorf("bearer API token at %s: %d", path, resp.status)
+		}
 	}
 	// Another user's name with the token is refused.
 	if resp := e.do(request{path: "/test/pull/docker-local/app", user: "dave", pass: full}); resp.status != http.StatusUnauthorized {
@@ -278,10 +281,6 @@ func TestAPITokenCredentials(t *testing.T) {
 	forged := tokenStringPrefix + id + "_" + strings.Repeat("a", tokenSecretLen)
 	if resp := e.do(request{path: "/test/pull/docker-local/app", user: TokenUser, pass: forged}); resp.status != http.StatusUnauthorized {
 		t.Errorf("forged secret: %d", resp.status)
-	}
-	// A bearer API token is not accepted at the token endpoint.
-	if resp := e.do(request{path: TokenPath, bearer: full}); resp.status != http.StatusUnauthorized {
-		t.Errorf("bearer API token at the token endpoint: %d", resp.status)
 	}
 }
 

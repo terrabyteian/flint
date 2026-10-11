@@ -203,10 +203,9 @@ type Principal struct {
 
 // credential kinds a request can present.
 const (
-	credNone   = iota // no Authorization header
-	credBasic         // basic, with a password or an API token
-	credAPIKey        // bearer, with an API token
-	credJWT           // bearer, with a token from the token service
+	credNone  = iota // no Authorization header
+	credBasic        // basic, with a password or an API token
+	credJWT          // bearer, with a token from the token service
 )
 
 // credentials is what a request authenticated as.
@@ -240,10 +239,6 @@ func (s *Service) authenticate(r *http.Request, acceptJWT bool) (credentials, er
 		p, err := s.checkBasic(r.Context(), user, pw)
 		return credentials{kind: credBasic, principal: p}, err
 	case strings.EqualFold(scheme, "Bearer"):
-		if strings.HasPrefix(param, tokenStringPrefix) {
-			p, err := s.checkAPIToken(param, "")
-			return credentials{kind: credAPIKey, principal: p}, err
-		}
 		if !acceptJWT {
 			return credentials{kind: credJWT}, errBadCredentials
 		}
@@ -453,8 +448,8 @@ func (s *Service) permits(c credentials, repo string, actions []string) bool {
 // "push", "delete") on repository repo, a flint repository or a path
 // within one. When it returns false it has written the response: 401 with
 // a Docker-compatible Bearer challenge naming the scope the client needs a
-// token for, or 403 if the client authenticated with basic credentials or
-// an API token that lacks the permission.
+// token for, or 403 if the client authenticated with basic credentials
+// that lack the permission.
 //
 // With repo empty and no actions, it checks only that the request carries
 // valid credentials, a bearer token from the token service included, as
