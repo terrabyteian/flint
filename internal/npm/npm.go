@@ -49,6 +49,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/blob"
@@ -154,6 +155,9 @@ type repository struct {
 	audit     bool          // npm audit is forwarded upstream (proxy and virtual)
 	proxy     *proxyRepo    // for a proxy repository
 	virtual   *repo.Virtual // for a virtual repository
+	// mergeLimit, for a virtual repository, bounds the combined size of
+	// the members' packuments it merges in memory.
+	mergeLimit int64
 	// via, for a hosted repository written to through a virtual one,
 	// whose publishTo it is, is that virtual repository, so writes are
 	// authorized as writes through it.
@@ -173,6 +177,11 @@ type Handler struct {
 	now   func() time.Time
 
 	renders *renderCache
+	// merges are the merges of virtual repositories' packuments being
+	// built, by render key.
+	mergeMu        sync.Mutex
+	merges         map[string]*mergeFlight
+	mergeFallbacks *metrics.Counter
 
 	publishes    *metrics.Counter
 	publishBytes *metrics.Counter
@@ -205,6 +214,7 @@ func New(opts Options) (*Handler, error) {
 		log:     opts.Logger,
 		now:     opts.Now,
 		renders: newRenderCache(opts.RenderBudget),
+		merges:  map[string]*mergeFlight{},
 		space:   opts.Space,
 		docs:    opts.Docs,
 		paths:   opts.Paths,
@@ -260,6 +270,7 @@ func New(opts Options) (*Handler, error) {
 				return nil, err
 			}
 			r.virtual = v
+			r.mergeLimit = rc.NPM.MergeBytes()
 		default:
 			return nil, fmt.Errorf("npm: repository %s has unsupported type %q", rc.Name, rc.Type)
 		}
@@ -269,6 +280,9 @@ func New(opts Options) (*Handler, error) {
 		"Package versions published to hosted npm repositories, by repository.", "repository")
 	h.publishBytes = reg.Counter("flint_npm_publish_bytes_total",
 		"Bytes of package tarballs published to hosted npm repositories, by repository.", "repository")
+	h.mergeFallbacks = reg.Counter("flint_npm_virtual_merge_fallbacks_total",
+		"Packuments npm virtual repositories served from their first member alone because the members' packuments "+
+			"together exceeded the repository's mergeLimit, by virtual repository.", "repository")
 	h.pm = opts.ProxyMetrics
 	h.fetcher = opts.Fetcher
 	if h.fetcher == nil {

@@ -243,7 +243,10 @@ func tarballBase(r *http.Request, rp *repository) string {
 type docBody struct {
 	b      []byte
 	stream io.ReadCloser
-	etag   string // for b
+	// streamSize, for a stream, is the size of the stored document it is
+	// derived from.
+	streamSize int64
+	etag       string // for b
 	// abbreviated reports whether it is the abbreviated form.
 	abbreviated bool
 	// id names what the body was rendered from, so a document derived
@@ -259,6 +262,15 @@ func (d *docBody) reader() io.ReadCloser {
 		return d.stream
 	}
 	return io.NopCloser(bytes.NewReader(d.b))
+}
+
+// size returns the size of the body's content; for a stream, that of the
+// stored document it is derived from.
+func (d *docBody) size() int64 {
+	if d.stream != nil {
+		return d.streamSize
+	}
+	return int64(len(d.b))
 }
 
 // close closes a stream that was not read.

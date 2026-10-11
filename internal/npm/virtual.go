@@ -48,13 +48,20 @@ func (h *Handler) virtualSources(rp *repository, name string) []repo.Member {
 
 // virtualBody returns virtual repository rp's packument of name, its URLs
 // below base: one member's, if only one has the package, and otherwise
-// merged from theirs.
+// merged from theirs. Members' packuments whose combined size exceeds
+// rp's merge limit are not merged: the first member's is served alone.
 func (h *Handler) virtualBody(ctx context.Context, actor string, rp *repository, name string, abbreviated bool, base string) (*docBody, error) {
+	var bodies []*docBody
 	answers, err := repo.Consult(ctx, rp.virtual, h.virtualSources(rp, name), name,
 		func(ctx context.Context, m repo.Member) (*docBody, error) {
-			return h.packumentBody(ctx, actor, h.repos[m.Name], name, abbreviated, base)
+			b, err := h.packumentBody(ctx, actor, h.repos[m.Name], name, abbreviated, base)
+			if err == nil {
+				bodies = append(bodies, b)
+			}
+			return b, err
 		}, isNotFound)
 	if err != nil {
+		closeBodies(bodies)
 		return nil, err
 	}
 	switch len(answers) {
@@ -63,6 +70,18 @@ func (h *Handler) virtualBody(ctx context.Context, actor string, rp *repository,
 	case 1:
 		return answers[0].Value, nil
 	}
+	var total int64
+	for _, a := range answers {
+		total += a.Value.size()
+	}
+	if total > rp.mergeLimit {
+		h.log.WarnContext(ctx, "the members' packuments are too large to merge; serving the first member's alone",
+			"repository", rp.name, "package", name, "member", answers[0].Member.Name, "bytes", total, "mergeLimit", rp.mergeLimit)
+		h.mergeFallbacks.With(rp.name).Inc()
+		closeBodies(bodies[1:])
+		return answers[0].Value, nil
+	}
+	defer closeBodies(bodies)
 	ids := make([]string, len(answers))
 	for i, a := range answers {
 		ids[i] = a.Value.id
@@ -70,28 +89,69 @@ func (h *Handler) virtualBody(ctx context.Context, actor string, rp *repository,
 	// Hosted renderings are cached under keys that start with a
 	// repository name, which is never empty.
 	key := strings.Join(append([]string{"", rp.name, name, base, boolString(abbreviated)}, ids...), "\x00")
-	if b, etag, ok := h.renders.get(key); ok {
-		for _, a := range answers {
-			a.Value.close()
-		}
-		return &docBody{b: b, etag: etag, abbreviated: abbreviated, id: "v" + etag}, nil
+	b, etag, err := h.merged(ctx, key, name, answers, abbreviated)
+	if err != nil {
+		return nil, err
 	}
+	return &docBody{b: b, etag: etag, abbreviated: abbreviated, id: "v" + etag}, nil
+}
+
+// closeBodies closes the streams of bodies.
+func closeBodies(bodies []*docBody) {
+	for _, b := range bodies {
+		b.close()
+	}
+}
+
+// mergeFlight is a merge being built, which concurrent requests for it
+// wait for rather than build it again.
+type mergeFlight struct {
+	done chan struct{}
+	b    []byte
+	etag string
+	err  error
+}
+
+// merged returns the merge of the members' packuments answers, rendered
+// under key: from the render cache, or built once however many requests
+// want it at the same time.
+func (h *Handler) merged(ctx context.Context, key, name string, answers []repo.Answer[*docBody], abbreviated bool) ([]byte, string, error) {
+	if b, etag, ok := h.renders.get(key); ok {
+		return b, etag, nil
+	}
+	h.mergeMu.Lock()
+	f, building := h.merges[key]
+	if !building {
+		f = &mergeFlight{done: make(chan struct{})}
+		h.merges[key] = f
+	}
+	h.mergeMu.Unlock()
+	if building {
+		select {
+		case <-f.done:
+			return f.b, f.etag, f.err
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}
+	defer func() {
+		h.mergeMu.Lock()
+		delete(h.merges, key)
+		h.mergeMu.Unlock()
+		close(f.done)
+	}()
 	docs := make([]*mergeDoc, 0, len(answers))
 	for _, a := range answers {
-		f := a.Value.reader()
-		d, err := readMergeDoc(f)
-		f.Close()
+		d, err := readMergeDoc(a.Value.reader())
 		if err != nil {
-			for _, a := range answers {
-				a.Value.close()
-			}
-			return nil, err
+			f.err = err
+			return nil, "", err
 		}
 		docs = append(docs, d)
 	}
-	b := mergePackuments(name, docs, abbreviated)
-	etag := h.renders.put(key, b)
-	return &docBody{b: b, etag: etag, abbreviated: abbreviated, id: "v" + etag}, nil
+	f.b = mergePackuments(name, docs, abbreviated)
+	f.etag = h.renders.put(key, f.b)
+	return f.b, f.etag, nil
 }
 
 func boolString(b bool) string {

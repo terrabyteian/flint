@@ -563,7 +563,7 @@ func (h *Handler) serveAttestations(w http.ResponseWriter, r *http.Request, rp *
 	name, ver := spec[:i], spec[i+1:]
 	switch rp.typ {
 	case config.TypeProxy:
-		h.serveProxyAttestations(w, r, rp, name, ver)
+		h.serveProxyAttestations(w, r, rp, rp, name, ver)
 		return
 	case config.TypeVirtual:
 		mr, err := h.supplier(r.Context(), h.actor(r), rp, name, ver)
@@ -573,7 +573,7 @@ func (h *Handler) serveAttestations(w http.ResponseWriter, r *http.Request, rp *
 		case mr == nil:
 			writeError(w, http.StatusNotFound, "%s@%s is not found", name, abbrev(ver))
 		case mr.proxy != nil:
-			h.serveProxyAttestations(w, r, mr, name, ver)
+			h.serveProxyAttestations(w, r, rp, mr, name, ver)
 		default:
 			h.hostedAttestations(w, r, rp, mr, name, ver)
 		}

@@ -2,11 +2,19 @@ package npm
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/terrabyteian/flint/internal/repo"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
 
@@ -271,9 +279,142 @@ func TestVirtualSearchKeysAttestations(t *testing.T) {
 	if len(att["attestations"]) != 1 {
 		t.Errorf("attestations %v", att)
 	}
+	// Cached as the virtual repository is pulled, not as its member.
+	w := e.expect("GET", "/npm/pair/-/npm/v1/attestations/left-pad@1.0.0", nil, http.StatusOK)
+	if cc := w.Header().Get("Cache-Control"); cc != "private, max-age=300" {
+		t.Errorf("Cache-Control %q through a private virtual repository of an anonymous member", cc)
+	}
 	e.expect("GET", "/npm/all/-/npm/v1/attestations/pad-internal@1.0.0", nil, http.StatusNotFound)
 	e.expect("GET", "/npm/all/-/npm/v1/attestations/left-pad@9.0.0", nil, http.StatusNotFound)
 	if n := e.up.count("attestations/pad-internal"); n != 0 {
 		t.Errorf("the attestations of a hosted name were asked upstream %d times", n)
+	}
+}
+
+// addBig adds package big upstream, with a packument larger than the
+// derive budget of 4KiB lets the document cache hold, so it is streamed.
+func addBig(e *env) {
+	e.deriveBudget = 4 << 10
+	e.restart()
+	for i := range 40 {
+		e.up.add("big", fmt.Sprintf("1.0.%d", i), map[string]any{"padding": strings.Repeat("x", 200)})
+	}
+}
+
+// waitRewriters waits until no packument is being streamed through the
+// rewriter, as none is once every stream is read or closed.
+func waitRewriters(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		buf := make([]byte, 1<<20)
+		for n := runtime.Stack(buf, true); n == len(buf); n = runtime.Stack(buf, true) {
+			buf = make([]byte, 2*len(buf))
+		}
+		if !bytes.Contains(buf, []byte("npm.rewritePackument(")) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a packument stream was left open")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestVirtualMergeLimit checks that members' packuments larger together
+// than the merge limit are not merged: the first member's is served
+// alone, as it streams, and the fallback counted; and that below the
+// limit, a streamed packument merges.
+func TestVirtualMergeLimit(t *testing.T) {
+	e := newEnv(t)
+	addBig(e)
+	e.publish("local", newPkg("big", "2.0.0"), http.StatusOK)
+
+	w := e.expect("GET", "/npm/capped/big", nil, http.StatusOK)
+	doc := jsonOf[testPackument](t, w)
+	if len(doc.Versions) != 40 || doc.Versions["2.0.0"] != nil || w.Header().Get("ETag") != "" {
+		t.Errorf("over the limit: %d versions, ETag %q; want the proxy member's alone, streamed", len(doc.Versions), w.Header().Get("ETag"))
+	}
+	if dist(t, doc, "1.0.7")["tarball"] != testBase+"/npm/capped/big/-/big-1.0.7.tgz" {
+		t.Errorf("tarball URL %v", dist(t, doc, "1.0.7")["tarball"])
+	}
+	e.expect("GET", "/npm/capped/big/-/big-2.0.0.tgz", nil, http.StatusOK)
+	if v := e.metric(`flint_npm_virtual_merge_fallbacks_total{repository="capped"}`); v != "1" {
+		t.Errorf("fallbacks %q", v)
+	}
+
+	// Small packuments still merge.
+	e.publish("local", newPkg("tiny", "1.0.0"), http.StatusOK)
+	e.up.add("tiny", "2.0.0", nil)
+	if doc := e.packument("capped", "tiny", false); len(doc.Versions) != 2 || doc.Tags["latest"] != "2.0.0" {
+		t.Errorf("merged below the limit: %+v", doc)
+	}
+	if v := e.metric(`flint_npm_virtual_merge_fallbacks_total{repository="capped"}`); v != "1" {
+		t.Errorf("fallbacks %q after a merge", v)
+	}
+
+	// Below the default limit, the streamed packument merges.
+	doc = e.packument("exposed", "big", false)
+	if len(doc.Versions) != 41 || doc.Tags["latest"] != "2.0.0" ||
+		dist(t, doc, "1.0.7")["tarball"] != testBase+"/npm/exposed/big/-/big-1.0.7.tgz" {
+		t.Errorf("merged with a streamed packument: %d versions, dist-tags %v", len(doc.Versions), doc.Tags)
+	}
+	waitRewriters(t)
+}
+
+// TestVirtualCanceled checks that a member's streamed packument is
+// closed when the client goes away while a later member is consulted.
+func TestVirtualCanceled(t *testing.T) {
+	e := newEnv(t)
+	addBig(e)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var asked atomic.Int32
+	e.up.setStatus(func(r *http.Request) int {
+		if strings.HasSuffix(r.URL.Path, "/big") && asked.Add(1) > 1 {
+			cancel()
+			return http.StatusInternalServerError
+		}
+		return 0
+	})
+	func() {
+		defer func() {
+			if v := recover(); v != nil && v != http.ErrAbortHandler {
+				panic(v)
+			}
+		}()
+		e.srv.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, "GET", "/npm/pair/big", nil))
+	}()
+	if asked.Load() < 2 {
+		t.Fatal("the second member was not consulted")
+	}
+	waitRewriters(t)
+}
+
+// TestVirtualMergeShared checks that a request for a merge being built
+// waits for it rather than building it again, unless its client goes
+// away first.
+func TestVirtualMergeShared(t *testing.T) {
+	e := newEnv(t)
+	f := &mergeFlight{done: make(chan struct{})}
+	e.h.merges["k"] = f
+	answers := []repo.Answer[*docBody]{{Value: &docBody{b: []byte(`{"name": "x", "versions": {}}`)}}}
+	got := make(chan []byte, 1)
+	go func() {
+		b, _, err := e.h.merged(context.Background(), "k", "x", answers, false)
+		if err != nil {
+			t.Error(err)
+		}
+		got <- b
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := e.h.merged(ctx, "k", "x", answers, false); !errors.Is(err, context.Canceled) {
+		t.Errorf("a canceled wait: %v", err)
+	}
+	f.b, f.etag = []byte("built once"), `"e"`
+	close(f.done)
+	if b := <-got; string(b) != "built once" {
+		t.Errorf("a waiting request got %q, not the shared merge", b)
 	}
 }

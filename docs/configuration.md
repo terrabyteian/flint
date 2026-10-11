@@ -386,6 +386,7 @@ An `npm` repository may have an `npm` object; [npm](npm.md) describes the reposi
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `npm.forwardAudit` | bool | `true` | Proxy and virtual repositories only. Forward `npm audit`'s requests to the upstream: a proxy repository's own, and a virtual repository's proxy members', each with only the package names the member may serve and no hosted member owns. Set it to `false` to answer audits with no advisories, so no package name leaves the network through `npm audit`. |
+| `npm.mergeLimit` | size | `32MiB` | Virtual repositories only. The largest combined size of the members' packuments of a package that flint merges in memory. Above it, the first member's packument that has the package is served alone, logged with a warning and counted in `flint_npm_virtual_merge_fallbacks_total`; see [npm virtual repositories](npm.md#virtual-repositories). |
 
 ### Permissions
 
@@ -542,6 +543,7 @@ Besides the HTTP, metadata store, [audit log](operations.md#metrics), Go runtime
 | `flint_cargo_publish_bytes_total{repository}` | Bytes of `.crate` files published to hosted Cargo repositories. |
 | `flint_npm_publishes_total{repository}` | Package versions published to hosted npm repositories. |
 | `flint_npm_publish_bytes_total{repository}` | Bytes of package tarballs published to hosted npm repositories. |
+| `flint_npm_virtual_merge_fallbacks_total{repository}` | Packuments npm virtual repositories served from their first member alone because the members' packuments together exceeded the repository's `npm.mergeLimit`. |
 | `flint_maven_deploys_total{repository}` | Files deployed to hosted Maven repositories; identical re-uploads are not counted. |
 | `flint_maven_deploy_bytes_total{repository}` | Bytes of files deployed to hosted Maven repositories. |
 | `flint_virtual_member_skips_total{repository,member}` | Members of virtual repositories left out of a response because they failed, such as a proxy whose upstream could not be reached with nothing cached. |

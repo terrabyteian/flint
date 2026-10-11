@@ -224,7 +224,7 @@ func (h *Handler) proxyBody(ctx context.Context, actor string, rp *repository, n
 	if err != nil {
 		return nil, err
 	}
-	body := &docBody{b: der.Bytes, stream: der.Stream, id: "p" + d.Digest.String(),
+	body := &docBody{b: der.Bytes, stream: der.Stream, streamSize: d.Size, id: "p" + d.Digest.String(),
 		abbreviated: abbreviated && d.MediaType() == mtAbbreviated}
 	if der.Bytes != nil {
 		body.etag = derivedETag(d.Digest, variant)
@@ -478,9 +478,10 @@ func (h *Handler) proxyKeys(ctx context.Context, actor string, rp *repository) (
 	return keys, nil
 }
 
-// serveProxyAttestations serves the attestations of name@ver from rp's
-// upstream.
-func (h *Handler) serveProxyAttestations(w http.ResponseWriter, r *http.Request, rp *repository, name, ver string) {
+// serveProxyAttestations serves the attestations of name@ver from proxy
+// repository rp's upstream, as repository front, which the request
+// named.
+func (h *Handler) serveProxyAttestations(w http.ResponseWriter, r *http.Request, front, rp *repository, name, ver string) {
 	ctx := r.Context()
 	d, err := h.proxyDoc(ctx, h.actor(r), rp, "attestations/"+name+"@"+ver,
 		"-/npm/v1/attestations/"+escapeName(name)+"@"+url.PathEscape(ver), name+"@"+ver+" attestations")
@@ -495,7 +496,7 @@ func (h *Handler) serveProxyAttestations(w http.ResponseWriter, r *http.Request,
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", mtJSON)
-	w.Header().Set("Cache-Control", cacheControl(rp, "max-age=300"))
+	w.Header().Set("Cache-Control", cacheControl(front, "max-age=300"))
 	http.ServeContent(w, r, "", time.Time{}, f)
 }
 

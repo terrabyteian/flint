@@ -116,6 +116,10 @@ func testUser(r *http.Request) string {
 //	scoped    virtual: local, remote except @acme/*; publishes to local
 //	acme      virtual: local for @acme/* only, open; publishes to local
 //	plain     virtual: local, open, without publishTo
+//	capped    virtual: remote, local, without dependency-confusion
+//	          protection, merging at most 4KiB
+//	pair      virtual: quiet, remote, without dependency-confusion
+//	          protection
 type env struct {
 	t     *testing.T
 	fs    *fsys.Mem
@@ -184,6 +188,10 @@ func (e *env) restart() {
 		{Name: "acme", Format: config.FormatNPM, Type: config.TypeVirtual, Virtual: &config.Virtual{PublishTo: "local",
 			Members: []config.VirtualMember{{Name: "local", Include: []string{"@acme/*"}}, {Name: "open"}}}},
 		{Name: "plain", Format: config.FormatNPM, Type: config.TypeVirtual, Virtual: &config.Virtual{Members: config.Members("local", "open")}},
+		{Name: "capped", Format: config.FormatNPM, Type: config.TypeVirtual, NPM: &config.NPM{MergeLimit: config.ByteSize{Bytes: 4 << 10}},
+			Virtual: &config.Virtual{Members: config.Members("remote", "local"), DependencyConfusionProtection: &off}},
+		{Name: "pair", Format: config.FormatNPM, Type: config.TypeVirtual,
+			Virtual: &config.Virtual{Members: config.Members("quiet", "remote"), DependencyConfusionProtection: &off}},
 	}
 	e.reg = metrics.NewRegistry()
 	var docs *upstream.DocCache
