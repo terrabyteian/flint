@@ -462,19 +462,19 @@ func (s *Service) Authorize(w http.ResponseWriter, r *http.Request, repo string,
 		writeRegistryError(w, http.StatusInternalServerError, "UNKNOWN", "internal error")
 		return false
 	case err != nil:
-		s.challenge(w, r, repo, actions, "invalid_token")
+		s.challenge(w, r, repoScope(repo, actions), "invalid_token")
 		return false
 	case repo == "" && len(actions) == 0:
 		if c.kind == credNone {
-			s.challenge(w, r, "", nil, "")
+			s.challenge(w, r, "", "")
 			return false
 		}
 	case !s.permits(c, repo, actions):
 		switch c.kind {
 		case credNone:
-			s.challenge(w, r, repo, actions, "")
+			s.challenge(w, r, repoScope(repo, actions), "")
 		case credJWT:
-			s.challenge(w, r, repo, actions, "insufficient_scope")
+			s.challenge(w, r, repoScope(repo, actions), "insufficient_scope")
 		default:
 			writeRegistryError(w, http.StatusForbidden, "DENIED", "requested access to the resource is denied")
 		}
@@ -493,12 +493,50 @@ func (s *Service) Allowed(r *http.Request, repo string, actions ...string) bool 
 	return err == nil && s.permits(c, repo, actions)
 }
 
+// catalogScope is the token scope that lists repositories.
+const catalogScope = "registry:catalog:*"
+
+// AuthorizeCatalog decides whether the request may list repositories, for
+// GET /v2/_catalog. Like Authorize, it writes a 401 Bearer challenge, for
+// the scope "registry:catalog:*", when the request has no valid
+// credentials or its token lacks that scope; any client, anonymous ones
+// included, can obtain that scope. The returned filter shows only the
+// repositories the client may pull from.
+func (s *Service) AuthorizeCatalog(w http.ResponseWriter, r *http.Request) (func(repo string) bool, bool) {
+	c, err := s.authenticate(r, true)
+	switch {
+	case err != nil && !errors.Is(err, errBadCredentials):
+		s.log.Error("authentication failed", "err", err)
+		writeRegistryError(w, http.StatusInternalServerError, "UNKNOWN", "internal error")
+		return nil, false
+	case err != nil:
+		s.challenge(w, r, catalogScope, "invalid_token")
+		return nil, false
+	case c.kind == credNone:
+		s.challenge(w, r, catalogScope, "")
+		return nil, false
+	case c.kind == credJWT && !c.jwt.allowsCatalog():
+		s.challenge(w, r, catalogScope, "insufficient_scope")
+		return nil, false
+	}
+	logPrincipal(r.Context(), c.principal)
+	return func(repo string) bool { return s.Role(c.principal, repo) >= RoleRead }, true
+}
+
+// repoScope is the token scope for actions on repository repo.
+func repoScope(repo string, actions []string) string {
+	if repo == "" {
+		return ""
+	}
+	return "repository:" + repo + ":" + strings.Join(actions, ",")
+}
+
 // challenge writes a 401 response with a Bearer challenge pointing at the
-// token endpoint.
-func (s *Service) challenge(w http.ResponseWriter, r *http.Request, repo string, actions []string, errCode string) {
+// token endpoint, naming scope if it is not empty.
+func (s *Service) challenge(w http.ResponseWriter, r *http.Request, scope, errCode string) {
 	v := fmt.Sprintf(`Bearer realm="%s",service="%s"`, s.realm(r), Issuer)
-	if repo != "" {
-		v += fmt.Sprintf(`,scope="repository:%s:%s"`, repo, strings.Join(actions, ","))
+	if scope != "" {
+		v += fmt.Sprintf(`,scope="%s"`, scope)
 	}
 	if errCode != "" {
 		v += fmt.Sprintf(`,error="%s"`, errCode)

@@ -186,6 +186,7 @@ func TestTokenEndpointScopes(t *testing.T) {
 	want := []access{
 		{"repository", "team-a-web/app", []string{"pull", "push", "delete"}},
 		{"repository", "team-a-db", []string{"pull", "push", "delete"}},
+		{"registry", "catalog", []string{"*"}},
 	}
 	if c := claimsOf(t, tok); !reflect.DeepEqual(c.Access, want) {
 		t.Errorf("alice's access = %+v, want %+v", c.Access, want)
@@ -425,5 +426,46 @@ func TestPasswordCache(t *testing.T) {
 	}
 	if _, err := e.svc.checkPassword(ctx, "bob", "new-password"); err != nil {
 		t.Errorf("new password: %v", err)
+	}
+}
+
+// TestCatalog checks the catalog's challenge round trip and that the
+// listing shows only repositories the client may pull from.
+func TestCatalog(t *testing.T) {
+	e := newEnv(t, testConfig)
+	e.addUser("alice", "alice-password", false)
+	e.addUser("root", "root-password", true)
+
+	resp := e.do(request{path: "/test/catalog"})
+	if resp.status != http.StatusUnauthorized {
+		t.Fatalf("catalog without credentials: %d", resp.status)
+	}
+	if ch := parseChallenge(t, resp.header.Get("WWW-Authenticate")); ch["scope"] != "registry:catalog:*" {
+		t.Errorf("catalog challenge %v", ch)
+	}
+	for _, tt := range []struct {
+		user, pass, want string
+	}{
+		{"", "", "public/app"},
+		{"alice", "alice-password", "public/app team-a-web/app"},
+		{"root", "root-password", "docker-local/app public/app team-a-web/app"},
+	} {
+		resp, _ := e.dockerFlow("/test/catalog", tt.user, tt.pass)
+		if resp.status != http.StatusOK || resp.body != tt.want {
+			t.Errorf("catalog as %q = %d %q, want %q", tt.user, resp.status, resp.body, tt.want)
+		}
+		// A token without the catalog scope gets a challenge for it.
+		resp = e.do(request{path: "/test/catalog", bearer: e.token(tt.user, tt.pass, "repository:public/app:pull")})
+		if ch := parseChallenge(t, resp.header.Get("WWW-Authenticate")); resp.status != http.StatusUnauthorized ||
+			ch["error"] != "insufficient_scope" || ch["scope"] != "registry:catalog:*" {
+			t.Errorf("catalog with a repository token as %q: %d %v", tt.user, resp.status, ch)
+		}
+	}
+	if resp := e.do(request{path: "/test/catalog", user: "alice", pass: "alice-password"}); resp.status != http.StatusOK ||
+		resp.body != "public/app team-a-web/app" {
+		t.Errorf("catalog with basic credentials: %d %q", resp.status, resp.body)
+	}
+	if resp := e.do(request{path: "/test/catalog", user: "alice", pass: "wrong-password"}); resp.status != http.StatusUnauthorized {
+		t.Errorf("catalog with a wrong password: %d", resp.status)
 	}
 }

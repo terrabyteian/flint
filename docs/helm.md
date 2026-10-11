@@ -5,10 +5,12 @@ Each release publishes it to `oci://ghcr.io/terrabyteian/charts/flint`, signed w
 
 ## Install
 
-Start from [`helm-values.example.yaml`](helm-values.example.yaml), which serves HTTPS on a LoadBalancer address with a certificate from a cert-manager ClusterIssuer:
+Start from [`helm-values.example.yaml`](helm-values.example.yaml), which serves HTTPS on a LoadBalancer address with a certificate from a cert-manager ClusterIssuer, and creates the first administrator from a Secret:
 
 ```sh
 kubectl create namespace flint
+kubectl create secret generic flint-admin --namespace flint \
+  --from-literal=password="$(openssl rand -base64 24)"
 helm install flint oci://ghcr.io/terrabyteian/charts/flint --version 0.1.0 \
   --namespace flint --values helm-values.example.yaml
 kubectl rollout status statefulset/flint --namespace flint
@@ -39,13 +41,14 @@ Before flint shuts down, a `preStop` hook waits `lifecycle.preStopSleepSeconds` 
 ## Configuration
 
 The `config` value is flint's [configuration file](configuration.md), written as YAML.
-The chart sets three fields itself and refuses to render if you set them:
+The chart sets these fields itself and refuses to render if you set them:
 
 | Field | Set from |
 | --- | --- |
 | `listen` | `containerPort` (default 5000) |
 | `dataDir` | always `/var/lib/flint`, the data volume |
 | `tls` | `tls.enabled`: the certificate is mounted at `/etc/flint/tls` |
+| `auth.bootstrapAdmin` | `bootstrapAdmin`: the password is mounted at `/etc/flint/admin/password` |
 
 flint validates everything else when it starts, and does not start with an invalid configuration.
 To check a configuration before deploying it, render it to a file and pass that to `flint config check`:
@@ -77,6 +80,7 @@ The main ones:
 | `tls.enabled` | `false` | Serve HTTPS. Needs `tls.existingSecret` or `tls.certManager.enabled`. |
 | `tls.existingSecret` | none | A `kubernetes.io/tls` secret to serve. |
 | `tls.certManager.enabled` | `false` | Create a cert-manager Certificate from `tls.certManager.issuerRef`. Its names are `tls.certManager.dnsNames` and `ipAddresses` plus the Service's cluster names. |
+| `bootstrapAdmin.enabled`, `bootstrapAdmin.existingSecret` | `false`, none | Create the first administrator from a password in a Secret; see below. |
 | `persistence.enabled` | `true` | Keep data on a volume; disabled, it is an `emptyDir` lost with the pod. |
 | `persistence.size`, `persistence.storageClass` | `10Gi`, cluster default | The claim template. Kubernetes does not let a StatefulSet's claim template change after install: to grow the volume, resize the claim directly if its storage class allows it. |
 | `persistence.existingClaim` | none | Use this claim instead of the claim template. |
@@ -88,6 +92,28 @@ The main ones:
 
 flint reloads its certificate when the mounted secret changes, so cert-manager renewals take effect without a restart, within about a minute of the secret changing.
 To terminate TLS in a proxy instead, leave `tls.enabled` off and list the proxy's addresses in `config.trustedProxies`.
+
+### First administrator
+
+flint creates its first administrator at startup from a password file, while no administrator exists ([authentication](auth.md#users-and-the-first-administrator)).
+The chart mounts that file from a Secret you create:
+
+```sh
+kubectl create secret generic flint-admin --namespace flint \
+  --from-literal=password="$(openssl rand -base64 24)"
+```
+
+```yaml
+bootstrapAdmin:
+  enabled: true
+  username: admin             # the default
+  existingSecret: flint-admin
+  secretKey: password         # the default
+```
+
+The chart sets `config.auth.bootstrapAdmin` itself and refuses to render if you set it.
+flint reads the Secret only while no administrator exists, so it may be deleted after the first start; the volume is optional, so a missing Secret does not stop the pod from starting.
+Without `bootstrapAdmin`, flint starts with no administrator and logs a warning, and nobody can use the admin API.
 
 ## Upgrades and uninstalling
 

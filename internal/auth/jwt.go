@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -79,6 +80,16 @@ func (c *claims) allows(repo, action string) bool {
 			if x == action {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// allowsCatalog reports whether the claims grant listing repositories.
+func (c *claims) allowsCatalog() bool {
+	for _, a := range c.Access {
+		if a.Type == "registry" && a.Name == "catalog" && slices.Contains(a.Actions, "*") {
+			return true
 		}
 	}
 	return false

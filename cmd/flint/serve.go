@@ -178,10 +178,9 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Meta:         store,
 		Blobs:        blobs,
 		Repositories: cfg.Repositories,
-		// Every request is allowed until authentication lands.
-		Authorizer: oci.AllowAll{},
-		Logger:     logger,
-		Metrics:    reg,
+		Authorizer:   authz,
+		Logger:       logger,
+		Metrics:      reg,
 	})
 	if err != nil {
 		return nil, nil, err

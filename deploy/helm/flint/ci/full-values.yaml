@@ -22,6 +22,11 @@ config:
       - repositories: ["docker-local", "releases"]
         role: write
         groups: ["ci"]
+bootstrapAdmin:
+  enabled: true
+  username: root
+  existingSecret: flint-admin
+  secretKey: admin-password
 containerPort: 8443
 service:
   type: LoadBalancer

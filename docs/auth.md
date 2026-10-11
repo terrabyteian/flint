@@ -22,7 +22,7 @@ The first administrator comes from the configuration:
 ```
 
 At startup, if no administrator exists, flint creates `username` (default `admin`) as an administrator with the password in `passwordFile`, ignoring one trailing newline.
-The file is read only then, so in Kubernetes it can be a mounted Secret, and it may be removed after the first start; once an administrator exists, the file is ignored and changing it does not reset the password.
+The file is read only then, so in Kubernetes it can be a mounted Secret (the Helm chart's `bootstrapAdmin` values do this; see [Helm](helm.md#first-administrator)), and it may be removed after the first start; once an administrator exists, the file is ignored and changing it does not reset the password.
 If a user with that name exists but is not an administrator, flint refuses to start rather than take the account over.
 Without `bootstrapAdmin` and without an administrator, flint starts and logs a warning.
 
@@ -74,6 +74,9 @@ Registry requests use the Docker token authentication flow:
    Tokens live for 5 minutes.
 4. The client retries with `Authorization: Bearer <token>`.
    A token that lacks an action the request needs gets `401` with `error="insufficient_scope"`; an expired or invalid one gets `error="invalid_token"`.
+
+The registry's base endpoint, `GET /v2/`, challenges any request without credentials, which is how `docker login` finds the token endpoint; any valid token passes it, an anonymous one included.
+The catalog, `GET /v2/_catalog`, needs a token with the scope `registry:catalog:*`, which every client gets, and lists only the repositories the client may pull from.
 
 Wrong credentials at the token endpoint get `401`, which is what makes `docker login` fail.
 Each request also checks the subject's current permissions, so a token for a deleted user or a revoked API token stops working before it expires.

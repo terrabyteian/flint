@@ -77,9 +77,9 @@ func fetchToken(t *testing.T, base, user, pass, scope string) (int, string) {
 // TestAuthEndToEnd runs flint serve with a bootstrap administrator: the
 // administrator creates a user and an API token through the admin API, the
 // token works at the Docker token endpoint, no secret reaches the log, and
-// a restart keeps the administrator and the signing key. When the registry
-// routes require authentication and crane or docker is available, a real client then
-// logs in with the token and pushes and pulls an image.
+// a restart keeps the administrator and the signing key. When crane or
+// docker is installed, a real client also logs in with the token and pushes
+// and pulls an image through the authenticated registry API.
 func TestAuthEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
@@ -177,17 +177,15 @@ func TestAuthEndToEnd(t *testing.T) {
 }
 
 // registryClient pushes and pulls an image with a real client, logged in
-// with an API token. It skips while flint does not authenticate the
-// registry API, or no client is installed.
+// with an API token, after checking that an anonymous client cannot push.
+// It prefers crane, falls back to docker, and skips if neither is
+// installed.
 func registryClient(t *testing.T, addr, user, token string) {
 	resp, err := http.Get("http://" + addr + "/v2/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		t.Skip("flint does not authenticate the OCI registry routes yet")
-	}
 	if resp.StatusCode != http.StatusUnauthorized || !strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Bearer ") {
 		t.Fatalf("GET /v2/ without credentials = %d %q, want a 401 Bearer challenge", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 	}
@@ -197,22 +195,34 @@ func registryClient(t *testing.T, addr, user, token string) {
 	writeLayer(t, layer)
 	ref := addr + "/docker-local/e2e:" + strings.ToLower(rand.Text()[:8])
 	env := append(os.Environ(), "DOCKER_CONFIG="+filepath.Join(dir, "docker"))
-	run := func(stdin string, name string, args ...string) {
-		t.Helper()
+	exe := func(stdin string, name string, args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.Env = env
 		cmd.Stdin = strings.NewReader(stdin)
-		if out, err := cmd.CombinedOutput(); err != nil {
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	run := func(stdin string, name string, args ...string) string {
+		t.Helper()
+		out, err := exe(stdin, name, args...)
+		if err != nil {
 			t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)
 		}
+		return out
 	}
 
 	if crane, err := exec.LookPath("crane"); err == nil {
+		if out, err := exe("", crane, "append", "--insecure", "-f", layer, "-t", ref); err == nil {
+			t.Fatalf("an anonymous crane push succeeded:\n%s", out)
+		}
 		run(token, crane, "auth", "login", addr, "-u", user, "--password-stdin")
 		run("", crane, "append", "--insecure", "-f", layer, "-t", ref)
 		run("", crane, "pull", "--insecure", ref, filepath.Join(dir, "pulled.tar"))
+		if out := run("", crane, "catalog", "--insecure", addr); !strings.Contains(out, "docker-local/e2e\n") {
+			t.Errorf("crane catalog lacks docker-local/e2e:\n%s", out)
+		}
 		return
 	}
 	docker, err := exec.LookPath("docker")

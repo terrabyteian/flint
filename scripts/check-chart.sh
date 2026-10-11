@@ -56,5 +56,7 @@ tls.enabled=true,tls.certManager.enabled=true
 tls.enabled=true,tls.existingSecret=x,tls.certManager.enabled=true,tls.certManager.issuerRef.name=ca
 service.type=ExternalName
 imag.tag=typo
+bootstrapAdmin.enabled=true
+config.auth.bootstrapAdmin.passwordFile=/x
 INVALID
 exit "$status"

@@ -103,8 +103,9 @@ func (s *Service) handleToken(w http.ResponseWriter, r *http.Request) {
 
 // grant computes the access entries a token for p gets for the requested
 // scope parameters. Each parameter may hold several space-separated
-// scopes. Malformed scopes and resource types other than "repository" are
-// ignored. It reports false if too many scopes were requested.
+// scopes. Besides repository scopes, it grants "registry:catalog:*".
+// Malformed scopes and other resource types are ignored. It reports false
+// if too many scopes were requested.
 func (s *Service) grant(p *Principal, params []string) ([]access, bool) {
 	granted := []access{}
 	n := 0
@@ -114,6 +115,14 @@ func (s *Service) grant(p *Principal, params []string) ([]access, bool) {
 				return nil, false
 			}
 			typ, name, actions, ok := parseScope(sc)
+			if ok && typ == "registry" && name == "catalog" && strings.HasSuffix(sc, ":*") {
+				// Anyone may list repositories; the listing shows only
+				// those the client may pull from.
+				if !slices.ContainsFunc(granted, func(g access) bool { return g.Type == typ }) {
+					granted = append(granted, access{Type: typ, Name: name, Actions: []string{"*"}})
+				}
+				continue
+			}
 			if !ok || typ != "repository" {
 				continue
 			}
@@ -127,7 +136,7 @@ func (s *Service) grant(p *Principal, params []string) ([]access, bool) {
 			if len(allowed) == 0 {
 				continue
 			}
-			if i := slices.IndexFunc(granted, func(g access) bool { return g.Name == name }); i >= 0 {
+			if i := slices.IndexFunc(granted, func(g access) bool { return g.Type == typ && g.Name == name }); i >= 0 {
 				for _, a := range allowed {
 					if !slices.Contains(granted[i].Actions, a) {
 						granted[i].Actions = append(granted[i].Actions, a)

@@ -377,7 +377,7 @@ Power-cut testing on a VM or with dm-flakey is out of scope for now.
 ## Interfaces for the M1 OCI and auth tasks
 
 `internal/oci` and `internal/auth` are built in parallel as separate M1 tasks.
-`internal/oci` consumes authorization through this interface, which `internal/auth` implements; until it lands, `flint serve` wires in `oci.AllowAll`.
+`internal/oci` consumes authorization through this interface, which `internal/auth` implements, including the optional `CatalogAuthorizer`; `flint serve` wires `internal/auth`'s service in. `oci.AllowAll` remains for tests.
 
 ```go
 // Authorizer decides whether a request may act on a repository.

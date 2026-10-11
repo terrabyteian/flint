@@ -123,6 +123,10 @@ jobs:
       - name: Start flint
         run: |
           CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
           cat >"$RUNNER_TEMP/flint.json" <<JSON
           {
             "listen": "127.0.0.1:5000",
@@ -131,7 +135,11 @@ jobs:
             "repositories": [
               {"name": "conformance", "format": "oci", "type": "hosted"},
               {"name": "e2e", "format": "oci", "type": "hosted"}
-            ]
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [{"repositories": ["e2e"], "role": "delete", "groups": ["ci"]}]
+            }
           }
           JSON
           "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
@@ -139,7 +147,18 @@ jobs:
             curl -fsS http://127.0.0.1:5000/readyz && break
             sleep 0.2
           done
-          curl -fsS http://127.0.0.1:5000/v2/
+          # The registry asks anonymous clients to authenticate.
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:5000/v2/)" = 401
+      - name: Create a CI user and API token
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+          token=$(curl -fsS -u "ci-bot:$bot_password" http://127.0.0.1:5000/api/v1/tokens \
+            -d '{"name": "e2e", "expiresIn": "2h"}' | jq -r .token)
+          echo "::add-mask::$token"
+          echo "E2E_TOKEN=$token" >>"$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: opencontainers/distribution-spec
@@ -152,6 +171,7 @@ jobs:
       - name: Run the conformance suite
         env:
           OCI_ROOT_URL: http://127.0.0.1:5000
+          OCI_USERNAME: admin
           OCI_NAMESPACE: conformance/myorg/myrepo
           OCI_CROSSMOUNT_NAMESPACE: conformance/myorg/other
           OCI_TEST_PULL: "1"
@@ -161,6 +181,7 @@ jobs:
           OCI_AUTOMATIC_CROSSMOUNT: "0"
           OCI_HIDE_SKIPPED_WORKFLOWS: "0"
         run: |
+          export OCI_PASSWORD="$ADMIN_PASSWORD"
           mkdir -p "$RUNNER_TEMP/conformance"
           cd "$RUNNER_TEMP/conformance"
           OCI_REPORT_DIR="$PWD" "$RUNNER_TEMP/conformance.test"
@@ -170,7 +191,9 @@ jobs:
           go install "oras.land/oras/cmd/oras@$ORAS_VERSION"
           echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
       - name: Push and pull with crane, oras, and docker
-        run: scripts/e2e-oci.sh 127.0.0.1:5000 e2e
+        env:
+          E2E_USERNAME: ci-bot
+        run: E2E_PASSWORD="$E2E_TOKEN" scripts/e2e-oci.sh 127.0.0.1:5000 e2e
       - name: Show the flint log
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"

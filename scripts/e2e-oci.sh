@@ -7,7 +7,9 @@
 # Usage: scripts/e2e-oci.sh <host:port> <namespace>
 #   <namespace> is a configured hosted OCI repository, such as "e2e".
 # Requires crane, oras, docker, and jq on PATH; set E2E_SKIP_DOCKER=1 to
-# skip the docker steps.
+# skip the docker steps. With E2E_USERNAME and E2E_PASSWORD set (a password
+# or an API token), it first checks that an anonymous push is refused, then
+# logs each client in; the user needs the delete role on <namespace>.
 set -euo pipefail
 
 if [ $# -ne 2 ]; then
@@ -25,6 +27,20 @@ fail() {
 }
 crane() { command crane --insecure "$@"; }
 oras_() { command oras "$@" --plain-http; }
+
+if [ -n "${E2E_USERNAME:-}" ]; then
+	step "log in"
+	echo anonymous >"$work/anonymous.txt"
+	tar -C "$work" -cf "$work/anonymous.tar" anonymous.txt
+	if crane append --oci-empty-base -f "$work/anonymous.tar" -t "$reg/$ns/anonymous:v1" >/dev/null 2>&1; then
+		fail "an anonymous push succeeded"
+	fi
+	printf '%s' "$E2E_PASSWORD" | command crane auth login "$reg" -u "$E2E_USERNAME" --password-stdin
+	printf '%s' "$E2E_PASSWORD" | oras_ login "$reg" -u "$E2E_USERNAME" --password-stdin
+	if [ "${E2E_SKIP_DOCKER:-}" != 1 ]; then
+		printf '%s' "$E2E_PASSWORD" | docker login "$reg" -u "$E2E_USERNAME" --password-stdin
+	fi
+fi
 
 step "multi-arch image with crane"
 for arch in amd64 arm64; do

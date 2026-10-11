@@ -12,6 +12,12 @@ Find its external address with:
 Check that it is ready:
   kubectl port-forward --namespace {{ .Release.Namespace }} service/{{ include "flint.fullname" . }} {{ .Values.service.port }}
   curl {{ if .Values.tls.enabled }}--insecure {{ end }}{{ $scheme }}://localhost:{{ .Values.service.port }}/readyz
+{{- if not .Values.bootstrapAdmin.enabled }}
+
+No bootstrap administrator is configured. Unless one already exists in the
+data, set bootstrapAdmin.enabled and bootstrapAdmin.existingSecret to create
+the first administrator; see docs/auth.md.
+{{- end }}
 {{- if not .Values.persistence.enabled }}
 
 WARNING: persistence is disabled. The registry's data is lost when the pod is deleted.

@@ -47,6 +47,7 @@ func (c *clock) Add(d time.Duration) {
 // a protected test route standing in for a format package:
 //
 //	GET /test/base             Authorize(repo "", no actions)
+//	GET /test/catalog          AuthorizeCatalog, listing the visible test repositories
 //	GET /test/{action}/{repo...} Authorize(repo, action), "pull,push" for several
 type env struct {
 	t     *testing.T
@@ -125,6 +126,19 @@ func (e *env) serve() *httptest.Server {
 		if e.svc.Authorize(w, r, "") {
 			io.WriteString(w, "ok")
 		}
+	})
+	srv.HandleFunc("GET /test/catalog", func(w http.ResponseWriter, r *http.Request) {
+		visible, ok := e.svc.AuthorizeCatalog(w, r)
+		if !ok {
+			return
+		}
+		var names []string
+		for _, repo := range []string{"docker-local/app", "public/app", "team-a-web/app"} {
+			if visible(repo) {
+				names = append(names, repo)
+			}
+		}
+		io.WriteString(w, strings.Join(names, " "))
 	})
 	srv.HandleFunc("GET /test/{action}/{repo...}", func(w http.ResponseWriter, r *http.Request) {
 		if e.svc.Authorize(w, r, r.PathValue("repo"), strings.Split(r.PathValue("action"), ",")...) {
