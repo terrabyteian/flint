@@ -95,7 +95,7 @@ echo "$TOKEN" | crane auth login registry.example -u ci-bot --password-stdin
 The admin API serves JSON under `/api/v1/`.
 Every request authenticates with HTTP basic credentials (a password or an API token) or a bearer API token; tokens from the Docker token endpoint are not accepted.
 Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`.
-Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user or token), or `409` (the user exists, or the change would remove the last administrator).
+Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user or token), `409` (the user exists, or the change would remove the last administrator), or `413` (the body is over 64 KiB).
 Request bodies are strict JSON: unknown fields are errors.
 
 | Request | Who | Does |

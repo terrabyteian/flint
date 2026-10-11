@@ -16,9 +16,9 @@ import (
 // with basic credentials (a password or an API token) or a bearer API
 // token; tokens from the Docker token service are not accepted. Managing
 // users and groups needs the global admin role. Creating an API token,
-// creating or updating a user, and setting a password need a password,
-// even with an admin token: a token cannot mint further tokens or take
-// over its owner's or anyone else's account.
+// creating or updating a user or its groups, and setting a password need
+// a password, even with an admin token: a token cannot mint further
+// tokens or take over its owner's or anyone else's account.
 
 const apiPrefix = "/api/v1"
 
