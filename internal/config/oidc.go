@@ -84,12 +84,12 @@ type OIDCProvider struct {
 	// GroupsClaim is the ID token claim that lists the user's groups at
 	// the provider: an array of strings, or one string. Default "groups".
 	GroupsClaim string `json:"groupsClaim,omitempty"`
-	// AllowedDomains, if set, admits only users whose verified email is
-	// in one of these domains.
+	// AllowedDomains, not for Google, if set, admits only users whose
+	// verified email is in one of these domains.
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
-	// AllowedEmails, if set, admits users whose verified email is one of
-	// these, lowercase. With AllowedDomains or HostedDomains, a user
-	// matching any of the three is admitted.
+	// AllowedEmails, for Google only, if set, admits users whose verified
+	// email is one of these, lowercase. With HostedDomains, a user
+	// matching either is admitted.
 	AllowedEmails []string `json:"allowedEmails,omitempty"`
 	// HostedDomains, for Google only, if set, admits only users of these
 	// Google Workspace domains, as the ID token's hd claim names them.
@@ -180,6 +180,9 @@ func (c *Config) validateSignIn(v *validator) {
 		case OIDCTypeGeneric:
 			if len(p.HostedDomains) > 0 {
 				v.addf(path+".hostedDomains", "is only for providers of type %q", OIDCTypeGoogle)
+			}
+			if len(p.AllowedEmails) > 0 {
+				v.addf(path+".allowedEmails", "is only for providers of type %q", OIDCTypeGoogle)
 			}
 			if p.AllowAnyGoogleAccount {
 				v.addf(path+".allowAnyGoogleAccount", "is only for providers of type %q", OIDCTypeGoogle)
@@ -274,6 +277,10 @@ func validateGoogle(v *validator, path string, p *OIDCProvider) {
 	}
 	if !slices.Contains(p.Scopes, "email") {
 		v.addf(path+".scopes", "must include \"email\" for type %q: only users with a verified email may sign in", OIDCTypeGoogle)
+	}
+	if len(p.AllowedDomains) > 0 {
+		v.addf(path+".allowedDomains", "does not apply to type %q: use hostedDomains, which Google's ID tokens name "+
+			"in the hd claim, or allowedEmails", OIDCTypeGoogle)
 	}
 	restricted := len(p.HostedDomains) > 0 || len(p.AllowedEmails) > 0
 	switch {

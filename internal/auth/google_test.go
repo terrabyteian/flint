@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/terrabyteian/flint/internal/config"
+	"github.com/terrabyteian/flint/internal/meta"
 )
 
 // newGoogleEnv returns an env whose configuration has one provider of
@@ -160,7 +162,6 @@ func TestGoogleSignInRefused(t *testing.T) {
 			p["hostedDomains"] = []string{"example.org"}
 			p["allowedEmails"] = []string{"alice@example.com"}
 		}, claims: map[string]any{"hd": nil}},
-		{name: "allowed domain", cfg: func(p map[string]any) { p["allowedDomains"] = []string{"example.com"} }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			e, p := newGoogleEnv(t, tt.cfg)
@@ -181,19 +182,26 @@ func TestGoogleSignInRefused(t *testing.T) {
 }
 
 // TestGoogleHostedDomainHint checks that one hosted domain is passed to
-// Google's account chooser as the hd parameter.
+// Google's account chooser as the hd parameter, unless allowedEmails
+// admits accounts the hint would hide.
 func TestGoogleHostedDomainHint(t *testing.T) {
 	for _, tt := range []struct {
-		domains []string
-		want    string
+		domains, emails []string
+		want            string
 	}{
-		{[]string{"example.com"}, "example.com"},
-		{[]string{"example.com", "example.org"}, ""},
+		{[]string{"example.com"}, nil, "example.com"},
+		{[]string{"example.com", "example.org"}, nil, ""},
+		{[]string{"example.com"}, []string{"contractor@gmail.com"}, ""},
 	} {
-		e, p := newGoogleEnv(t, func(prov map[string]any) { prov["hostedDomains"] = tt.domains })
+		e, p := newGoogleEnv(t, func(prov map[string]any) {
+			prov["hostedDomains"] = tt.domains
+			if tt.emails != nil {
+				prov["allowedEmails"] = tt.emails
+			}
+		})
 		e.signInGoogle(googleBrowser(t, p))
 		if got := p.lastAuthReq.Get("hd"); got != tt.want {
-			t.Errorf("hostedDomains %v: hd %q, want %q", tt.domains, got, tt.want)
+			t.Errorf("hostedDomains %v, allowedEmails %v: hd %q, want %q", tt.domains, tt.emails, got, tt.want)
 		}
 	}
 }
@@ -278,29 +286,35 @@ func TestOIDCAssignedByEmail(t *testing.T) {
 	}
 }
 
-// TestOIDCAssignedByEmailUnverified checks that an assignment links only
-// an identity whose email the provider says is verified.
-func TestOIDCAssignedByEmailUnverified(t *testing.T) {
-	e, p := newOIDCEnv(t, func(prov map[string]any) { prov["usernameClaim"] = "sub" })
+// TestOIDCGenericNotAssignedByEmail checks that users are assigned by
+// email only at Google: a generic provider's identity with a matching
+// verified email never claims an assigned user.
+func TestOIDCGenericNotAssignedByEmail(t *testing.T) {
+	e, p := newOIDCEnv(t, nil)
 	e.addUser("root", "root-password", true)
-	if r := e.asRoot("POST", "/api/v1/users", `{"name": "alice", "oidc": {"provider": "corp", "email": "alice@example.com"}}`); r.status != http.StatusCreated {
-		t.Fatalf("assign: %d %s", r.status, r.body)
+	if r := e.asRoot("POST", "/api/v1/users", `{"name": "alice", "admin": true,
+		"oidc": {"provider": "corp", "email": "alice@example.com"}}`); r.status != http.StatusBadRequest {
+		t.Errorf("assign at a generic provider: %d %s", r.status, r.body)
 	}
-	p.set(func(p *idp) { p.claims["email_verified"] = false })
-	if resp := e.signIn(newBrowser(t), ""); !strings.Contains(resp.body, "Signed in as <strong>user-1</strong>") {
-		t.Errorf("unverified sign-in: %d %s", resp.status, resp.body)
+
+	// Even with an assignment in the store, a generic provider's sign-in
+	// creates a user of its own.
+	pending := &user{Name: "alice", Admin: true, Created: time.Unix(1700000000, 0),
+		OIDC: &oidcIdentity{Provider: "corp", Issuer: p.issuer(), Email: "alice@example.com"}}
+	var b meta.Batch
+	b.Put(userKey("alice"), pending.encode())
+	b.Put(oidcEmailKey(p.issuer(), "alice@example.com"), []byte("alice"))
+	if _, err := e.store.Commit(context.Background(), &b); err != nil {
+		t.Fatal(err)
 	}
-	if u, _ := e.svc.getUser("alice"); u.OIDC.Subject != "" {
-		t.Errorf("an unverified email linked the user: %+v", u.OIDC)
+	if resp := e.signIn(newBrowser(t), ""); !strings.Contains(resp.body, "Signed in as <strong>alice@example.com</strong>") {
+		t.Errorf("sign-in: %d %s", resp.status, resp.body)
 	}
-	// A generic provider syncs the groups of a linked user, as of any
-	// other of its users.
-	p.set(func(p *idp) { p.subject, p.claims["email_verified"] = "user-2", true })
-	if resp := e.signIn(newBrowser(t), ""); !strings.Contains(resp.body, "Signed in as <strong>alice</strong>") {
-		t.Errorf("verified sign-in: %d %s", resp.status, resp.body)
+	if u, _ := e.svc.getUser("alice"); u.OIDC.Subject != "" || u.OIDC.Email != "alice@example.com" {
+		t.Errorf("a generic provider linked the assigned user: %+v", u.OIDC)
 	}
-	if u, _ := e.svc.getUser("alice"); u.OIDC.Subject != "user-2" || !slices.Equal(u.Groups, []string{"ci"}) {
-		t.Errorf("linked user %+v %+v", u, u.OIDC)
+	if n := countKeys(e, oidcEmailPrefix); n != 1 {
+		t.Errorf("%d email assignments, want 1", n)
 	}
 }
 

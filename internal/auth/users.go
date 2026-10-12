@@ -26,7 +26,7 @@ var (
 	errEmailAssigned = errors.New("the email is already assigned")
 )
 
-// oidcAssignment assigns a new user to the identity at an OIDC provider
+// oidcAssignment assigns a new user to the identity at a Google provider
 // with a verified email.
 type oidcAssignment struct {
 	Provider string `json:"provider"`
@@ -150,7 +150,7 @@ func (s *Service) commit(ctx context.Context, b *meta.Batch, actor *Principal, a
 }
 
 // createUser creates a user. An empty password disables password login.
-// With assign, the user signs in through that OIDC provider instead: its
+// With assign, the user signs in through that Google provider instead: its
 // first sign-in with the verified email links the user to the identity.
 func (s *Service) createUser(ctx context.Context, actor *Principal, name, password string, admin bool, groups []string, assign *oidcAssignment) (*user, error) {
 	if !config.ValidUserName(name) {
@@ -170,6 +170,9 @@ func (s *Service) createUser(ctx context.Context, actor *Principal, name, passwo
 		switch {
 		case p == nil:
 			return nil, invalidf("there is no OIDC provider %q", assign.Provider)
+		case !p.cfg.IsGoogle():
+			return nil, invalidf("OIDC provider %q is not of type %q: users are assigned by email only at Google; "+
+				"other providers' users are created at their first sign-in", assign.Provider, config.OIDCTypeGoogle)
 		case !config.ValidEmail(email):
 			return nil, invalidf("%q is not an email address", assign.Email)
 		case password != "":

@@ -197,9 +197,10 @@ func (s *Service) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		"code_challenge":        {b64.EncodeToString(challenge[:])},
 		"code_challenge_method": {"S256"},
 	}
-	if hd := p.cfg.HostedDomains; len(hd) == 1 {
-		// A hint for Google's account chooser; the ID token's hd claim is
-		// what flint checks.
+	if hd := p.cfg.HostedDomains; len(hd) == 1 && len(p.cfg.AllowedEmails) == 0 {
+		// A hint for Google's account chooser, which would hide the
+		// accounts allowedEmails admits; the ID token's hd claim is what
+		// flint checks.
 		q.Set("hd", hd[0])
 	}
 	target := d.AuthorizationEndpoint
@@ -322,9 +323,9 @@ func (e *signInDenied) Error() string { return e.reason }
 
 // oidcUser applies p's restrictions to a verified identity, then finds
 // the user the identity signs in as, linking the user an administrator
-// assigned its verified email to or creating one on the first sign-in,
-// and syncs its groups and, with adminGroups, its admin flag. It returns
-// the user's name.
+// assigned its verified Google email to or creating one on the first
+// sign-in, and syncs its groups and, with adminGroups, its admin flag. It
+// returns the user's name.
 func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (string, error) {
 	cfg := &p.cfg
 	var idpGroups []string
@@ -364,9 +365,10 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 		if u, ver, err = readUser(v, name); err != nil {
 			return "", err
 		}
-	} else if rec, ok := v.Get(oidcEmailKey(cfg.Issuer, email)); ok && verified {
-		// An administrator assigned this verified email to a user, which
-		// this identity's first sign-in links it to.
+	} else if rec, ok := v.Get(oidcEmailKey(cfg.Issuer, email)); ok && cfg.IsGoogle() && verified {
+		// An administrator assigned this verified Google email to a user,
+		// which this identity's first sign-in links it to. Other providers
+		// match identities by issuer and subject only.
 		name := string(rec.Value)
 		if u, ver, err = readUser(v, name); err != nil {
 			return "", err
@@ -435,9 +437,9 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 	return u.Name, nil
 }
 
-// admitted reports whether p's allowedDomains, allowedEmails, and
-// hostedDomains admit a user: if any is set, the user must match one of
-// them, with a verified email for the first two.
+// admitted reports whether p's allowedDomains, or Google's allowedEmails
+// and hostedDomains, admit a user: if any is set, the user must match one
+// of them, with a verified email for the first two.
 func admitted(cfg *config.OIDCProvider, c *idClaims, email string, verified bool) bool {
 	if len(cfg.AllowedDomains) == 0 && len(cfg.AllowedEmails) == 0 && len(cfg.HostedDomains) == 0 {
 		return true

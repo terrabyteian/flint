@@ -294,7 +294,7 @@ func (s *Service) apiCreateUser(r *http.Request, p *Principal) (int, any, error)
 		Password string   `json:"password"`
 		Admin    bool     `json:"admin"`
 		Groups   []string `json:"groups"`
-		// OIDC assigns the user to the identity at a provider with a
+		// OIDC assigns the user to the identity at a Google provider with a
 		// verified email, which the identity's first sign-in links.
 		OIDC *oidcAssignment `json:"oidc"`
 	}

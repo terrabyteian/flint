@@ -57,7 +57,7 @@ The cookie holds the sign-in's nonce, PKCE verifier, return path, and expiry, se
 Sign-ins in progress survive a restart; deleting the key file invalidates them at the next start, and their users sign in again.
 
 **Users.** A user who signs in through a provider is identified by the provider's issuer and the user's subject (`sub`), never by email or name.
-On the first sign-in, flint creates the user, named after the provider's `usernameClaim` (by default the verified email), lowercased, unless an administrator [assigned the identity's email](#assigning-users-by-email) to a user beforehand.
+On the first sign-in, flint creates the user, named after the provider's `usernameClaim` (by default the verified email), lowercased, unless, for Google, an administrator [assigned the identity's email](#assigning-users-by-email) to a user beforehand.
 If a user of that name already exists, local or from another identity, the sign-in is refused rather than take it over; an administrator resolves the conflict, for example by deleting the other user.
 Later sign-ins find the user by issuer and subject, so a changed email or name at the provider does not change the flint user.
 Users from a provider have no password and cannot be given one, and password sign-in never works for them; local users never sign in through a provider.
@@ -73,7 +73,7 @@ The groups claim must be in the ID token; some providers send it only when asked
 Until then, the user's sessions and API tokens keep the groups and permissions of the last sign-in.
 To cut a user off at once, delete the user in flint, which ends its sessions and revokes its tokens, or revoke its tokens; disabling the user at the provider only stops new sign-ins.
 
-**Restricting who signs in.** `allowedDomains`, `allowedEmails`, and, for Google, `hostedDomains` restrict sign-in to users with a verified email in a domain, a verified email from a list, or a Google Workspace domain: with any of them set, a user must match at least one.
+**Restricting who signs in.** `allowedDomains` restricts sign-in to users with a verified email in one of its domains; for Google, `hostedDomains` and `allowedEmails` take its place and restrict sign-in to [Google Workspace domains and listed emails](#google-sign-in).
 `allowedGroups` additionally requires membership of a group at the provider.
 
 ### Google sign-in
@@ -82,7 +82,8 @@ Google is built in: a provider of `"type": "google"` in [`auth.oidc`](configurat
 [Configuration](configuration.md#google) describes how to create the OAuth client at Google and its redirect URI, which must be `https` on a real hostname, not an IP address.
 
 Google signs in only users whose email it says is verified, and the user's flint name is that email, lowercased.
-`hostedDomains` admits only accounts of your Google Workspace domains, by the ID token's `hd` claim, and `allowedEmails` admits individual accounts, such as a contractor's Gmail address, alongside them or alone.
+`hostedDomains` admits only accounts of your Google Workspace domains, by the ID token's `hd` claim, and `allowedEmails` admits individual accounts, such as a contractor's Gmail address, alongside them or alone; with both set, a user who matches either may sign in.
+`allowedDomains` is refused for Google, since the email's domain does not prove a Workspace account: use `hostedDomains`.
 One of them must be set, or else `allowAnyGoogleAccount: true`, which lets any Google account sign in: such a user has no permissions beyond anonymous pulls until it is given groups.
 flint accepts Google's ID tokens with the issuer `https://accounts.google.com` or, as Google sometimes sends it, `accounts.google.com`.
 
@@ -92,7 +93,7 @@ Removing a Google user's access works as for any user from a provider: delete th
 
 ### Assigning users by email
 
-An administrator can create a user for an identity at a provider ahead of its first sign-in, by the identity's verified email, with its name, groups, and `admin` flag:
+An administrator can create a user for an identity at a [Google](#google-sign-in) provider ahead of its first sign-in, by the identity's verified email, with its name, groups, and `admin` flag:
 
 ```sh
 curl -u admin https://registry.example/api/v1/users -d '{
@@ -102,11 +103,11 @@ curl -u admin https://registry.example/api/v1/users -d '{
 }'
 ```
 
-The first sign-in through that provider whose email is verified and equal to the assigned one, compared lowercased, signs in as that user instead of creating one, and links the user to the identity's issuer and subject; from then on the user is matched by them like any other, and the email no longer matters.
-Assignment works with every provider, not only Google, as `allowedEmails` does.
-An email can be assigned to one user per provider issuer, and a user assigned an email has no password.
+The first sign-in through that provider whose email Google says is verified and is equal to the assigned one, compared lowercased, signs in as that user instead of creating one, and links the user to the identity's issuer and subject; from then on the user is matched by them like any other, and the email no longer matters.
+Assignment works only with providers of type `google`, whose emails are Google-verified account addresses; assigning a user at any other provider is refused with `400`, and other providers match their users by issuer and subject only, never by email.
+An email can be assigned to one user, and a user assigned an email has no password.
 Assignment applies only to an identity's first sign-in: an identity that already signed in has its user, which an administrator deletes first to assign the email anew.
-With a provider that syncs groups, the linked user's groups are replaced by the provider's at sign-in as usual; with Google, they are kept.
+The linked user keeps its groups and `admin` flag, as Google sends no groups.
 
 ## Permissions
 
@@ -295,7 +296,7 @@ The [classic Helm chart repository view](helm-repository.md#access) at `/helm/<r
 The admin API serves JSON under `/api/v1/`.
 Every request authenticates with a password or an API token, in any of the [forms above](#api-tokens), or with a [sign-in session](#signing-in)'s cookie; tokens from the Docker token endpoint are not accepted.
 Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`, except for a request with a session cookie whose session has ended, which gets `401` without the challenge so a browser does not ask for a password.
-Errors are `{"error": "message"}` with status `400` (invalid request, such as setting a password for a user from an OIDC provider), `403` (not allowed, or a cross-origin request with a session), `404` (no such user, token, repository, project, release, or file, or backups are not configured), `405` (yanking or deleting in a repository that is not hosted), `409` (the user exists, the email is already assigned to another user, the change would remove the last administrator, a backup is already running, or a garbage collection is in progress), `413` (the body is over 64 KiB), or `503` (the server is shutting down).
+Errors are `{"error": "message"}` with status `400` (invalid request, such as setting a password for a user from an OIDC provider, or assigning a user by email at a provider that is not Google), `403` (not allowed, or a cross-origin request with a session), `404` (no such user, token, repository, project, release, or file, or backups are not configured), `405` (yanking or deleting in a repository that is not hosted), `409` (the user exists, the email is already assigned to another user, the change would remove the last administrator, a backup is already running, or a garbage collection is in progress), `413` (the body is over 64 KiB), or `503` (the server is shutting down).
 Request bodies are strict JSON: unknown fields are errors.
 
 | Request | Who | Does |
@@ -343,7 +344,7 @@ curl -u admin https://registry.example/api/v1/users -d '{
 ```
 
 `password` may be omitted to create a user who cannot log in with a password.
-Instead of a password, `"oidc": {"provider": "google", "email": "alice@example.com"}` assigns the user to the identity at a configured provider with that verified email; see [assigning users by email](#assigning-users-by-email).
+Instead of a password, `"oidc": {"provider": "google", "email": "alice@example.com"}` assigns the user to the identity at a configured Google provider with that verified email; see [assigning users by email](#assigning-users-by-email).
 The response, here `201 Created`, and every other user response has this form:
 
 ```json
