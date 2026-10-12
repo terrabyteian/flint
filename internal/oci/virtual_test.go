@@ -965,3 +965,26 @@ func TestVirtualPushOwnedNameAsksNoUpstream(t *testing.T) {
 		t.Errorf("a push under an owned name asked the upstream: %v", after[before:])
 	}
 }
+
+// TestVirtualTokenRefusedName checks that a member whose token service
+// refuses an anonymous token for a name, as ghcr.io answers 400 for a
+// one-part name, does not have it: the virtual repository answers from
+// the other members, or not found, and a client checking a name before
+// pushing it finds it absent and can push.
+func TestVirtualTokenRefusedName(t *testing.T) {
+	ve := newVirtualEnv(t)
+	ve.ghcr.SetStatus(func(r *http.Request) int {
+		if r.URL.Path == "/token" && !strings.Contains(r.URL.Query().Get("scope"), "/") {
+			return http.StatusBadRequest
+		}
+		return 0
+	})
+	want(t, ve.do("HEAD", "/v2/all/busybox/manifests/test", nil), http.StatusNotFound, "")
+	want(t, ve.do("GET", "/v2/all/busybox/manifests/test", nil), http.StatusNotFound, codeManifestUnknown)
+	if got := ve.metric(`flint_virtual_member_skips_total{repository="all",member="ghcr"}`); got != "" && got != "0" {
+		t.Errorf("ghcr's not found counted as %s skips", got)
+	}
+	img := newImage("busybox", nil)
+	want(t, ve.pushImage("all/busybox", "test", img), http.StatusCreated, "")
+	ve.pullLocal("all/busybox", "test", img)
+}

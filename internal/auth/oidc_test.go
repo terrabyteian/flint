@@ -348,25 +348,23 @@ func TestOIDCCallbackChecks(t *testing.T) {
 
 	// Another browser cannot complete it: the binding cookie is missing.
 	other := newBrowser(t)
+	tokenReqs := p.tokenReqs
 	if r := other.get(callback); r.status != http.StatusForbidden || !strings.Contains(r.body, "another browser") {
 		t.Errorf("callback in another browser: %d %s", r.status, r.body)
 	}
-	// That consumed the state, so the original browser must start over.
-	if r := b.get(callback); r.status != http.StatusForbidden || !strings.Contains(r.body, "expired or was already used") {
-		t.Errorf("callback after the state was used: %d %s", r.status, r.body)
+	if p.tokenReqs != tokenReqs {
+		t.Error("a refused callback redeemed the code")
 	}
 
-	// A completed sign-in cannot be replayed, even by the same browser.
-	b = newBrowser(t)
-	b.stop = srv.URL + "/auth/oidc/corp/callback"
-	callback = b.get(srv.URL + "/auth/oidc/corp/login?return=/ui/repos?x=1").header.Get("Location")
+	// The browser that started it completes it, once: the callback
+	// clears the cookie, so even that browser cannot replay it.
 	b.stop = srv.URL + "/ui/"
 	r := b.get(callback)
 	if r.status != http.StatusSeeOther || r.header.Get("Location") != "/ui/repos?x=1" {
 		t.Fatalf("callback: %d %v %s", r.status, r.header, r.body)
 	}
-	tokenReqs := p.tokenReqs
-	if r := b.get(callback); r.status != http.StatusForbidden || p.tokenReqs != tokenReqs {
+	tokenReqs = p.tokenReqs
+	if r := b.get(callback); r.status != http.StatusForbidden || !strings.Contains(r.body, "already used") || p.tokenReqs != tokenReqs {
 		t.Errorf("replayed callback: %d %s, %d token requests", r.status, r.body, p.tokenReqs-tokenReqs)
 	}
 
@@ -410,9 +408,101 @@ func TestOIDCCallbackChecks(t *testing.T) {
 			t.Errorf("return %q: redirected to %q, want %q", ret, r.header.Get("Location"), want)
 		}
 	}
-	if fails := metricsText(e); !strings.Contains(fails, `flint_auth_attempts_total{method="oidc",result="failure"} 5`) {
+	if fails := metricsText(e); !strings.Contains(fails, `flint_auth_attempts_total{method="oidc",result="failure"} 4`) {
 		t.Errorf("failure metrics:\n%s", fails)
 	}
+}
+
+// startSignIn starts a sign-in through provider corp in b and returns
+// the provider's redirect back to flint and the sealed binding cookie.
+func (e *env) startSignIn(b *browser) (callback *url.URL, cookie *http.Cookie) {
+	e.t.Helper()
+	srv := e.serve()
+	b.stop = srv.URL + "/auth/oidc/corp/callback"
+	defer func() { b.stop = "" }()
+	resp := b.get(srv.URL + "/auth/oidc/corp/login?return=/ui/x")
+	callback = mustURL(resp.header.Get("Location"))
+	for _, c := range b.client.Jar.Cookies(callback) {
+		if c.Name == oidcBindingCookie {
+			cookie = c
+		}
+	}
+	if resp.status != http.StatusFound || cookie == nil {
+		e.t.Fatalf("authorize: %d %v", resp.status, resp.header)
+	}
+	return callback, cookie
+}
+
+// callbackWith requests a callback with only the given binding cookie.
+func (e *env) callbackWith(u *url.URL, cookie string) response {
+	e.t.Helper()
+	b := newBrowser(e.t)
+	b.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	r, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	r.AddCookie(&http.Cookie{Name: oidcBindingCookie, Value: cookie})
+	return b.do(r)
+}
+
+// TestOIDCSealedState checks that a sign-in in progress is held only in
+// its sealed cookie, which opens only unchanged, for its state and its
+// provider, and under the key it was sealed with.
+func TestOIDCSealedState(t *testing.T) {
+	e, p := newOIDCEnv(t, nil)
+	other := e.cfg.Auth.OIDC[0]
+	other.Name = "other"
+	e.cfg.Auth.OIDC = append(e.cfg.Auth.OIDC, other)
+	e.svc = e.newService()
+
+	callback, cookie := e.startSignIn(newBrowser(t))
+	tokenReqs := p.tokenReqs
+	refused := func(what string, u *url.URL, v string) {
+		t.Helper()
+		if r := e.callbackWith(u, v); r.status != http.StatusForbidden || !strings.Contains(r.body, "expired") {
+			t.Errorf("%s: %d %s", what, r.status, r.body)
+		}
+	}
+	tampered := []byte(cookie.Value)
+	tampered[len(tampered)/2] ^= 'A' ^ 'B'
+	if tampered[len(tampered)/2] == cookie.Value[len(tampered)/2] {
+		t.Fatal("cookie not tampered")
+	}
+	refused("tampered cookie", callback, string(tampered))
+	refused("truncated cookie", callback, cookie.Value[:20])
+	wrongState := *callback
+	q := wrongState.Query()
+	q.Set("state", "not-the-state")
+	wrongState.RawQuery = q.Encode()
+	refused("wrong state", &wrongState, cookie.Value)
+	otherProvider := *callback
+	otherProvider.Path = "/auth/oidc/other/callback"
+	refused("another provider's callback", &otherProvider, cookie.Value)
+	if p.tokenReqs != tokenReqs {
+		t.Errorf("refused callbacks made %d token requests", p.tokenReqs-tokenReqs)
+	}
+
+	// Unchanged, the cookie completes the sign-in, also after a restart:
+	// the key is kept, and the server holds nothing else for it.
+	if b, err := readFile(e, "/data/auth/"+oidcStateKeyFileName); err != nil || len(b) != 2*secretKeyLen+1 {
+		t.Fatalf("state key file: %q, %v", b, err)
+	}
+	restart := func() *url.URL {
+		t.Helper()
+		e.svc, e.srv = e.newService(), nil
+		return mustURL(e.serve().URL + callback.RequestURI())
+	}
+	if r := e.callbackWith(restart(), cookie.Value); r.status != http.StatusSeeOther || r.header.Get("Location") != "/ui/x" {
+		t.Fatalf("callback after a restart: %d %v %s", r.status, r.header, r.body)
+	}
+
+	// A new key invalidates sign-ins in progress.
+	callback, cookie = e.startSignIn(newBrowser(t))
+	if err := e.fs.Remove("/data/auth/" + oidcStateKeyFileName); err != nil {
+		t.Fatal(err)
+	}
+	refused("callback after the key was replaced", restart(), cookie.Value)
 }
 
 // TestOIDCClientAuth checks client_secret_post and public clients.

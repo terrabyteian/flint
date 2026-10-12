@@ -514,7 +514,7 @@ func TestURLSigningKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(b) != 2*urlKeyLen+1 {
+	if len(b) != 2*secretKeyLen+1 {
 		t.Errorf("key file is %d bytes", len(b))
 	}
 	u := e.signedPath(carol, "/signed/docker-local/f", 0)

@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,7 +14,6 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/config"
@@ -22,22 +23,22 @@ import (
 
 // The sign-in flow through a provider:
 //
-//  1. GET /auth/oidc/<provider>/login?return=<path> remembers a pending
-//     sign-in under a random state, with a nonce, a PKCE verifier, and the
-//     hash of a random value it sets in a short-lived cookie that binds
-//     the sign-in to this browser, and redirects to the provider's
-//     authorization endpoint.
+//  1. GET /auth/oidc/<provider>/login?return=<path> picks a random state,
+//     nonce, and PKCE verifier, seals the pending sign-in into a
+//     short-lived cookie that binds it to this browser, and redirects to
+//     the provider's authorization endpoint.
 //  2. The provider redirects back to GET /auth/oidc/<provider>/callback
-//     with the state and a code. The pending sign-in is taken, so a state
-//     works once, and must be for the provider, unexpired, and from the
-//     browser that started it.
+//     with the state and a code. The cookie must open under the state and
+//     the provider and be unexpired; the callback clears it, so a sign-in
+//     completes once in a browser, and the provider redeems a code once.
 //  3. flint redeems the code with the verifier, verifies the ID token and
 //     its nonce, applies the provider's restrictions, finds or creates the
 //     user, syncs the user's groups, starts a session, and redirects to
 //     the return path.
 //
-// Pending sign-ins live in memory: a restart makes a sign-in in progress
-// start over.
+// flint keeps no state for pending sign-ins: the cookie is sealed with
+// AES-256-GCM under the OIDC state key, so a sign-in in progress survives
+// a restart, and replacing the key invalidates them all.
 
 // Paths of the OIDC endpoints, under /auth/oidc/<provider>/.
 const (
@@ -46,39 +47,44 @@ const (
 	oidcCallback   = "/callback"
 )
 
-// oidcBindingCookie binds a pending sign-in to the browser that started
-// it.
+// oidcBindingCookie holds a pending sign-in, sealed, in the browser that
+// started it.
 const oidcBindingCookie = "flint_oidc"
+
+// oidcStateKeyFileName is the file in the key directory of the key that
+// seals pending sign-ins.
+const oidcStateKeyFileName = "oidc-state.key"
 
 // pendingTTL bounds how long a user may take at the provider.
 const pendingTTL = 10 * time.Minute
 
-// maxPending bounds the pending sign-ins kept; beyond it, the oldest is
-// dropped.
-const maxPending = 10000
-
-// oidcService holds the configured providers and the pending sign-ins.
+// oidcService holds the configured providers and the key that seals
+// pending sign-ins.
 type oidcService struct {
 	providers map[string]*oidcProvider
 	order     []string // provider names, as configured
-
-	mu      sync.Mutex
-	pending map[string]*pendingSignIn // by state
+	aead      cipher.AEAD
 }
 
 // pendingSignIn is a sign-in waiting for the provider's callback.
 type pendingSignIn struct {
-	provider    string
 	nonce       string
 	verifier    string
 	redirectURI string
 	returnTo    string
-	binding     [sha256.Size]byte
 	expires     time.Time
 }
 
-func newOIDCService(providers []config.OIDCProvider, transport http.RoundTripper, now func() time.Time, log *slog.Logger) (*oidcService, error) {
-	o := &oidcService{providers: map[string]*oidcProvider{}, pending: map[string]*pendingSignIn{}}
+func newOIDCService(providers []config.OIDCProvider, stateKey []byte, transport http.RoundTripper, now func() time.Time, log *slog.Logger) (*oidcService, error) {
+	block, err := aes.NewCipher(stateKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	o := &oidcService{providers: map[string]*oidcProvider{}, aead: aead}
 	for _, cfg := range providers {
 		p, err := newOIDCProvider(cfg, transport, now, log)
 		if err != nil {
@@ -90,33 +96,50 @@ func newOIDCService(providers []config.OIDCProvider, transport http.RoundTripper
 	return o, nil
 }
 
-// add remembers a pending sign-in under state.
-func (o *oidcService) add(state string, ps *pendingSignIn, now time.Time) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if len(o.pending) >= maxPending {
-		var oldest string
-		for k, v := range o.pending {
-			if !now.Before(v.expires) {
-				delete(o.pending, k)
-			} else if oldest == "" || v.expires.Before(o.pending[oldest].expires) {
-				oldest = k
-			}
-		}
-		if len(o.pending) >= maxPending {
-			delete(o.pending, oldest)
-		}
+// seal returns ps sealed for the cookie, bound to provider and state.
+func (o *oidcService) seal(provider, state string, ps *pendingSignIn) string {
+	plain := binary.AppendVarint(nil, ps.expires.Unix())
+	for _, f := range []string{ps.nonce, ps.verifier, ps.redirectURI, ps.returnTo} {
+		plain = binary.AppendUvarint(plain, uint64(len(f)))
+		plain = append(plain, f...)
 	}
-	o.pending[state] = ps
+	nonce := make([]byte, o.aead.NonceSize())
+	rand.Read(nonce)
+	return b64.EncodeToString(o.aead.Seal(nonce, nonce, plain, sealedData(provider, state)))
 }
 
-// take removes and returns the pending sign-in under state, if any.
-func (o *oidcService) take(state string) *pendingSignIn {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	ps := o.pending[state]
-	delete(o.pending, state)
-	return ps
+// open returns the pending sign-in sealed in v, or nil if v was not
+// sealed by seal for provider and state.
+func (o *oidcService) open(provider, state, v string) *pendingSignIn {
+	b, err := b64.DecodeString(v)
+	n := o.aead.NonceSize()
+	if err != nil || len(b) < n {
+		return nil
+	}
+	plain, err := o.aead.Open(nil, b[:n], b[n:], sealedData(provider, state))
+	if err != nil {
+		return nil
+	}
+	expires, k := binary.Varint(plain)
+	if k <= 0 {
+		return nil
+	}
+	plain = plain[k:]
+	var f [4]string
+	for i := range f {
+		l, k := binary.Uvarint(plain)
+		if k <= 0 || l > uint64(len(plain)-k) {
+			return nil
+		}
+		f[i], plain = string(plain[k:k+int(l)]), plain[k+int(l):]
+	}
+	return &pendingSignIn{nonce: f[0], verifier: f[1], redirectURI: f[2], returnTo: f[3], expires: time.Unix(expires, 0)}
+}
+
+// sealedData is the additional data a pending sign-in for provider and
+// state is sealed with.
+func sealedData(provider, state string) []byte {
+	return []byte("flint oidc\x00" + provider + "\x00" + state)
 }
 
 // providerFor returns the provider an OIDC endpoint's path names.
@@ -144,20 +167,17 @@ func (s *Service) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		s.signInError(w, r, http.StatusBadGateway, "The sign-in provider is unavailable. Try again later.")
 		return
 	}
-	state, nonce, verifier, binding := rand.Text(), rand.Text(), randomURLSafe(32), rand.Text()
+	state, nonce, verifier := rand.Text(), rand.Text(), randomURLSafe(32)
 	ps := &pendingSignIn{
-		provider:    p.cfg.Name,
 		nonce:       nonce,
 		verifier:    verifier,
 		redirectURI: server.BaseURL(r) + oidcPathPrefix + p.cfg.Name + oidcCallback,
 		returnTo:    returnPath(r, r.URL.Query().Get("return")),
-		binding:     sha256.Sum256([]byte(binding)),
 		expires:     s.now().Add(pendingTTL),
 	}
-	s.oidc.add(state, ps, s.now())
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcBindingCookie,
-		Value:    binding,
+		Value:    s.oidc.seal(p.cfg.Name, state, ps),
 		Path:     bindingPath(r, p),
 		MaxAge:   int(pendingTTL / time.Second),
 		Secure:   secureCookie(r),
@@ -217,18 +237,21 @@ func (s *Service) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		Secure: secureCookie(r), HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
 	q := r.URL.Query()
-	ps := s.oidc.take(q.Get("state"))
-	var bound bool
-	if c, err := r.Cookie(oidcBindingCookie); err == nil && ps != nil {
-		sum := sha256.Sum256([]byte(c.Value))
-		bound = subtle.ConstantTimeCompare(sum[:], ps.binding[:]) == 1
+	c, cerr := r.Cookie(oidcBindingCookie)
+	var ps *pendingSignIn
+	if cerr == nil {
+		ps = s.oidc.open(p.cfg.Name, q.Get("state"), c.Value)
 	}
+	const stale = "This sign-in has expired, was already used, or was started in another browser. Sign in again."
 	switch {
-	case ps == nil, ps.provider != p.cfg.Name, !s.now().Before(ps.expires):
-		s.oidcFailure(w, r, p, "unknown or expired state", "This sign-in has expired or was already used. Sign in again.")
+	case cerr != nil:
+		s.oidcFailure(w, r, p, "the browser has no sign-in in progress", stale)
 		return
-	case !bound:
-		s.oidcFailure(w, r, p, "the browser did not start this sign-in", "This sign-in was started in another browser. Sign in again.")
+	case ps == nil:
+		s.oidcFailure(w, r, p, "the browser's sign-in is not for this state", stale)
+		return
+	case !s.now().Before(ps.expires):
+		s.oidcFailure(w, r, p, "the sign-in expired", stale)
 		return
 	case q.Get("error") != "":
 		s.oidcFailure(w, r, p, "the provider refused: "+printable(q.Get("error"))+" "+printable(q.Get("error_description")),
