@@ -1,34 +1,46 @@
 {{define "content"}}
 {{$d := .Data}}
-<h1>Account</h1>
-<dl class="facts">
-  <dt>User</dt><dd>{{.User.User}}</dd>
-  <dt>Groups</dt><dd>{{if $d.Groups}}{{$d.Groups}}{{else}}none{{end}}</dd>
-  <dt>Administrator</dt><dd>{{if .User.Admin}}yes{{else}}no{{end}}</dd>
-</dl>
+<div class="profile">
+  <span class="avatar large" aria-hidden="true">{{initial .User.User}}</span>
+  <div>
+    <h1>Account</h1>
+    <dl class="facts">
+      <dt>User</dt><dd>{{.User.User}}</dd>
+      <dt>Groups</dt><dd>{{if .User.Groups}}<span class="badges">{{range .User.Groups}}<span class="badge group">{{.}}</span>{{end}}</span>{{else}}none{{end}}</dd>
+      <dt>Administrator</dt><dd>{{if .User.Admin}}<span class="badge admin">yes</span>{{else}}no{{end}}</dd>
+    </dl>
+  </div>
+</div>
 
 {{- if $d.Created}}
 <section class="card created" aria-labelledby="created-heading">
-  <h2 id="created-heading">Token “{{$d.Created.Name}}” created</h2>
-  <p class="alert" role="status">Copy the token now. It is shown only once; flint stores only its hash.</p>
-  <div class="code"><pre><code>{{$d.CreatedSecret}}</code></pre><button type="button" class="copy" data-copy hidden>Copy</button></div>
+  <h2 id="created-heading">{{icon "check"}}<span>Token “{{$d.Created.Name}}” created</span></h2>
+  <p class="alert" role="status">{{icon "alert"}}<span>Copy the token now. It is shown only once; flint stores only its hash.</span></p>
+  <div class="code"><pre><code>{{$d.CreatedSecret}}</code></pre><button type="button" class="copy" data-copy hidden aria-label="Copy the token">{{icon "copy"}}<span class="copy-label">Copy</span></button></div>
 </section>
 {{- end}}
 
 <section aria-labelledby="tokens-heading" id="tokens">
-  <h2 id="tokens-heading">API tokens</h2>
-  <p>Clients use API tokens in place of your password. A token carries at most your own permissions, and you can narrow it to some repositories and a role.</p>
+  <div class="sec-head">
+    <h2 id="tokens-heading">{{icon "key"}}<span>API tokens</span></h2>
+    <a class="button" href="#new-token">{{icon "plus"}}<span>New token</span></a>
+  </div>
+  <p class="lede">Clients use API tokens in place of your password. A token carries at most your own permissions, and you can narrow it to some repositories and a role.</p>
   {{- if $d.Tokens}}
-  <table>
+  <div class="table-wrap">
+  <table class="tokens">
     <thead><tr><th scope="col">Name</th><th scope="col">Permissions</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
     <tbody>
     {{- range $d.Tokens}}
     <tr{{if .Expired}} class="expired"{{end}}>
-      <td>{{.Name}}<div class="sub mono">{{.ID}}</div></td>
-      <td>{{join .Scopes "; "}}{{if .Admin}}; <span class="badge note">global admin</span>{{end}}</td>
-      <td>{{when .Created}}</td>
-      <td>{{if .NeverExpire}}never{{else}}{{when .Expires}}{{end}}{{if .Expired}} <span class="badge note">expired</span>{{end}}</td>
-      <td>
+      <td><span class="tok-name">{{icon "key"}}{{.Name}}</span><div class="sub mono">{{.ID}}</div></td>
+      <td><span class="scopes">{{if .All}}<span class="scope">All of your permissions</span>{{end}}{{range .Scopes}}<span class="scope"><b>{{.Role}}</b> on {{.Repositories}}</span>{{end}}{{if .Admin}}<span class="badge note">global admin</span>{{end}}</span></td>
+      <td class="when">{{when .Created}}</td>
+      <td class="when">{{if .NeverExpire}}never{{else}}{{when .Expires}}{{end}}
+        {{- if .Expired}}<div class="state bad">expired</div>
+        {{- else if .DaysLeft}}<div class="state warn">expires in {{.DaysLeft}} {{if eq .DaysLeft 1}}day{{else}}days{{end}}</div>
+        {{- else}}<div class="state ok">active</div>{{end}}</td>
+      <td class="act">
         <form method="post" action="{{.RevokeHref}}" class="inline">
           <button type="submit" class="danger" data-confirm="Revoke the token “{{.Name}}”? Clients using it stop working at once.">Revoke<span class="visually-hidden"> {{.Name}}</span></button>
         </form>
@@ -37,46 +49,57 @@
     {{- end}}
     </tbody>
   </table>
-  {{- else}}<p class="empty">You have no API tokens.</p>{{end}}
+  </div>
+  {{- else}}{{template "empty" "You have no API tokens."}}{{end}}
 
   <h3 id="new-token">Create a token</h3>
-  {{- if $d.TokenMessage}}<p class="alert error" role="alert">{{$d.TokenMessage}}</p>{{end}}
-  <form method="post" action="{{$.Base}}/ui/account/tokens" class="stack card">
-    <label for="token-name">Name</label>
-    <input id="token-name" name="name" required maxlength="128" placeholder="such as ci-deploy or laptop" value="{{$d.Form.Name}}">
-    <label for="token-expiry">Expires after</label>
-    <select id="token-expiry" name="expiry">
-      {{- range $d.Expiries}}
-      <option value="{{.Value}}"{{if eq .Value $d.Form.Expiry}} selected{{end}}>{{.Label}}</option>
-      {{- end}}
-    </select>
-    <fieldset>
-      <legend>Permissions</legend>
-      <label class="choice"><input type="radio" name="scope" value="all"{{if not $d.Form.Scoped}} checked{{end}}> All of my repository permissions</label>
-      <label class="choice"><input type="radio" name="scope" value="selected"{{if $d.Form.Scoped}} checked{{end}}> Only on these repositories:</label>
-      <div class="scoped">
-        <label for="token-repos">Repositories or patterns, separated by commas</label>
-        <input id="token-repos" name="repositories" placeholder="docker-local, team-a-*" value="{{$d.Form.Repositories}}">
-        <label for="token-role">Role</label>
-        <select id="token-role" name="role">
-          {{- range $r := (list "read" "write" "delete" "admin")}}
-          <option value="{{$r}}"{{if eq $r $d.Form.Role}} selected{{end}}>{{$r}}</option>
+  {{- if $d.TokenMessage}}<p class="alert error" role="alert">{{icon "alert"}}<span>{{$d.TokenMessage}}</span></p>{{end}}
+  <form method="post" action="{{$.Base}}/ui/account/tokens" class="stack card form-card">
+    <div class="row2">
+      <div class="col">
+        <label for="token-name">Name</label>
+        <input id="token-name" name="name" required maxlength="128" placeholder="such as ci-deploy or laptop" value="{{$d.Form.Name}}">
+      </div>
+      <div class="col">
+        <label for="token-expiry">Expires after</label>
+        <select id="token-expiry" name="expiry">
+          {{- range $d.Expiries}}
+          <option value="{{.Value}}"{{if eq .Value $d.Form.Expiry}} selected{{end}}>{{.Label}}</option>
           {{- end}}
         </select>
       </div>
+    </div>
+    <fieldset>
+      <legend>Permissions</legend>
+      <label class="choice"><input type="radio" name="scope" value="all"{{if not $d.Form.Scoped}} checked{{end}}><span><b>All of my repository permissions</b><span class="sub">The token can do what you can.</span></span></label>
+      <label class="choice"><input type="radio" name="scope" value="selected"{{if $d.Form.Scoped}} checked{{end}}><span><b>Only on these repositories</b><span class="sub">Narrow it to names or patterns and one role.</span></span></label>
+      <div class="scoped">
+        <div class="col grow">
+          <label for="token-repos">Repositories or patterns, separated by commas</label>
+          <input id="token-repos" name="repositories" placeholder="docker-local, team-a-*" value="{{$d.Form.Repositories}}">
+        </div>
+        <div class="col">
+          <label for="token-role">Role</label>
+          <select id="token-role" name="role">
+            {{- range $r := (list "read" "write" "delete" "admin")}}
+            <option value="{{$r}}"{{if eq $r $d.Form.Role}} selected{{end}}>{{$r}}</option>
+            {{- end}}
+          </select>
+        </div>
+      </div>
     </fieldset>
     {{- if .User.Admin}}
-    <label class="choice"><input type="checkbox" name="admin"{{if $d.Form.Admin}} checked{{end}}> Also allow the global admin role</label>
+    <label class="choice"><input type="checkbox" name="admin"{{if $d.Form.Admin}} checked{{end}}><span>Also allow the global admin role</span></label>
     {{- end}}
-    <button type="submit" class="primary">Create token</button>
+    <div class="actions"><button type="submit" class="primary">{{icon "plus"}}<span>Create token</span></button></div>
   </form>
 </section>
 
 <section aria-labelledby="password-heading" id="password">
-  <h2 id="password-heading">Password</h2>
-  {{- if $d.PasswordMessage}}<p class="alert{{if not $d.PasswordOK}} error{{end}}" role="{{if $d.PasswordOK}}status{{else}}alert{{end}}">{{$d.PasswordMessage}}</p>{{end}}
+  <h2 id="password-heading">{{icon "lock"}}<span>Password</span></h2>
+  {{- if $d.PasswordMessage}}<p class="alert{{if not $d.PasswordOK}} error{{else}} success{{end}}" role="{{if $d.PasswordOK}}status{{else}}alert{{end}}">{{icon (or (and $d.PasswordOK "check") "alert")}}<span>{{$d.PasswordMessage}}</span></p>{{end}}
   {{- if $d.HasPassword}}
-  <form method="post" action="{{$.Base}}/ui/account/password" class="stack card">
+  <form method="post" action="{{$.Base}}/ui/account/password" class="stack card form-card narrow-form">
     <input type="text" name="username" value="{{.User.User}}" autocomplete="username" hidden>
     <label for="current">Current password</label>
     <input id="current" name="current" type="password" autocomplete="current-password" required>
@@ -84,10 +107,10 @@
     <input id="new" name="new" type="password" autocomplete="new-password" minlength="8" required>
     <label for="confirm">New password again</label>
     <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="8" required>
-    <button type="submit" class="primary">Change password</button>
+    <div class="actions"><button type="submit" class="primary">Change password</button></div>
   </form>
   {{- else}}
-  <p>You sign in without a password here; your sign-in provider manages it.</p>
+  <p class="lede">You sign in without a password here; your sign-in provider manages it.</p>
   {{- end}}
 </section>
 {{end}}

@@ -155,6 +155,10 @@ has "docker pull" "$oci client setup"
 page "/ui/repositories/$oci/images/e2e/app"
 has ">v1<" "image tags"
 has "${manifest_digest:0:19}" "image manifests"
+has "docker login $reg" "image sign-in"
+has "docker push $reg/$oci/e2e/app:v1" "image push"
+# The signature is listed under the manifest it signs.
+grep -qF 'class="depth-1"' "$work/body" || fail "image manifests: the signature is not grouped under its subject"
 page "/ui/repositories/$oci/manifests/$manifest_digest/e2e/app"
 has "${layer_digest}" "manifest layers"
 has "${config_digest}" "manifest config"
@@ -181,7 +185,7 @@ code=$(ui -d name=e2e-ui -d expiry=7d -d scope=selected -d "repositories=$oci" -
 grep -qi '^cache-control: no-store' "$work/headers" || fail "the page showing the token may be cached"
 api_token=$(grep -o 'flint_[a-z2-7]\{16\}_[a-z2-7]\{52\}' "$work/body" | head -n1)
 [ -n "$api_token" ] || fail "the new token is not shown"
-has "read on $oci" "the token's scope"
+has "<b>read</b> on $oci" "the token's scope"
 code=$(curl -sS -o /dev/null -w '%{http_code}' -u "__token__:$api_token" "$base/v2/$image/manifests/v1" \
 	-H 'Accept: application/vnd.oci.image.manifest.v1+json')
 [ "$code" = 200 ] || fail "pulling with the new token: $code"

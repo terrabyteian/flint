@@ -96,15 +96,48 @@ func imageSummary(v meta.View, rn *repoName) (browse.Image, error) {
 	return img, failure
 }
 
-// Image implements browse.Images.
-func (h *Handler) Image(repo, name string) (*browse.ImageDetail, error) {
+// Image implements browse.Images. It reads each index's body for its
+// children and their platforms, which the records do not keep: a small
+// blob read per index.
+func (h *Handler) Image(ctx context.Context, repo, name string) (*browse.ImageDetail, error) {
 	if _, err := h.browseRepo(repo); err != nil {
 		return nil, err
 	}
 	rn := &repoName{repo: repo, name: name}
+	img, err := h.imageRecords(rn)
+	if err != nil {
+		return nil, err
+	}
+	for i := range img.Manifests {
+		m := &img.Manifests[i]
+		if !m.Index {
+			continue
+		}
+		d, err := blob.ParseDigest(m.Digest)
+		if err != nil {
+			continue
+		}
+		body, err := h.readBlob(ctx, d, m.Size)
+		if err != nil {
+			return nil, fmt.Errorf("oci: reading manifest %s: %w", d, err)
+		}
+		if m.Children, err = indexChildren(body); err != nil {
+			return nil, fmt.Errorf("oci: manifest %s: %w", d, err)
+		}
+	}
 	v := h.view()
 	defer v.Release()
-	img := &browse.ImageDetail{Name: name}
+	for i := range img.Manifests {
+		markStored(v, rn, img.Manifests[i].Children)
+	}
+	return img, nil
+}
+
+// imageRecords returns an image's tags and manifests from its records.
+func (h *Handler) imageRecords(rn *repoName) (*browse.ImageDetail, error) {
+	v := h.view()
+	defer v.Release()
+	img := &browse.ImageDetail{Name: rn.name}
 	tagsOf := map[string][]string{}
 	var failure error
 	tp := prefix(nsTag, rn)
@@ -251,18 +284,41 @@ func (h *Handler) Manifest(ctx context.Context, repo, name, digest string) (*bro
 		out.TotalSize += l.Size
 	}
 	if len(doc.Manifests) > 0 {
-		v := h.view()
 		for _, c := range doc.Manifests {
-			bd := toBrowse(c)
-			if cd, err := blob.ParseDigest(c.Digest); err == nil {
-				_, bd.Stored = v.Get(manifestKey(rn, cd))
-			}
-			out.Manifests = append(out.Manifests, bd)
+			out.Manifests = append(out.Manifests, toBrowse(c))
 		}
+		v := h.view()
+		markStored(v, rn, out.Manifests)
 		v.Release()
 	}
 	out.Annotations = sortedAnnotations(doc.Annotations)
 	return out, nil
+}
+
+// indexChildren reads the children of an index, with their platforms,
+// from its body.
+func indexChildren(body []byte) ([]browse.Descriptor, error) {
+	var doc struct {
+		Manifests []browseDescriptor `json:"manifests"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	out := make([]browse.Descriptor, 0, len(doc.Manifests))
+	for _, c := range doc.Manifests {
+		out = append(out, toBrowse(c))
+	}
+	return out, nil
+}
+
+// markStored sets Stored on each of an index's children that is stored
+// under image rn.
+func markStored(v meta.View, rn *repoName, children []browse.Descriptor) {
+	for i := range children {
+		if cd, err := blob.ParseDigest(children[i].Digest); err == nil {
+			_, children[i].Stored = v.Get(manifestKey(rn, cd))
+		}
+	}
 }
 
 func toBrowse(d browseDescriptor) browse.Descriptor {

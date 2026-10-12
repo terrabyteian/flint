@@ -33,7 +33,62 @@ func (h *Handler) funcs() template.FuncMap {
 		"join":  strings.Join,
 		"inc":   func(i int) int { return i + 1 },
 		"list":  func(s ...string) []string { return s },
+		"initial": func(s string) string {
+			for _, r := range s {
+				return strings.ToUpper(string(r))
+			}
+			return ""
+		},
+		"mono":        formatMonogram,
+		"icon":        icon,
+		"snippetIcon": snippetIcon,
 	}
+}
+
+// icon returns an icon from the layout's set, by name.
+func icon(name string) template.HTML {
+	return template.HTML(`<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-` +
+		template.HTMLEscapeString(name) + `"/></svg>`)
+}
+
+// snippetIcon names the icon for a client setup snippet titled title.
+func snippetIcon(title string) string {
+	t := strings.ToLower(title)
+	switch {
+	case strings.HasPrefix(t, "sign in"):
+		return "login"
+	case strings.HasPrefix(t, "authenticate"):
+		return "key"
+	case strings.HasPrefix(t, "pull"), strings.HasPrefix(t, "install"), strings.HasPrefix(t, "download"):
+		return "down"
+	case strings.HasPrefix(t, "push"), strings.HasPrefix(t, "publish"), strings.HasPrefix(t, "upload"),
+		strings.HasPrefix(t, "deploy"):
+		return "up"
+	case strings.HasPrefix(t, "depend"), strings.HasPrefix(t, "add as"):
+		return "layers"
+	}
+	return "term"
+}
+
+// formatMonogram is the short mark a format's tile shows.
+func formatMonogram(key string) string {
+	switch key {
+	case config.FormatOCI:
+		return "OCI"
+	case config.FormatPyPI:
+		return "Py"
+	case config.FormatNPM:
+		return "npm"
+	case config.FormatMaven:
+		return "Mvn"
+	case config.FormatGo:
+		return "Go"
+	case config.FormatCargo:
+		return "Rs"
+	case config.FormatGeneric:
+		return "Gen"
+	}
+	return strings.ToUpper(key[:min(len(key), 3)])
 }
 
 // formatSize formats a byte count in binary units.
@@ -112,7 +167,10 @@ type RepoRow struct {
 	// Format is the format's display name, and Key its configuration
 	// name, such as "PyPI" and "pypi".
 	Name, Format, Key, Type, Href, Detail string
-	Anonymous                             bool
+	// Blurb describes the repository in the list: its Detail, or what a
+	// hosted repository holds.
+	Blurb     string
+	Anonymous bool
 }
 
 func (rq *request) row(rc *config.Repository) RepoRow {
@@ -127,7 +185,24 @@ func (rq *request) row(rc *config.Repository) RepoRow {
 		}
 		r.Detail = "Members: " + strings.Join(names, ", ")
 	}
+	r.Blurb = r.Detail
+	if r.Blurb == "" {
+		r.Blurb = hostedBlurb[rc.Format]
+		if rc.HelmIndex {
+			r.Blurb += ", and a Helm chart repository"
+		}
+	}
 	return r
+}
+
+// hostedBlurb says what a hosted repository of each format holds.
+var hostedBlurb = map[string]string{
+	config.FormatOCI:     "Images pushed to flint",
+	config.FormatPyPI:    "Python packages published to flint",
+	config.FormatNPM:     "npm packages published to flint",
+	config.FormatMaven:   "Maven artifacts deployed to flint",
+	config.FormatCargo:   "Crates published to flint",
+	config.FormatGeneric: "Files uploaded to flint",
 }
 
 // formatName is a format's display name.
@@ -154,21 +229,46 @@ func formatName(f string) string {
 type homeData struct {
 	Repos  []RepoRow
 	Filter string
+	// Format, if set, keeps only the repositories of that format, by its
+	// configuration name.
+	Format string
+	// Formats are the formats of the repositories the client may read,
+	// with their counts, for the format chips.
+	Formats []formatChip
+	// Total is the number of repositories the client may read.
+	Total int
 	// Hidden reports whether an anonymous client sees only some
 	// repositories.
 	Hidden bool
 }
 
+type formatChip struct {
+	Key, Name, Href string
+	Count           int
+	Current         bool
+}
+
 func (homeData) nav() string { return navRepos }
 
+// formatOrder is the order of the format chips.
+var formatOrder = []string{config.FormatOCI, config.FormatPyPI, config.FormatNPM, config.FormatMaven,
+	config.FormatCargo, config.FormatGo, config.FormatGeneric}
+
 func (h *Handler) home(rq *request) {
-	filter := strings.TrimSpace(rq.r.URL.Query().Get("q"))
+	query := rq.r.URL.Query()
+	filter := strings.TrimSpace(query.Get("q"))
 	q := browse.Query{Filter: filter}
-	d := homeData{Filter: filter}
+	d := homeData{Filter: filter, Format: query.Get("format")}
+	counts := map[string]int{}
 	for i := range h.repos {
 		rc := &h.repos[i]
 		if !rq.canRead(rc.Name) {
 			d.Hidden = d.Hidden || !rq.signedIn()
+			continue
+		}
+		d.Total++
+		counts[rc.Format]++
+		if d.Format != "" && rc.Format != d.Format {
 			continue
 		}
 		if q.Match(rc.Name) || q.Match(rc.Format) || q.Match(rc.Type) {
@@ -176,6 +276,14 @@ func (h *Handler) home(rq *request) {
 		}
 	}
 	slices.SortFunc(d.Repos, func(a, b RepoRow) int { return strings.Compare(a.Name, b.Name) })
+	if len(counts) > 1 {
+		for _, f := range formatOrder {
+			if counts[f] > 0 {
+				d.Formats = append(d.Formats, formatChip{Key: f, Name: formatName(f), Count: counts[f],
+					Href: withQuery(rq.base+Prefix, "q", filter, "format", f), Current: f == d.Format})
+			}
+		}
+	}
 	rq.render(http.StatusOK, "home", "Repositories", d)
 }
 
@@ -380,22 +488,13 @@ func (h *Handler) packagePage(rq *request) {
 	rq.render(http.StatusOK, "package", p.Name, d)
 }
 
-type tagRow struct {
-	browse.ImageTag
-	Href string
-}
-
-type manifestRow struct {
-	browse.ManifestSummary
-	Href string
-}
-
 type imageData struct {
 	RepoRow
 	Image     *browse.ImageDetail
 	ImageHref string
 	Tags      []tagRow
 	Manifests []manifestRow
+	Stats     imageStats
 	Snippets  []snippet
 }
 
@@ -411,18 +510,13 @@ func (h *Handler) imagePage(rq *request) {
 		return
 	}
 	name := rq.r.PathValue("name")
-	img, err := h.opts.Images.Image(rc.Name, name)
+	img, err := h.opts.Images.Image(rq.r.Context(), rc.Name, name)
 	if err != nil {
 		rq.browseError(err)
 		return
 	}
 	d := imageData{RepoRow: rq.row(rc), Image: img, ImageHref: rq.imageHref(rc.Name, name)}
-	for _, t := range img.Tags {
-		d.Tags = append(d.Tags, tagRow{ImageTag: t, Href: rq.manifestHref(rc.Name, name, t.Digest)})
-	}
-	for _, m := range img.Manifests {
-		d.Manifests = append(d.Manifests, manifestRow{ManifestSummary: m, Href: rq.manifestHref(rc.Name, name, m.Digest)})
-	}
+	d.Tags, d.Manifests, d.Stats = groupImage(img, func(digest string) string { return rq.manifestHref(rc.Name, name, digest) })
 	ref := ""
 	if len(img.Tags) > 0 {
 		ref = ":" + img.Tags[0].Name
@@ -432,13 +526,15 @@ func (h *Handler) imagePage(rq *request) {
 	} else if len(img.Manifests) > 0 {
 		ref = "@" + img.Manifests[0].Digest
 	}
-	d.Snippets = h.imageSnippets(rq, rc, name, ref)
+	d.Snippets = h.imageSnippets(rq, rc, name, ref, true)
 	rq.render(http.StatusOK, "image", rc.Name+"/"+name, d)
 }
 
 type descriptorRow struct {
 	browse.Descriptor
 	Href string
+	// Kind names a referrer's kind, such as "signature".
+	Kind string
 }
 
 type manifestData struct {
@@ -446,8 +542,11 @@ type manifestData struct {
 	Image     string
 	ImageHref string
 	Manifest  *browse.Manifest
-	Children  []descriptorRow
-	Referrers []descriptorRow
+	// ArtifactType is the manifest's artifact type, if it is worth
+	// showing: a plain image's config media type is not.
+	ArtifactType string
+	Children     []descriptorRow
+	Referrers    []descriptorRow
 	// SubjectHref links to the manifest's subject, if stored.
 	SubjectHref string
 	Snippets    []snippet
@@ -470,7 +569,8 @@ func (h *Handler) manifestPage(rq *request) {
 		rq.browseError(err)
 		return
 	}
-	d := manifestData{RepoRow: rq.row(rc), Image: name, ImageHref: rq.imageHref(rc.Name, name), Manifest: m}
+	d := manifestData{RepoRow: rq.row(rc), Image: name, ImageHref: rq.imageHref(rc.Name, name), Manifest: m,
+		ArtifactType: artifactTypeOf(m.ArtifactType)}
 	for _, c := range m.Manifests {
 		row := descriptorRow{Descriptor: c}
 		if c.Stored {
@@ -479,24 +579,38 @@ func (h *Handler) manifestPage(rq *request) {
 		d.Children = append(d.Children, row)
 	}
 	for _, c := range m.Referrers {
-		d.Referrers = append(d.Referrers, descriptorRow{Descriptor: c, Href: rq.manifestHref(rc.Name, name, c.Digest)})
+		d.Referrers = append(d.Referrers, descriptorRow{Descriptor: c, Href: rq.manifestHref(rc.Name, name, c.Digest),
+			Kind: referrerKind(c.ArtifactType)})
 	}
 	if m.Subject != "" {
 		d.SubjectHref = rq.manifestHref(rc.Name, name, m.Subject)
 	}
-	d.Snippets = h.imageSnippets(rq, rc, name, "@"+m.Digest)
+	d.Snippets = h.imageSnippets(rq, rc, name, "@"+m.Digest, false)
 	rq.render(http.StatusOK, "manifest", rc.Name+"/"+name+"@"+shortDigest(m.Digest), d)
 }
 
 type tokenRow struct {
 	auth.TokenInfo
-	Scopes      []string
+	Scopes []tokenScope
+	// All reports a token that carries all of its owner's repository
+	// permissions, as one created without scopes does.
+	All         bool
 	RevokeHref  string
 	NeverExpire bool
+	// DaysLeft, if positive, is how many days are left of a token that
+	// expires soon.
+	DaysLeft int
 }
 
+type tokenScope struct {
+	Role, Repositories string
+}
+
+// expiresSoon is how close a token's expiry is when the account page
+// marks it.
+const expiresSoon = 14 * 24 * time.Hour
+
 type accountData struct {
-	Groups      string
 	HasPassword bool
 	Tokens      []tokenRow
 	// Created is a token just created, shown once with its secret.
@@ -529,7 +643,7 @@ func (accountData) nav() string { return navAccount }
 
 // accountData builds the account page's data.
 func (h *Handler) accountData(rq *request) (*accountData, error) {
-	d := &accountData{Groups: strings.Join(rq.p.Groups, ", "), Expiries: expiries,
+	d := &accountData{Expiries: expiries,
 		Form: tokenForm{Expiry: "90d", Role: auth.RoleRead.String()}}
 	var err error
 	if d.HasPassword, err = h.auth.HasPassword(rq.p.User); err != nil {
@@ -548,7 +662,16 @@ func (h *Handler) accountData(rq *request) (*accountData, error) {
 func (rq *request) tokenRowOf(t auth.TokenInfo) tokenRow {
 	r := tokenRow{TokenInfo: t, RevokeHref: rq.base + "/ui/account/tokens/" + url.PathEscape(t.ID) + "/revoke", NeverExpire: t.Expires.IsZero()}
 	for _, s := range t.Scopes {
-		r.Scopes = append(r.Scopes, s.Role.String()+" on "+strings.Join(s.Repositories, ", "))
+		// A scope of every repository with the admin role caps nothing:
+		// the token carries all of its owner's permissions, and no more.
+		if s.Role == auth.RoleAdmin && slices.Contains(s.Repositories, "*") {
+			r.All = true
+			continue
+		}
+		r.Scopes = append(r.Scopes, tokenScope{Role: s.Role.String(), Repositories: strings.Join(s.Repositories, ", ")})
+	}
+	if left := t.Expires.Sub(rq.h.now()); !t.Expired && !r.NeverExpire && left < expiresSoon {
+		r.DaysLeft = int((left + 24*time.Hour - 1) / (24 * time.Hour))
 	}
 	return r
 }

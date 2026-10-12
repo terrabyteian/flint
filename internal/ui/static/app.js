@@ -6,12 +6,14 @@
   "use strict";
 
   function copy(text, button) {
+    // The button's label is its text, or a label element beside its icon.
+    var target = button.querySelector(".copy-label") || button;
     function done(ok) {
-      var label = button.textContent;
-      button.textContent = ok ? "Copied" : "Copy failed";
+      var label = target.textContent;
+      target.textContent = ok ? "Copied" : "Copy failed";
       button.disabled = true;
       setTimeout(function () {
-        button.textContent = label;
+        target.textContent = label;
         button.disabled = false;
       }, 1500);
     }

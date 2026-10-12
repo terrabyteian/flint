@@ -105,6 +105,9 @@ type Options struct {
 	Status Status
 	// Version is flint's version, shown in the footer.
 	Version string
+	// Now returns the current time, for how soon tokens expire; nil
+	// means time.Now.
+	Now func() time.Time
 	// Logger receives errors; nil means slog.Default().
 	Logger *slog.Logger
 }
@@ -135,6 +138,9 @@ func New(opts Options) (*Handler, error) {
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
 	}
 	h := &Handler{opts: opts, auth: opts.Auth, repos: opts.Config.Repositories, byName: map[string]*config.Repository{},
 		log: opts.Logger, pages: map[string]*template.Template{}, static: map[string]staticFile{}}
@@ -359,6 +365,8 @@ func (h *Handler) serverError(rq *request, err error) {
 }
 
 func (h *Handler) notFoundPage(rq *request) { rq.notFound() }
+
+func (h *Handler) now() time.Time { return h.opts.Now() }
 
 // canRead reports whether the client may read repository name.
 func (rq *request) canRead(name string) bool {

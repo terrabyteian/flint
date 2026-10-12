@@ -112,14 +112,17 @@ func (fakeImages) ListImages(repo string, q browse.Query) ([]browse.Image, bool,
 	return out, false, nil
 }
 
-func (fakeImages) Image(repo, name string) (*browse.ImageDetail, error) {
+func (fakeImages) Image(_ context.Context, repo, name string) (*browse.ImageDetail, error) {
 	if name != "team/app" {
 		return nil, browse.ErrNotFound
 	}
 	return &browse.ImageDetail{Name: name, Tags: []browse.ImageTag{{Name: "v1", Digest: indexDigest}},
 		Manifests: []browse.ManifestSummary{
-			{Digest: indexDigest, MediaType: "application/vnd.oci.image.index.v1+json", Index: true, Tags: []string{"v1"}},
-			{Digest: amdDigest, MediaType: "application/vnd.oci.image.manifest.v1+json", Size: 500},
+			{Digest: indexDigest, MediaType: "application/vnd.oci.image.index.v1+json", Index: true, Tags: []string{"v1"},
+				Children: []browse.Descriptor{{Digest: amdDigest, Platform: "linux/amd64", Size: 500, Stored: true},
+					{Digest: layerDigest, Platform: "linux/s390x", Size: 600}}},
+			{Digest: amdDigest, MediaType: "application/vnd.oci.image.manifest.v1+json", Size: 500,
+				ArtifactType: "application/vnd.oci.image.config.v1+json"},
 			{Digest: sigDigest, ArtifactType: "application/vnd.dev.cosign.artifact.sig.v1+json", Subject: indexDigest},
 		}}, nil
 }
@@ -138,9 +141,10 @@ func (fakeImages) Manifest(_ context.Context, repo, name, digest string) (*brows
 		}, nil
 	case digest == amdDigest:
 		return &browse.Manifest{
-			ManifestSummary: browse.ManifestSummary{Digest: amdDigest, MediaType: "application/vnd.oci.image.manifest.v1+json"},
-			Config:          &browse.Descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: amdDigest, Size: 10},
-			Layers:          []browse.Descriptor{{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: layerDigest, Size: 3 << 20}},
+			ManifestSummary: browse.ManifestSummary{Digest: amdDigest, MediaType: "application/vnd.oci.image.manifest.v1+json",
+				ArtifactType: "application/vnd.oci.image.config.v1+json"},
+			Config: &browse.Descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: amdDigest, Size: 10},
+			Layers: []browse.Descriptor{{MediaType: "application/vnd.oci.image.layer.v1.tar+gzip", Digest: layerDigest, Size: 3 << 20}},
 		}, nil
 	}
 	return nil, browse.ErrNotFound
@@ -240,6 +244,7 @@ func newEnvAt(t *testing.T, publicURL string) *env {
 			Space: fakeSpace{},
 		},
 		Version: "test",
+		Now:     e.clock.Now,
 		Logger:  quiet,
 	})
 	if err != nil {

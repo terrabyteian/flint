@@ -72,7 +72,7 @@ func TestBrowseImages(t *testing.T) {
 		t.Errorf("summary %+v", imgs[0])
 	}
 
-	img, err := e.h.Image("hosted", "team/app")
+	img, err := e.h.Image(ctx, "hosted", "team/app")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,17 @@ func TestBrowseImages(t *testing.T) {
 	if len(img.Manifests) != 4 || img.Manifests[0].Digest != indexDigest.String() || !img.Manifests[0].Index ||
 		!equal(img.Manifests[0].Tags, []string{"latest", "v1"}) {
 		t.Errorf("manifests %+v", img.Manifests)
+	}
+	// An index lists its children with their platforms, so the UI can
+	// group them under it.
+	if c := img.Manifests[0].Children; len(c) != 2 || c[0].Platform != "linux/amd64" || !c[0].Stored ||
+		c[1].Platform != "linux/arm64/v8" {
+		t.Errorf("index children in the listing %+v", c)
+	}
+	for _, m := range img.Manifests[1:] {
+		if m.Children != nil {
+			t.Errorf("image manifest %s has children %+v", m.Digest, m.Children)
+		}
 	}
 
 	m, err := e.h.Manifest(ctx, "hosted", "team/app", indexDigest.String())
@@ -119,7 +130,7 @@ func TestBrowseImages(t *testing.T) {
 			t.Errorf("Manifest(%v): got %v", c, err)
 		}
 	}
-	if _, err := e.h.Image("hosted", "missing"); !errors.Is(err, browse.ErrNotFound) {
+	if _, err := e.h.Image(ctx, "hosted", "missing"); !errors.Is(err, browse.ErrNotFound) {
 		t.Errorf("missing image: got %v", err)
 	}
 	if _, _, err := e.h.ListImages("nope", browse.Query{}); !errors.Is(err, browse.ErrNotFound) {

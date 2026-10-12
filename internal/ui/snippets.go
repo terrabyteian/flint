@@ -156,9 +156,22 @@ func (h *Handler) packageSnippets(rq *request, rc *config.Repository, name, vers
 	return nil
 }
 
-// imageSnippets returns the commands that pull image name of repository
-// rc by ref, ":<tag>" or "@<digest>".
-func (h *Handler) imageSnippets(rq *request, rc *config.Repository, name, ref string) []snippet {
+// imageSnippets returns the commands that sign in and pull image name of
+// repository rc by ref, ":<tag>" or "@<digest>", and with push, for a
+// repository clients publish to, that tag and push a local build of it.
+func (h *Handler) imageSnippets(rq *request, rc *config.Repository, name, ref string, push bool) []snippet {
 	e := h.endpoints(rq, rc)
-	return []snippet{{Title: "Pull", Text: "docker pull " + e.host + "/" + rc.Name + "/" + name + ref}}
+	image := e.host + "/" + rc.Name + "/" + name
+	s := []snippet{
+		{Title: "Sign in", Text: "docker login " + e.host},
+		{Title: "Pull", Text: "docker pull " + image + ref},
+	}
+	if push && publishable(rc) {
+		tag := ":latest"
+		if strings.HasPrefix(ref, ":") {
+			tag = ref
+		}
+		s = append(s, snippet{Title: "Push", Text: "docker tag " + name + tag + " " + image + tag + "\ndocker push " + image + tag})
+	}
+	return s
 }

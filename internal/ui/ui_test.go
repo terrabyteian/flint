@@ -97,6 +97,37 @@ func TestHomeVisibility(t *testing.T) {
 	r = alice.expect("/ui/?q=virtual", http.StatusOK)
 	r.has(t, ">oci-all<")
 	alice.expect("/ui/?q=nothing-matches", http.StatusOK).has(t, "No repository matches")
+
+	// The format chips filter by format exactly, as the filter cannot:
+	// "go" is part of "cargo".
+	r = alice.expect("/ui/", http.StatusOK)
+	r.has(t, `href="/ui/?format=go"`, `href="/ui/?format=pypi"`, "Go <span class=\"count\">1</span>")
+	r = alice.expect("/ui/?format=go", http.StatusOK)
+	r.has(t, ">go-remote<", `<a href="/ui/?format=go" aria-current="page">`)
+	r.lacks(t, ">cargo-local<", ">pypi-local<")
+	r = alice.expect("/ui/?format=pypi&q=remote", http.StatusOK)
+	r.has(t, ">pypi-remote<", `name="format" value="pypi"`)
+	r.lacks(t, ">pypi-local<")
+}
+
+// TestLayout checks what every page carries: the icons it uses, the
+// footer, and the account link.
+func TestLayout(t *testing.T) {
+	e := newEnv(t)
+	b := e.browser()
+	b.signIn("alice", "alice-password")
+	r := b.expect("/ui/", http.StatusOK)
+	r.has(t, `<symbol id="i-bolt"`, "flint test", `href="/ui/account#tokens">API tokens<`, `<span class="avatar" aria-hidden="true">A</span>`)
+	// Every icon a page uses is in its set.
+	for _, path := range []string{"/ui/", "/ui/repositories/oci-local", "/ui/repositories/oci-local/images/team/app",
+		"/ui/repositories/pypi-local/packages/acme-lib", "/ui/repositories/files", "/ui/account", "/ui/nope"} {
+		r := b.get(path)
+		for _, m := range regexp.MustCompile(`<use href="#(i-[a-z]+)"/>`).FindAllStringSubmatch(r.body, -1) {
+			if !strings.Contains(r.body, `<symbol id="`+m[1]+`"`) {
+				t.Errorf("%s uses icon %s, which the page lacks", path, m[1])
+			}
+		}
+	}
 }
 
 // TestPermissions checks every page against the permission model.
@@ -178,6 +209,26 @@ func TestBrowsePages(t *testing.T) {
 	r.has(t, ">v1<", "index", "referrer", "application/vnd.dev.cosign.artifact.sig.v1+json",
 		"docker pull 127.0.0.1", "/oci-local/team/app:v1",
 		`href="/ui/repositories/oci-local/manifests/`+url.PathEscape(indexDigest)+`/team/app"`)
+	// The page offers signing in and pushing as well as pulling.
+	r.has(t, "docker login 127.0.0.1", "docker tag team/app:v1 127.0.0.1", "docker push 127.0.0.1", "/oci-local/team/app:v1")
+	// The tag shows its index's platforms and its signature.
+	r.has(t, `<span class="plat">linux/amd64</span>`, `<span class="plat">linux/s390x</span>`, "Signed", "1 of 1 tagged")
+	// A plain image's config media type is not shown as an artifact type.
+	r.lacks(t, "application/vnd.oci.image.config.v1+json")
+	// Manifests are grouped: the index, its platform manifests (one not
+	// stored here), then the signature that refers to it.
+	rows := regexp.MustCompile(`<tr class="depth-(\d)[^"]*">\s*<td class="tree-cell">(?:<span class="tree" aria-hidden="true"></span>)?(?:<a href="[^"]*">)?<code title="([^"]+)"`).FindAllStringSubmatch(r.body, -1)
+	var got []string
+	for _, m := range rows {
+		got = append(got, m[1]+":"+m[2])
+	}
+	if want := []string{"0:" + indexDigest, "1:" + amdDigest, "1:" + layerDigest, "1:" + sigDigest}; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("manifest rows %v, want %v", got, want)
+	}
+	r.has(t, "linux/s390x, not stored here", ">signature<")
+	// Pushing goes to the hosted repository the page shows.
+	r = alice.expect("/ui/repositories/public/images/team/app", http.StatusOK)
+	r.has(t, "docker push 127.0.0.1"+strings.TrimPrefix(e.srv.URL, "http://127.0.0.1")+"/public/team/app:v1")
 	alice.expect("/ui/repositories/oci-local/images/missing", http.StatusNotFound)
 
 	r = alice.expect("/ui/repositories/oci-local/manifests/"+indexDigest+"/team/app", http.StatusOK)
@@ -186,7 +237,10 @@ func TestBrowsePages(t *testing.T) {
 	// A child not stored under the image is not linked.
 	r.lacks(t, url.PathEscape(layerDigest)+"/team/app")
 	r = alice.expect("/ui/repositories/oci-local/manifests/"+amdDigest+"/team/app", http.StatusOK)
-	r.has(t, "Layers", "config", "3.0 MiB", "No signatures or other referrers")
+	r.has(t, "Layers", "config", "3.0 MiB", "No signatures or other referrers", "docker login", "docker pull")
+	// The config media type is listed as the config's, not as an
+	// artifact type, and a manifest page pulls by digest only.
+	r.lacks(t, "Artifact type", "docker push")
 	alice.expect("/ui/repositories/oci-local/manifests/sha256:nope/team/app", http.StatusNotFound)
 
 	r = alice.expect("/ui/repositories/pypi-local", http.StatusOK)
@@ -409,7 +463,8 @@ func TestTokens(t *testing.T) {
 	if secret == "" {
 		t.Fatal("the new token is not shown")
 	}
-	r.has(t, "shown only once", "read on oci-local, files", e.clock.Now().Add(30*24*time.Hour).Format("2006-01-02 15:04"))
+	r.has(t, "shown only once", "<b>read</b> on oci-local, files", e.clock.Now().Add(30*24*time.Hour).Format("2006-01-02 15:04"),
+		"active")
 	// It is shown once only.
 	if tokenRE.MatchString(b.expect("/ui/account", http.StatusOK).body) {
 		t.Error("the token is shown again")
@@ -427,7 +482,10 @@ func TestTokens(t *testing.T) {
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("unscoped token: %d", r.StatusCode)
 	}
-	r.has(t, "admin on *", "never")
+	// A token without scopes carries its owner's permissions, which is
+	// not an admin grant, so it does not read as one.
+	r.has(t, "All of your permissions", "never")
+	r.lacks(t, "admin on *")
 
 	for _, c := range []struct {
 		form url.Values
@@ -494,6 +552,29 @@ func TestTokens(t *testing.T) {
 	if r := anon.do("POST", "/ui/account/tokens", f); r.StatusCode != http.StatusSeeOther {
 		t.Errorf("anonymous token creation: %d", r.StatusCode)
 	}
+}
+
+// TestTokenExpiry marks tokens that expire soon, and expired ones.
+func TestTokenExpiry(t *testing.T) {
+	e := newEnv(t)
+	b := e.browser()
+	b.signIn("alice", "alice-password")
+	if r := b.post("/ui/account/tokens", url.Values{"name": {"soon"}, "expiry": {"7d"}, "scope": {"all"}}); r.StatusCode != http.StatusOK {
+		t.Fatalf("creating a token: %d", r.StatusCode)
+	}
+	b.post("/ui/account/tokens", url.Values{"name": {"later"}, "expiry": {"90d"}, "scope": {"all"}})
+	r := b.expect("/ui/account", http.StatusOK)
+	r.has(t, "expires in 7 days", "active")
+	e.clock.Add(6*24*time.Hour + time.Hour)
+	b.signIn("alice", "alice-password")
+	r = b.expect("/ui/account", http.StatusOK)
+	r.has(t, "expires in 1 day")
+	r.lacks(t, "expires in 7 days")
+	e.clock.Add(24 * time.Hour)
+	b.signIn("alice", "alice-password")
+	r = b.expect("/ui/account", http.StatusOK)
+	r.has(t, `class="expired"`, ">expired<")
+	r.lacks(t, "expires in")
 }
 
 func TestChangePassword(t *testing.T) {
