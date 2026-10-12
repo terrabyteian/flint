@@ -174,7 +174,7 @@ flint restore -backup 20261011T020000.123Z-48211 /var/backups/flint /var/lib/fli
 It refuses a data directory that holds anything but the `lost+found` directory of a new ext4 volume, so it never mixes a backup with other data, and it takes the data directory's lock, so it cannot run on a directory a server is using.
 It checks the backup as `verify` does, and each blob's digest as it copies it; a damaged backup is not restored.
 Then start flint with `dataDir` pointing at the restored directory, or move it into place.
-The restored server holds exactly the state of the backup, continues its metadata log from the backup's sequence number, and creates new signing keys.
+The restored server holds exactly the state of the backup, continues its metadata log from the backup's sequence number, and creates new keys.
 
 Until a restore has finished, the data directory holds a file named `RESTORE-INCOMPLETE`, and `flint serve` refuses to start on it, so an interrupted restore is never served as if it were the whole registry.
 Delete the directory and restore again.
