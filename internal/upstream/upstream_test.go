@@ -318,8 +318,8 @@ func TestStatusErrors(t *testing.T) {
 }
 
 // TestTokenRefusals checks how a token service's refusal of a
-// repository's token is read: refused anonymously, as registries refuse
-// names that do not exist, it is an answer about the name; refused with
+// repository's token is read: refused as registries refuse names that do
+// not exist, it is an answer about the name; refused with 401 or 403 for
 // flint's configured credentials, it is a failure of flint's access.
 func TestTokenRefusals(t *testing.T) {
 	pwFile := filepath.Join(t.TempDir(), "password")
@@ -345,7 +345,9 @@ func TestTokenRefusals(t *testing.T) {
 		{"anonymous 401", http.StatusUnauthorized, false, upstream.ErrDenied, false},
 		{"credentials 401", http.StatusUnauthorized, true, upstream.ErrAuth, true},
 		{"credentials 403", http.StatusForbidden, true, upstream.ErrAuth, true},
-		{"credentials 400", http.StatusBadRequest, true, nil, false},
+		{"credentials 400", http.StatusBadRequest, true, upstream.ErrNotFound, false},
+		{"credentials 404", http.StatusNotFound, true, upstream.ErrNotFound, false},
+		{"credentials 408", http.StatusRequestTimeout, true, nil, false},
 		{"anonymous 429", http.StatusTooManyRequests, false, upstream.ErrUnavailable, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

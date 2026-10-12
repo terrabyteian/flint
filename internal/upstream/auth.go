@@ -149,8 +149,8 @@ const minTokenLifetime = 60 * time.Second
 // maxTokenResponse bounds a token response body.
 const maxTokenResponse = 1 << 20
 
-// nameRefused reports whether a token service's status refusing an
-// anonymous token for a repository is an answer about the name.
+// nameRefused reports whether a token service's status refusing a token
+// for a repository is an answer about the name.
 func nameRefused(status int) bool {
 	switch status {
 	case http.StatusBadRequest, http.StatusNotFound, http.StatusGone, http.StatusUnavailableForLegalReasons:
@@ -205,10 +205,10 @@ func (c *Client) fetchToken(ctx context.Context, ch challenge, scope string) (st
 		return "", &Error{Op: op, Status: resp.StatusCode, Err: fmt.Errorf("%w: the token service refused anonymous access", ErrDenied)}
 	case retryable(resp.StatusCode):
 		return "", &Error{Op: op, Status: resp.StatusCode, Err: ErrUnavailable}
-	case nameRefused(resp.StatusCode) && c.username == "" && strings.HasPrefix(reqScope, "repository:"):
-		// A token service may refuse an anonymous token for a repository
-		// that does not exist with 400, as ghcr.io does for a one-part
-		// name, or 404, 410, or 451: an answer about the name, like a 404.
+	case nameRefused(resp.StatusCode) && strings.HasPrefix(reqScope, "repository:"):
+		// A token service may refuse a token for a repository that does
+		// not exist with 400, as ghcr.io does for a one-part name, or
+		// 404, 410, or 451: an answer about the name, like a 404.
 		return "", &Error{Op: op, Status: resp.StatusCode, Err: fmt.Errorf("%w: the token service refused the repository", ErrNotFound)}
 	case resp.StatusCode != http.StatusOK:
 		return "", &Error{Op: op, Status: resp.StatusCode, Err: errors.New("the token service failed")}
