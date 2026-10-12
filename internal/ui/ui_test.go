@@ -213,8 +213,11 @@ func TestBrowsePages(t *testing.T) {
 	r.has(t, "tool-1.0.tar.gz", `<a href="/ui/repositories/files?dir=tools%2F">tools</a>`)
 	alice.expect("/ui/repositories/files?dir=missing/", http.StatusNotFound)
 	r = alice.expect("/ui/repositories/go-remote", http.StatusOK)
-	r.has(t, "Cached files", "go env -w GOPROXY="+e.srv.URL+"/go/go-remote", "machine 127.0.0.1\nlogin __token__")
-	r.lacks(t, "machine 127.0.0.1:")
+	// The go command looks .netrc up by host and port from Go 1.24 on, and
+	// by host alone before, so the snippet lists both.
+	port := strings.TrimPrefix(e.srv.URL, "http://127.0.0.1")
+	r.has(t, "Cached files", "go env -w GOPROXY="+e.srv.URL+"/go/go-remote", "machine 127.0.0.1\nlogin __token__",
+		"machine 127.0.0.1"+port+"\nlogin __token__")
 	// A view's failure is a server error, which does not leak the error.
 	r = alice.expect("/ui/repositories/broken", http.StatusInternalServerError)
 	r.lacks(t, errBroken.Error())

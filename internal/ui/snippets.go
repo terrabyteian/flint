@@ -105,7 +105,13 @@ func (h *Handler) repoSnippets(rq *request, rc *config.Repository) []snippet {
 			"\"\n                password = System.getenv(\"FLINT_TOKEN\")\n            }\n        }\n    }\n}")
 	case config.FormatGo:
 		add("Use with the go command", "", "go env -w GOPROXY="+strings.TrimSuffix(e.url, "/"))
-		add("Authenticate", ".netrc", "machine "+e.machine+"\nlogin __token__\npassword $FLINT_TOKEN")
+		netrc := "machine " + e.machine + "\nlogin __token__\npassword $FLINT_TOKEN"
+		if e.host != e.machine {
+			// Go 1.24 and later look the credentials up by host and port,
+			// earlier releases by host alone.
+			netrc = "machine " + e.host + "\nlogin __token__\npassword $FLINT_TOKEN\n\n" + netrc
+		}
+		add("Authenticate", ".netrc", netrc)
 	case config.FormatCargo:
 		cfg := "[registries." + rc.Name + "]\nindex = \"sparse+" + e.url + "\"\ncredential-provider = \"cargo:token\""
 		if rc.Type != config.TypeHosted {
