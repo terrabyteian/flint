@@ -85,7 +85,7 @@ The main ones:
 | `upstreamSecrets` | none | Secrets with proxy repositories' upstream passwords; see below. |
 | `oidcSecrets` | none | Secrets with OIDC providers' client secrets and CA certificates; see below. |
 | `googleSignIn.enabled`, `googleSignIn.clientId`, `googleSignIn.existingSecret` | `false`, none, none | Sign in with Google; see below. |
-| `googleSignIn.hostedDomains`, `googleSignIn.allowedEmails` | none | Restrict Google sign-in to Workspace domains or emails. |
+| `googleSignIn.hostedDomains`, `googleSignIn.allowedEmails`, `googleSignIn.allowAnyGoogleAccount` | none, none, `false` | Restrict Google sign-in to Workspace domains or emails, or let any Google account sign in; one is required. |
 | `persistence.enabled` | `true` | Keep data on a volume; disabled, it is an `emptyDir` lost with the pod. |
 | `persistence.size`, `persistence.storageClass` | `10Gi`, cluster default | The claim template. Kubernetes does not let a StatefulSet's claim template change after install: to grow the volume, resize the claim directly if its storage class allows it. |
 | `persistence.existingClaim` | none | Use this claim instead of the claim template. |
@@ -200,6 +200,7 @@ googleSignIn:
   hostedDomains: [example.com]
 ```
 
+Without `hostedDomains` or `allowedEmails`, the chart refuses to render unless `allowAnyGoogleAccount: true` lets any Google account sign in.
 The name `google` is then taken: do not also list a provider named `google` in `config.auth.oidc` or `oidcSecrets`.
 Google sends no groups, so give Google users their groups through the [admin API](auth.md#assigning-users-by-email).
 

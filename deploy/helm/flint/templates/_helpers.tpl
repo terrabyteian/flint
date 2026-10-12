@@ -95,6 +95,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and .enabled (or (not .clientId) (not .existingSecret)) }}
 {{- fail "googleSignIn.enabled needs googleSignIn.clientId and googleSignIn.existingSecret, a Secret holding the client secret" }}
 {{- end }}
+{{- if and .enabled (not .hostedDomains) (not .allowedEmails) (not .allowAnyGoogleAccount) }}
+{{- fail "googleSignIn.enabled needs googleSignIn.hostedDomains or googleSignIn.allowedEmails, or googleSignIn.allowAnyGoogleAccount to let any Google account sign in" }}
+{{- end }}
 {{- end }}
 {{- if .Values.googleSignIn.enabled }}
 {{- range .Values.oidcSecrets }}
@@ -129,6 +132,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- with .allowedEmails }}
 {{- $_ = set $google "allowedEmails" . }}
+{{- end }}
+{{- if .allowAnyGoogleAccount }}
+{{- $_ = set $google "allowAnyGoogleAccount" true }}
 {{- end }}
 {{- $auth := get $config "auth" | default dict }}
 {{- $_ = set $auth "oidc" (append (get $auth "oidc" | default list) $google) }}

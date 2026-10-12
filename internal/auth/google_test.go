@@ -15,7 +15,8 @@ import (
 
 // newGoogleEnv returns an env whose configuration has one provider of
 // type google, served by an in-test provider that mimics Google, and an
-// administrator, root. mod may change the provider's configuration
+// administrator, root. It lets any Google account sign in unless mod
+// sets hostedDomains or allowedEmails. mod may change the provider's configuration
 // before the service is created.
 func newGoogleEnv(t *testing.T, mod func(p map[string]any)) (*env, *idp) {
 	t.Helper()
@@ -25,9 +26,12 @@ func newGoogleEnv(t *testing.T, mod func(p map[string]any)) (*env, *idp) {
 	if err := os.WriteFile(secretFile, []byte(p.secret+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	prov := map[string]any{"type": "google", "clientId": p.clientID, "clientSecretFile": secretFile}
+	prov := map[string]any{"type": "google", "clientId": p.clientID, "clientSecretFile": secretFile, "allowAnyGoogleAccount": true}
 	if mod != nil {
 		mod(prov)
+	}
+	if prov["hostedDomains"] != nil || prov["allowedEmails"] != nil {
+		delete(prov, "allowAnyGoogleAccount")
 	}
 	var cfg map[string]any
 	if err := json.Unmarshal([]byte(testConfig), &cfg); err != nil {

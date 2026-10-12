@@ -94,6 +94,10 @@ type OIDCProvider struct {
 	// HostedDomains, for Google only, if set, admits only users of these
 	// Google Workspace domains, as the ID token's hd claim names them.
 	HostedDomains []string `json:"hostedDomains,omitempty"`
+	// AllowAnyGoogleAccount, for Google only, lets any Google account
+	// sign in. A provider of type google needs it, HostedDomains, or
+	// AllowedEmails, so an open sign-in is never configured by accident.
+	AllowAnyGoogleAccount bool `json:"allowAnyGoogleAccount,omitempty"`
 	// AllowedGroups, if set, admits only users in one of these groups at
 	// the provider.
 	AllowedGroups []string `json:"allowedGroups,omitempty"`
@@ -176,6 +180,9 @@ func (c *Config) validateSignIn(v *validator) {
 		case OIDCTypeGeneric:
 			if len(p.HostedDomains) > 0 {
 				v.addf(path+".hostedDomains", "is only for providers of type %q", OIDCTypeGoogle)
+			}
+			if p.AllowAnyGoogleAccount {
+				v.addf(path+".allowAnyGoogleAccount", "is only for providers of type %q", OIDCTypeGoogle)
 			}
 		case OIDCTypeGoogle:
 			validateGoogle(v, path, p)
@@ -267,6 +274,14 @@ func validateGoogle(v *validator, path string, p *OIDCProvider) {
 	}
 	if !slices.Contains(p.Scopes, "email") {
 		v.addf(path+".scopes", "must include \"email\" for type %q: only users with a verified email may sign in", OIDCTypeGoogle)
+	}
+	restricted := len(p.HostedDomains) > 0 || len(p.AllowedEmails) > 0
+	switch {
+	case !restricted && !p.AllowAnyGoogleAccount:
+		v.addf(path, "type %q needs hostedDomains or allowedEmails to restrict who may sign in, "+
+			"or allowAnyGoogleAccount: true to let any Google account sign in", OIDCTypeGoogle)
+	case restricted && p.AllowAnyGoogleAccount:
+		v.addf(path+".allowAnyGoogleAccount", "contradicts hostedDomains and allowedEmails; set one or the other")
 	}
 	if p.ClientSecretFile == "" {
 		v.addf(path+".clientSecretFile", "is required for type %q: Google web clients have a secret", OIDCTypeGoogle)

@@ -251,7 +251,17 @@ func TestValidation(t *testing.T) {
 		{"google minimal", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x.apps.googleusercontent.com",
 			"clientSecretFile": "/s", "hostedDomains": ["example.com"], "allowedEmails": ["bob@gmail.com"]}]}}`, nil},
 		{"google explicit issuer", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "name": "corp-google",
-			"issuer": "https://accounts.google.com", "clientId": "x", "clientSecretFile": "/s"}]}}`, nil},
+			"issuer": "https://accounts.google.com", "clientId": "x", "clientSecretFile": "/s", "allowAnyGoogleAccount": true}]}}`, nil},
+		{"google allowed emails only", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x", "clientSecretFile": "/s",
+			"allowedEmails": ["bob@gmail.com"]}]}}`, nil},
+		{"google unrestricted", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x", "clientSecretFile": "/s"}]}}`,
+			[]string{`auth.oidc[0]: type "google" needs hostedDomains or allowedEmails to restrict who may sign in, or allowAnyGoogleAccount: true`}},
+		{"google any account and restricted", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x", "clientSecretFile": "/s",
+			"hostedDomains": ["example.com"], "allowAnyGoogleAccount": true}]}}`,
+			[]string{"auth.oidc[0].allowAnyGoogleAccount: contradicts hostedDomains and allowedEmails"}},
+		{"oidc any google account", `{"dataDir": "/d", "auth": {"oidc": [{"name": "c", "issuer": "https://idp.example", "clientId": "c",
+			"allowAnyGoogleAccount": true}]}}`,
+			[]string{`auth.oidc[0].allowAnyGoogleAccount: is only for providers of type "google"`}},
 		{"google invalid", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "issuer": "https://accounts.google.com/", "clientId": "x",
 			"scopes": ["openid"], "groupsClaim": "groups", "allowedGroups": ["a"], "groupMappings": {"a": ["b"]}, "importGroups": true,
 			"adminGroups": ["a"], "hostedDomains": ["Example.com"], "allowedEmails": ["Bob@gmail.com", "bob"]}]}}`,
@@ -831,7 +841,7 @@ func TestNPMMergeBytes(t *testing.T) {
 
 func TestGoogleDefaults(t *testing.T) {
 	c, err := Parse([]byte(`{"dataDir": "/d", "auth": {"oidc": [
-		{"type": "google", "clientId": "x.apps.googleusercontent.com", "clientSecretFile": "/s"},
+		{"type": "google", "clientId": "x.apps.googleusercontent.com", "clientSecretFile": "/s", "allowAnyGoogleAccount": true},
 		{"name": "corp", "issuer": "https://idp.example", "clientId": "c"}]}}`))
 	if err != nil {
 		t.Fatal(err)

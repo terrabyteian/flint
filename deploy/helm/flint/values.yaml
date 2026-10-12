@@ -223,6 +223,10 @@ googleSignIn:
   # If set, these verified emails may sign in too (or only these, without
   # hostedDomains).
   allowedEmails: []
+  # Without hostedDomains or allowedEmails, any Google account may sign in
+  # only if this is true; it has no permissions beyond anonymous pulls until
+  # it is given groups.
+  allowAnyGoogleAccount: false
 
 # The first administrator, which flint creates at startup while no
 # administrator exists (docs/auth.md). Its password is the key "password" of

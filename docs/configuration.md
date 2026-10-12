@@ -462,7 +462,8 @@ Google is built in as `"type": "google"`; see [Google](#google).
 | `usernameClaim` | string | `"email"` | The ID token claim that a new user's flint name is made from, lowercased. With `email`, the provider must say the email is verified (`email_verified`). |
 | `groupsClaim` | string | `"groups"` | The ID token claim that lists the user's groups at the provider: an array of strings, or one string. |
 | `allowedDomains` | array of strings | `[]` | If set, only users with a verified email in one of these lowercase domains may sign in. |
-| `allowedEmails` | array of strings | `[]` | If set, users with one of these verified lowercase emails may sign in. With `allowedDomains` or `hostedDomains`, a user who matches any of the three may sign in; alone, only these users may. |
+| `allowedEmails` | array of strings | `[]` | If set, users with one of these verified lowercase emails may sign in. With `allowedDomains` or `hostedDomains`, a user who matches any of the three may sign in; alone, only these users may. It works for every provider type, not only Google. |
+| `allowAnyGoogleAccount` | boolean | `false` | Google only. Lets any Google account sign in; required, as an explicit choice, when neither `hostedDomains` nor `allowedEmails` is set, and refused with them. |
 | `hostedDomains` | array of strings | `[]` | Google only. If set, only users of these Google Workspace domains, as the ID token's `hd` claim names them, may sign in (and those `allowedEmails` admits). With a single domain, Google's account chooser offers only accounts of that domain. |
 | `allowedGroups` | array of strings | `[]` | If set, only users in one of these groups at the provider may sign in. |
 | `groupMappings` | object | `{}` | Maps a group at the provider to an array of flint groups its members belong to, such as `{"engineering": ["ci", "team-a"]}`. Grants in [permissions](#permissions) name the flint groups. |
@@ -492,7 +493,9 @@ Google sign-in needs only an OAuth client:
 The provider is named `google`, so its callback is `/auth/oidc/google/callback`, and the sign-in page shows "Sign in with Google".
 `clientSecretFile` is required, and `scopes`, if set, must include `email`: only users whose email Google says is verified may sign in.
 Google's ID tokens carry no groups, so `groupsClaim`, `groupMappings`, `importGroups`, `allowedGroups`, and `adminGroups` are refused; the groups and the admin flag of Google users are managed in flint, as described in [Google sign-in](auth.md#google-sign-in).
-Without `hostedDomains` or `allowedEmails`, anyone with a Google account can sign in and becomes a flint user, though with no groups and so only the permissions grants give that user by name, so set one of them unless the OAuth client itself is limited to your organization (an internal consent screen).
+A Google provider must say who may sign in: `hostedDomains`, `allowedEmails`, or both, or else `"allowAnyGoogleAccount": true`, without which flint refuses the configuration.
+`allowAnyGoogleAccount` lets any Google account sign in and become a flint user; such a user has no groups, and so no permissions beyond anonymous pulls, until an administrator gives it groups (or a grant names it).
+It suits an OAuth client whose consent screen is internal to your Workspace organization, which Google itself restricts, or a deliberately open instance.
 
 To create the OAuth client, in the [Google Cloud console](https://console.cloud.google.com/apis/credentials):
 

@@ -83,6 +83,7 @@ Google is built in: a provider of `"type": "google"` in [`auth.oidc`](configurat
 
 Google signs in only users whose email it says is verified, and the user's flint name is that email, lowercased.
 `hostedDomains` admits only accounts of your Google Workspace domains, by the ID token's `hd` claim, and `allowedEmails` admits individual accounts, such as a contractor's Gmail address, alongside them or alone.
+One of them must be set, or else `allowAnyGoogleAccount: true`, which lets any Google account sign in: such a user has no permissions beyond anonymous pulls until it is given groups.
 flint accepts Google's ID tokens with the issuer `https://accounts.google.com` or, as Google sometimes sends it, `accounts.google.com`.
 
 Google's ID tokens carry no groups, so the groups and the `admin` flag of a user who signs in through Google are flint's own: they start empty, are set through the [admin API](#users) (`PATCH /api/v1/users/{name}` and the [group endpoints](#groups)), and are kept at every sign-in.
@@ -102,6 +103,7 @@ curl -u admin https://registry.example/api/v1/users -d '{
 ```
 
 The first sign-in through that provider whose email is verified and equal to the assigned one, compared lowercased, signs in as that user instead of creating one, and links the user to the identity's issuer and subject; from then on the user is matched by them like any other, and the email no longer matters.
+Assignment works with every provider, not only Google, as `allowedEmails` does.
 An email can be assigned to one user per provider issuer, and a user assigned an email has no password.
 Assignment applies only to an identity's first sign-in: an identity that already signed in has its user, which an administrator deletes first to assign the email anew.
 With a provider that syncs groups, the linked user's groups are replaced by the provider's at sign-in as usual; with Google, they are kept.
