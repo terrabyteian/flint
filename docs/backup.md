@@ -142,7 +142,7 @@ A backup holds:
 It does not hold:
 
 - **The configuration file and the files it names**: TLS certificates and keys, the bootstrap administrator's password file, and proxy repositories' upstream credentials. Keep them where you keep the rest of your deployment's configuration and secrets, such as the Helm values and Kubernetes Secrets.
-- **The signing keys** (`auth/token-signing.key` and `auth/url-signing.key`). flint generates new ones when it first starts on a restored data directory, so a backup never contains private key material. The only effect is that bearer tokens issued before the restore, which live five minutes, and [signed download URLs](auth.md#signed-download-urls), which live ten minutes by default, stop working; clients fetch new ones. Users, passwords, and API tokens are in the metadata and work as before.
+- **The keys** (`auth/token-signing.key`, `auth/url-signing.key`, and `auth/oidc-state.key`). flint generates new ones when it first starts on a restored data directory, so a backup never contains private key material. The only effect is that bearer tokens issued before the restore, which live five minutes, [signed download URLs](auth.md#signed-download-urls), which live ten minutes by default, and [OIDC sign-ins](auth.md#oidc-sign-in) in progress stop working; clients fetch new ones, and users sign in again. Users, passwords, and API tokens are in the metadata and work as before.
 - **Uploads in progress.** Clients restart them.
 - **The history of the metadata log**: a backup holds the state, not the log of changes that led to it.
 

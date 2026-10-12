@@ -44,8 +44,9 @@ const (
 // urlKeyFileName is the URL-signing key's file in the key directory.
 const urlKeyFileName = "url-signing.key"
 
-// urlKeyLen is the URL-signing key's length in bytes.
-const urlKeyLen = 32
+// secretKeyLen is the length in bytes of the URL-signing key and the
+// OIDC state key.
+const secretKeyLen = 32
 
 // Errors of VerifySignedURL.
 var (
@@ -166,30 +167,30 @@ func (s *Service) checkSignedURL(path string, q url.Values) (*Principal, error) 
 	return anonymous, nil
 }
 
-// loadOrCreateURLKey reads the URL-signing key from dir, or generates one
-// and stores it durably if there is none yet. The file holds the key in
-// hexadecimal.
-func loadOrCreateURLKey(fsy fsys.FS, dir string) ([]byte, bool, error) {
-	path := filepath.Join(dir, urlKeyFileName)
+// loadOrCreateSecretKey reads the secret key in file in dir, or
+// generates one and stores it durably if there is none yet. The file
+// holds the key in hexadecimal.
+func loadOrCreateSecretKey(fsy fsys.FS, dir, file string) ([]byte, bool, error) {
+	path := filepath.Join(dir, file)
 	if f, err := fsy.Open(path); err == nil {
 		b, err := io.ReadAll(f)
 		f.Close()
 		if err != nil {
-			return nil, false, fmt.Errorf("auth: reading the URL-signing key: %w", err)
+			return nil, false, fmt.Errorf("auth: reading %s: %w", path, err)
 		}
 		key, err := hex.DecodeString(string(bytes.TrimSpace(b)))
-		if err != nil || len(key) != urlKeyLen {
-			return nil, false, fmt.Errorf("auth: %s: not a %d-byte key in hexadecimal", path, urlKeyLen)
+		if err != nil || len(key) != secretKeyLen {
+			return nil, false, fmt.Errorf("auth: %s: not a %d-byte key in hexadecimal", path, secretKeyLen)
 		}
 		return key, false, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, false, fmt.Errorf("auth: opening the URL-signing key: %w", err)
+		return nil, false, fmt.Errorf("auth: opening %s: %w", path, err)
 	}
 
-	key := make([]byte, urlKeyLen)
+	key := make([]byte, secretKeyLen)
 	rand.Read(key)
 	if err := writeFileDurably(fsy, path, []byte(hex.EncodeToString(key)+"\n")); err != nil {
-		return nil, false, fmt.Errorf("auth: storing the URL-signing key: %w", err)
+		return nil, false, fmt.Errorf("auth: storing %s: %w", path, err)
 	}
 	return key, true, nil
 }

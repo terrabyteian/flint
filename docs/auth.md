@@ -51,11 +51,13 @@ Starting and ending a session are recorded in the audit log as `auth.session.cre
 Each provider configured in [`auth.oidc`](configuration.md#oidc-providers) gets a "Sign in with" button on the sign-in page.
 flint uses the authorization code flow with PKCE (`S256`), a state, and a nonce, and verifies the ID token itself: its signature, with a key from the provider's published key set and an algorithm from the allowed list (never `none` or an HMAC algorithm), and its issuer, audience, authorized party, expiry, issue time, not-before time, and nonce, allowing one minute of clock difference.
 The provider's discovery document and keys are cached for an hour; a token signed with a key flint has not seen makes it fetch the keys again, at most every 30 seconds, so the provider can rotate its keys.
-A sign-in in progress is bound to the browser that started it by a short-lived cookie, works once, and expires after 10 minutes.
+A sign-in in progress is held only in a short-lived cookie in the browser that started it, so it is bound to that browser; it works once, since the callback clears the cookie, and expires after 10 minutes. flint keeps no state for it.
+The cookie holds the sign-in's nonce, PKCE verifier, return path, and expiry, sealed with AES-256-GCM under a key generated on first start with a provider and kept in `<dataDir>/auth/oidc-state.key`, readable only by flint's user, so it can be neither read nor changed, and it opens only at the callback of the provider and state it was made for.
+Sign-ins in progress survive a restart; deleting the key file invalidates them at the next start, and their users sign in again.
 
 **Users.** A user who signs in through a provider is identified by the provider's issuer and the user's subject (`sub`), never by email or name.
 On the first sign-in, flint creates the user, named after the provider's `usernameClaim` (by default the verified email), lowercased.
-If a user of that name already exists, local or from another identity, the sign-in is refused rather than take it over; an administrator resolves the conflict, for example by deleting or renaming the other user.
+If a user of that name already exists, local or from another identity, the sign-in is refused rather than take it over; an administrator resolves the conflict, for example by deleting the other user.
 Later sign-ins find the user by issuer and subject, so a changed email or name at the provider does not change the flint user.
 Users from a provider have no password and cannot be given one, and password sign-in never works for them; local users never sign in through a provider.
 Deleting such a user deletes its tokens and sessions, and the identity's next sign-in creates the user anew.
@@ -267,7 +269,7 @@ Request bodies are strict JSON: unknown fields are errors.
 | `POST /api/v1/users` | admin, signed in | Create a user. |
 | `GET /api/v1/users/{name}` | admin, or the user | Show a user. |
 | `PATCH /api/v1/users/{name}` | admin, signed in | Set the `admin` flag or the groups. |
-| `DELETE /api/v1/users/{name}` | admin | Delete a user and the user's tokens. |
+| `DELETE /api/v1/users/{name}` | admin | Delete a user and the user's tokens, sessions, and OIDC link. |
 | `PUT /api/v1/users/{name}/password` | admin or the user, signed in | Set a password. |
 | `GET /api/v1/groups` | admin | List groups and their members. |
 | `PUT /api/v1/groups/{group}/members/{name}` | admin, signed in | Add a user to a group. |

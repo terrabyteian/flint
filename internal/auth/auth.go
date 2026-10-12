@@ -113,8 +113,8 @@ const bearerTTL = 5 * time.Minute
 type Options struct {
 	// Store holds users and tokens. Required.
 	Store meta.Store
-	// KeyDir is the directory of the token-signing and URL-signing keys,
-	// normally <data>/auth. Required.
+	// KeyDir is the directory of the token-signing, URL-signing, and OIDC
+	// state keys, normally <data>/auth. Required.
 	KeyDir string
 	// FS is the filesystem of KeyDir; nil means fsys.OS.
 	FS fsys.FS
@@ -166,8 +166,9 @@ type Service struct {
 	issued   *metrics.CounterSeries
 }
 
-// New returns a Service, loading the token-signing and URL-signing keys
-// from KeyDir or generating and storing them on first start.
+// New returns a Service, loading the token-signing and URL-signing keys,
+// and with OIDC providers the OIDC state key, from KeyDir or generating
+// and storing them on first start.
 func New(opts Options) (*Service, error) {
 	if opts.Store == nil || opts.KeyDir == "" {
 		return nil, errors.New("auth: Options.Store and Options.KeyDir are required")
@@ -213,12 +214,19 @@ func New(opts Options) (*Service, error) {
 		s.sessionTTL = opts.Config.Auth.SessionTTL.Duration
 	}
 	if opts.Config != nil && len(opts.Config.Auth.OIDC) > 0 {
-		if s.oidc, err = newOIDCService(opts.Config.Auth.OIDC, opts.OIDCTransport, s.now, s.log); err != nil {
+		stateKey, stateKeyCreated, err := loadOrCreateSecretKey(opts.FS, opts.KeyDir, oidcStateKeyFileName)
+		if err != nil {
+			return nil, err
+		}
+		if stateKeyCreated {
+			s.log.Info("generated the OIDC state key", "path", filepath.Join(opts.KeyDir, oidcStateKeyFileName))
+		}
+		if s.oidc, err = newOIDCService(opts.Config.Auth.OIDC, stateKey, opts.OIDCTransport, s.now, s.log); err != nil {
 			return nil, err
 		}
 	}
 	var urlKeyCreated bool
-	if s.urlKey, urlKeyCreated, err = loadOrCreateURLKey(opts.FS, opts.KeyDir); err != nil {
+	if s.urlKey, urlKeyCreated, err = loadOrCreateSecretKey(opts.FS, opts.KeyDir, urlKeyFileName); err != nil {
 		return nil, err
 	}
 	if urlKeyCreated {
