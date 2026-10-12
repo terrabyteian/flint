@@ -22,7 +22,7 @@
     <tbody>
     {{- range $d.Tags}}
     <tr>
-      <td><a class="tagname" href="{{.Href}}">{{icon "tag"}}{{.Name}}</a></td>
+      <td><a class="tagname{{if .Artifact}} artifact{{end}}" href="{{.Href}}">{{icon "tag"}}{{.Name}}</a></td>
       <td>{{template "digest" .Digest}}</td>
       <td>{{if .Platforms}}<span class="plats">{{range .Platforms}}<span class="plat">{{.}}</span>{{end}}</span>{{end}}</td>
       <td>{{if .Proofs}}<span class="proofs">{{range .Proofs}}{{template "proof" .}}{{end}}</span>{{end}}</td>

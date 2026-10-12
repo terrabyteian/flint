@@ -267,14 +267,13 @@ td.mono-cell { font-family: var(--mono); font-size: 0.8125rem; }
 td a.strong, td a.tagname { font-weight: 550; }
 tr.expired td { color: var(--faint); }
 tr.expired .tok-name { text-decoration: line-through; text-decoration-color: var(--border-strong); }
-.tagname { display: inline-flex; align-items: center; gap: 0.35rem; font-family: var(--mono); font-size: 0.85rem; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.tagname { display: inline-flex; align-items: center; gap: 0.35rem; font-family: var(--mono); font-size: 0.85rem; color: var(--text); white-space: nowrap; }
+.tagname.artifact { white-space: normal; overflow-wrap: anywhere; }
 .tagname .icon { color: var(--faint); }
 .digest-wrap { display: inline-flex; align-items: center; gap: 0.2rem; white-space: nowrap; }
 code.digest { color: var(--muted); white-space: nowrap; }
 h1 code.digest { color: var(--text); font-size: 0.8em; }
 .plats, .proofs { display: inline-flex; flex-wrap: wrap; gap: 0.3rem; }
-.tags-table td:first-child { min-width: 8.5rem; }
-.tags-table td:nth-child(3) { min-width: 12rem; }
 .tags-table .proofs { flex-direction: column; align-items: flex-start; gap: 0.15rem; }
 .plat { font: 500 0.75rem/1 var(--mono); padding: 0.25rem 0.4rem; border-radius: 4px; background: var(--surface-2); color: var(--muted); white-space: nowrap; }
 .proof { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.75rem; font-weight: 600; color: var(--muted); white-space: nowrap; }

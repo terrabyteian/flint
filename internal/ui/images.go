@@ -119,7 +119,10 @@ type tagRow struct {
 	browse.ImageTag
 	Href string
 	// Index reports whether the tag names an index.
-	Index     bool
+	Index bool
+	// Artifact reports whether the tag is a cosign tag-scheme artifact's,
+	// sha256-<hex>.sig, .att, or .sbom.
+	Artifact  bool
 	Platforms []string
 	// Proofs are the kinds of the manifest's referrers and of its
 	// cosign tag-scheme artifacts, such as "signature" and "SBOM", each
@@ -264,7 +267,8 @@ func groupImage(img *browse.ImageDetail, href func(digest string) string) ([]tag
 	var tags []tagRow
 	tagged := map[string]bool{}
 	for _, t := range img.Tags {
-		tr := tagRow{ImageTag: t, Href: href(t.Digest), Proofs: proofs[t.Digest]}
+		_, _, artifact := schemeTag(t.Name)
+		tr := tagRow{ImageTag: t, Href: href(t.Digest), Artifact: artifact, Proofs: proofs[t.Digest]}
 		if m := byDigest[t.Digest]; m != nil {
 			tr.Index, tr.Pushed = m.Index, m.Pushed
 			for _, c := range m.Children {
@@ -274,7 +278,7 @@ func groupImage(img *browse.ImageDetail, href func(digest string) string) ([]tag
 			}
 		}
 		tags = append(tags, tr)
-		if _, _, artifact := schemeTag(t.Name); !artifact && !tagged[t.Digest] {
+		if !artifact && !tagged[t.Digest] {
 			tagged[t.Digest] = true
 			st.Tagged++
 			if slices.Contains(tr.Proofs, kindSignature) {

@@ -183,6 +183,12 @@ func TestGroupImageCosignTags(t *testing.T) {
 			t.Errorf("tag %s proofs %v", tr.Name, tr.Proofs)
 		}
 	}
+	// Only the artifact tags are marked, so only their long names wrap.
+	for i, tr := range tags {
+		if want := i >= 3; tr.Artifact != want {
+			t.Errorf("tag %s artifact %v, want %v", tr.Name, tr.Artifact, want)
+		}
+	}
 	// The artifact tags are listed but are not releases.
 	if st.Tags != 7 || st.Tagged != 2 || st.Signed != 1 {
 		t.Errorf("stats %+v", st)
