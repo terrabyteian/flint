@@ -34,11 +34,12 @@ The audit trail of the metadata store records who changed which user or token, n
 Browsers sign in on the sign-in page at `/auth/login`, with a user name and password or through an [OIDC provider](#oidc-sign-in), and get a sign-in session.
 The session is a cookie, `flint_session`, holding a random secret of which flint stores only the SHA-256 hash; it is `HttpOnly`, `SameSite=Lax`, and `Secure` when the browser reached flint over HTTPS.
 It lasts `auth.sessionTTL` (default 12 hours; see [configuration](configuration.md#fields)), and signing out (`POST /auth/logout`) ends it at once, as deleting the user does.
+Setting a user's password, on the [web UI](ui.md#your-account)'s account page or through the [admin API](#users), ends the user's sessions, except the one that set it: changing your own password signs out your other browsers, and an administrator setting another user's password signs that user out everywhere.
 A user keeps at most 50 sessions; signing in again beyond that ends the oldest.
 
-A session authenticates the [admin API](#admin-api) and the UI, never the registry or package endpoints: Docker, PyPI, npm, and every other package client use [API tokens](#api-tokens).
+A session authenticates the [admin API](#admin-api) and the [web UI](ui.md), never the registry or package endpoints: Docker, PyPI, npm, and every other package client use [API tokens](#api-tokens).
 A session counts as having signed in, as a password does, so a signed-in user can create API tokens for package clients, which is how a user who signs in only through an OIDC provider gets one.
-The sign-in page itself, until the UI serves its own pages, shows who is signed in and creates API tokens.
+Once signed in, the sign-in page shows who is signed in and can create an API token; the [web UI](ui.md)'s account page lists, creates, and revokes them.
 
 A request with a session that changes anything must come from flint's own pages: a browser request from another origin, as the `Sec-Fetch-Site` or `Origin` header shows, gets `403`.
 Requests that are not from a browser carry neither header and are not affected, but they do not have the cookie unless given it.
@@ -147,10 +148,10 @@ Tokens from the Docker token endpoint are not accepted.
 ## Cargo clients
 
 Cargo sends an API token as the `Authorization` header as it is, which flint accepts, with or without a `Bearer` scheme.
-A request without valid credentials that needs them gets `401` with `WWW-Authenticate: Cargo login_url="..."`, naming flint's [public URL](configuration.md#public-url), or else the scheme and host the client used; one whose credentials lack the permission gets `403`.
+A request without valid credentials that needs them gets `401` with `WWW-Authenticate: Cargo login_url="..."`, naming the [web UI](ui.md#your-account)'s account page under flint's [public URL](configuration.md#public-url), or else the scheme and host the client used; one whose credentials lack the permission gets `403`.
 Errors carry Cargo's `{"errors": [{"detail": "..."}]}`, whose detail Cargo shows.
 A repository's `config.json` says `"auth-required": true` unless it has `anonymousPull`, which makes Cargo send its token with every request, not only to publish; that needs Cargo 1.74 or later, with `credential-provider = "cargo:token"`.
-`cargo login` only stores a token Cargo is given, so create one with the [admin API](#tokens) first.
+`cargo login` only stores a token Cargo is given, so create one first, on the [web UI](ui.md#your-account)'s account page, which `cargo login` points to, or with the [admin API](#api-tokens).
 Crates have no owners in flint: `cargo owner` fails, and who may publish, yank, and delete is decided by permission grants.
 [Cargo](cargo.md#configuring-cargo) shows how to configure it.
 
@@ -322,7 +323,7 @@ The response, here `201 Created`, and every other user response has this form:
 `password` reports whether password login is enabled.
 A user who signs in through an [OIDC provider](#oidc-sign-in) also has `"oidc": {"provider": "corp", "issuer": "https://sso.example.com/realms/corp", "subject": "..."}`, the identity it signs in with.
 `PATCH /api/v1/users/{name}` takes `{"admin": true}`, `{"groups": ["ci"]}`, or both; a field left out is unchanged.
-`PUT /api/v1/users/{name}/password` takes `{"password": "..."}` and returns `204`.
+`PUT /api/v1/users/{name}/password` takes `{"password": "..."}` and returns `204`; it ends the user's [sign-in sessions](#signing-in), except the one of the request that set it.
 
 ### Groups
 

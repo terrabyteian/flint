@@ -1,0 +1,44 @@
+{{define "content"}}
+{{$d := .Data}}{{$p := $d.Package}}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <span aria-current="page">{{$p.Name}}</span></nav>
+<div class="head">
+  <h1>{{$p.Name}}</h1>
+  <span class="badges">{{template "badges" $d.RepoRow}}</span>
+</div>
+{{- if $p.Summary}}<p class="detail">{{$p.Summary}}</p>{{end}}
+<div class="split">
+<section class="contents">
+  {{- if $p.Tags}}
+  <h2>Tags</h2>
+  <ul class="tags">
+    {{- range $p.Tags}}
+    <li><span class="badge tag">{{.Name}}</span> {{.Version}}</li>
+    {{- end}}
+  </ul>
+  {{- end}}
+  <h2>Versions</h2>
+  {{- range $p.Versions}}
+  <article class="version card" id="v-{{.Version}}">
+    <header>
+      <h3>{{if .Version}}{{.Version}}{{else}}Unknown version{{end}}</h3>
+      {{- range .Notes}} <span class="badge note">{{.}}</span>{{end}}
+      {{- if not .Published.IsZero}}<span class="when">{{when .Published}}</span>{{end}}
+    </header>
+    {{- if .Files}}
+    <table>
+      <thead><tr><th scope="col">File</th><th scope="col" class="num">Size</th><th scope="col">Digest</th></tr></thead>
+      <tbody>
+      {{- range .Files}}
+      <tr><td>{{if .URL}}<a href="{{$.Base}}{{.URL}}">{{.Name}}</a>{{else}}{{.Name}}{{end}}</td><td class="num">{{size .Size}}</td><td>{{template "digest" .Digest}}</td></tr>
+      {{- end}}
+      </tbody>
+    </table>
+    {{- end}}
+  </article>
+  {{- end}}
+</section>
+<aside>
+{{template "snippets" $}}
+</aside>
+</div>
+{{end}}

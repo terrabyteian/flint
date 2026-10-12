@@ -190,5 +190,5 @@ The highest version is the highest that is neither yanked nor a pre-release, if 
 
 - The git index protocol: flint serves only the sparse protocol, which Cargo has used for crates.io by default since 1.70.
 - Crate owners: `cargo owner` fails with a message naming flint's [permission grants](auth.md#permissions), which decide who may publish, yank, and delete.
-- Asymmetric tokens (`cargo:paseto`) and the `/me` page that `cargo login` suggests, which comes with flint's UI.
+- Asymmetric tokens (`cargo:paseto`). `cargo login` points to the [web UI](ui.md#your-account)'s account page, where you create a token to paste.
 - Download counts, and the web API beyond publishing, yanking, downloading, and search.

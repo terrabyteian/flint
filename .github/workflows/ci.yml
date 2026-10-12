@@ -670,6 +670,60 @@ jobs:
           cat "$RUNNER_TEMP/flint.log"
           docker logs dex
 
+  ui:
+    name: Web UI end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "docker-local", "format": "oci", "type": "hosted"},
+              {"name": "pypi-local", "format": "pypi", "type": "hosted"},
+              {"name": "public", "format": "oci", "type": "hosted", "anonymousPull": true}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [
+                {"repositories": ["docker-local", "pypi-local"], "role": "write", "groups": ["ci"]}
+              ]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Create a CI user
+        run: |
+          bot_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bot_password"
+          echo "E2E_PASSWORD=$bot_password" >>"$GITHUB_ENV"
+          curl -fsS -u "admin:$ADMIN_PASSWORD" http://127.0.0.1:5000/api/v1/users \
+            -d "{\"name\": \"ci-bot\", \"password\": \"$bot_password\", \"groups\": [\"ci\"]}"
+      - name: Sign in, browse, and manage tokens with curl
+        env:
+          E2E_USERNAME: ci-bot
+        run: scripts/e2e-ui.sh 127.0.0.1:5000 docker-local pypi-local public
+      - name: Show the flint log
+        if: always()
+        run: cat "$RUNNER_TEMP/flint.log"
+
   cargo:
     name: Cargo end to end
     runs-on: ubuntu-latest

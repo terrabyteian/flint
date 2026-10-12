@@ -1,0 +1,46 @@
+{{define "content"}}
+{{$d := .Data}}{{$img := $d.Image}}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <span aria-current="page">{{$img.Name}}</span></nav>
+<div class="head">
+  <h1>{{$d.Name}}/{{$img.Name}}</h1>
+  <span class="badges">{{template "badges" $d.RepoRow}}</span>
+</div>
+<div class="split">
+<section class="contents">
+  <h2>Tags</h2>
+  {{- if $d.Tags}}
+  <table>
+    <thead><tr><th scope="col">Tag</th><th scope="col">Manifest</th></tr></thead>
+    <tbody>
+    {{- range $d.Tags}}
+    <tr><td><a href="{{.Href}}">{{.Name}}</a></td><td>{{template "digest" .Digest}}</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+  {{- else}}<p class="empty">No tags.</p>{{end}}
+  <h2>Manifests</h2>
+  <table>
+    <thead><tr><th scope="col">Digest</th><th scope="col">Kind</th><th scope="col" class="num">Size</th><th scope="col">Tags</th><th scope="col">Pushed</th></tr></thead>
+    <tbody>
+    {{- range $d.Manifests}}
+    <tr>
+      <td><a href="{{.Href}}"><code title="{{.Digest}}">{{short .Digest}}</code></a></td>
+      <td>{{template "kind" .}}</td>
+      <td class="num">{{size .Size}}</td>
+      <td>{{join .Tags ", "}}</td>
+      <td>{{when .Pushed}}</td>
+    </tr>
+    {{- end}}
+    </tbody>
+  </table>
+</section>
+<aside>
+{{template "snippets" $}}
+</aside>
+</div>
+{{end}}
+
+{{define "kind" -}}
+{{if .Index}}<span class="badge index">index</span>{{else if .Subject}}<span class="badge referrer">referrer</span>{{else}}<span class="badge image">manifest</span>{{end}}
+{{- if .ArtifactType}} <span class="sub mono">{{.ArtifactType}}</span>{{end}}
+{{- end}}

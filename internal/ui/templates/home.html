@@ -1,0 +1,28 @@
+{{define "content"}}
+<div class="head">
+  <h1>Repositories</h1>
+  <form method="get" action="{{$.Base}}/ui/" class="filter" role="search">
+    <label for="q" class="visually-hidden">Filter repositories</label>
+    <input id="q" name="q" type="search" placeholder="Filter by name, format, or type" value="{{.Data.Filter}}">
+    <button type="submit">Filter</button>
+  </form>
+</div>
+{{- if .Data.Repos}}
+<ul class="repos">
+  {{- range .Data.Repos}}
+  <li class="card">
+    <a class="name" href="{{.Href}}">{{.Name}}</a>
+    <span class="badges">{{template "badges" .}}</span>
+    {{- if .Detail}}<p class="detail">{{.Detail}}</p>{{end}}
+  </li>
+  {{- end}}
+</ul>
+{{- else if .Data.Filter}}
+<p class="empty">No repository matches “{{.Data.Filter}}”.</p>
+{{- else}}
+<p class="empty">There are no repositories you can see.</p>
+{{- end}}
+{{- if .Data.Hidden}}
+<p class="hint"><a href="{{.SignIn}}">Sign in</a> to see the repositories that need it.</p>
+{{- end}}
+{{end}}

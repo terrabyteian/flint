@@ -1,0 +1,66 @@
+{{define "layout" -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
+<title>{{.Title}} · flint</title>
+<link rel="icon" href="{{$.Base}}/ui/static/favicon.svg?v={{.AssetVer}}" type="image/svg+xml">
+<link rel="stylesheet" href="{{$.Base}}/ui/static/style.css?v={{.AssetVer}}">
+<script src="{{$.Base}}/ui/static/app.js?v={{.AssetVer}}"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <nav class="bar" aria-label="Main">
+    <a class="brand" href="{{$.Base}}/ui/"><img src="{{$.Base}}/ui/static/favicon.svg?v={{.AssetVer}}" alt="" width="22" height="22"> flint</a>
+    <a href="{{$.Base}}/ui/"{{if eq .Nav "repos"}} aria-current="page"{{end}}>Repositories</a>
+    <span class="spacer"></span>
+    {{- if .User}}
+    {{- if .User.Admin}}
+    <a href="{{$.Base}}/ui/admin"{{if eq .Nav "admin"}} aria-current="page"{{end}}>Status</a>
+    {{- end}}
+    <a href="{{$.Base}}/ui/account"{{if eq .Nav "account"}} aria-current="page"{{end}} title="Account">{{.User.User}}</a>
+    <form method="post" action="{{.SignOut}}" class="inline">
+      <input type="hidden" name="return" value="{{$.Base}}/ui/">
+      <button type="submit" class="link">Sign out</button>
+    </form>
+    {{- else}}
+    <a href="{{.SignIn}}">Sign in</a>
+    {{- end}}
+  </nav>
+</header>
+<main id="main" tabindex="-1">
+{{template "content" .}}
+</main>
+<footer class="foot">flint {{.Version}}</footer>
+</body>
+</html>
+{{- end}}
+
+{{define "badges" -}}
+<span class="badge fmt fmt-{{.Key}}">{{.Format}}</span>
+<span class="badge type type-{{.Type}}">{{.Type}}</span>
+{{- if .Anonymous}} <span class="badge public" title="Anyone may pull, without signing in">public</span>{{end}}
+{{- end}}
+
+{{define "snippets" -}}
+{{if .Data.Snippets}}
+<section class="snippets" aria-labelledby="setup-heading">
+  <h2 id="setup-heading">Client setup</h2>
+  {{- range $i, $s := .Data.Snippets}}
+  <details{{if eq $i 0}} open{{end}}>
+    <summary>{{$s.Title}}{{if $s.File}} <code class="file">{{$s.File}}</code>{{end}}</summary>
+    <div class="code"><pre><code>{{$s.Text}}</code></pre><button type="button" class="copy" data-copy hidden>Copy</button></div>
+  </details>
+  {{- end}}
+  <p class="hint">Create an API token for <code>$FLINT_TOKEN</code> on your <a href="{{$.Base}}/ui/account#tokens">account page</a>.</p>
+</section>
+{{end}}
+{{- end}}
+
+{{define "digest" -}}
+<code class="digest" title="{{.}}">{{short .}}</code><button type="button" class="copy small" data-copy-text="{{.}}" aria-label="Copy digest {{.}}" hidden>Copy</button>
+{{- end}}

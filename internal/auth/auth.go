@@ -24,6 +24,12 @@
 // owner's global admin role applies only if the token was created with
 // it.
 //
+// # Accounts
+//
+// The account operations, such as CreateToken and ChangePassword, serve
+// a signed-in user managing their own account, as the web UI's account
+// page does (account.go).
+//
 // # Permissions
 //
 // Repository roles are ordered read < write < delete < admin and come from

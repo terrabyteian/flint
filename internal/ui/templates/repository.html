@@ -1,0 +1,98 @@
+{{define "content"}}
+{{$d := .Data}}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a> / <span aria-current="page">{{$d.Name}}</span></nav>
+<div class="head">
+  <h1>{{$d.Name}}</h1>
+  <span class="badges">{{template "badges" $d.RepoRow}}</span>
+</div>
+{{- if $d.Detail}}<p class="detail">{{$d.Detail}}</p>{{end}}
+
+<div class="split">
+<section class="contents" aria-labelledby="contents-heading">
+{{- if eq $d.Kind "images"}}
+  <div class="head">
+    <h2 id="contents-heading">Images</h2>
+    {{template "filter" $d}}
+  </div>
+  {{- if $d.Images}}
+  <table>
+    <thead><tr><th scope="col">Image</th><th scope="col" class="num">Tags</th><th scope="col" class="num">Manifests</th><th scope="col">Pushed</th></tr></thead>
+    <tbody>
+    {{- range $d.Images}}
+    <tr><td><a href="{{.Href}}">{{.Name}}</a></td><td class="num">{{.Tags}}</td><td class="num">{{.Manifests}}</td><td>{{when .Updated}}</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+  {{- else}}<p class="empty">{{if eq $d.Type "proxy"}}Nothing is cached yet: images appear here once a client pulls them.{{else}}No images.{{end}}</p>{{end}}
+{{- else if eq $d.Kind "packages"}}
+  <div class="head">
+    <h2 id="contents-heading">Packages{{if eq $d.Type "proxy"}} cached{{end}}</h2>
+    {{template "filter" $d}}
+  </div>
+  {{- if $d.Packages}}
+  <table>
+    <thead><tr><th scope="col">Package</th><th scope="col">Latest</th><th scope="col" class="num">Versions</th><th scope="col">Updated</th></tr></thead>
+    <tbody>
+    {{- range $d.Packages}}
+    <tr><td><a href="{{.Href}}">{{.Name}}</a>{{if .Summary}}<div class="sub">{{.Summary}}</div>{{end}}</td><td>{{.Latest}}</td><td class="num">{{.Versions}}</td><td>{{when .Updated}}</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+  {{- else}}<p class="empty">{{if eq $d.Type "proxy"}}Nothing is cached yet: packages appear here once a client downloads them.{{else}}No packages.{{end}}</p>{{end}}
+{{- else if eq $d.Kind "files"}}
+  <div class="head">
+    <h2 id="contents-heading">{{if $d.Cached}}Cached files{{else}}Files{{end}}</h2>
+    {{template "filter" $d}}
+  </div>
+  <nav class="crumbs path" aria-label="Directory">
+    {{- range $i, $c := $d.Crumbs}}{{if $i}} / {{end}}<a href="{{$c.Href}}">{{$c.Name}}</a>{{end}} /
+  </nav>
+  {{- if $d.Entries}}
+  <table>
+    <thead><tr><th scope="col">Name</th><th scope="col" class="num">Size</th><th scope="col">Digest</th><th scope="col">{{if $d.Cached}}Cached{{else}}Uploaded{{end}}</th></tr></thead>
+    <tbody>
+    {{- range $d.Entries}}
+    {{- if .Dir}}
+    <tr><td><a href="{{.Href}}" class="dir">{{.Name}}</a></td><td></td><td></td><td></td></tr>
+    {{- else}}
+    <tr><td>{{if .Href}}<a href="{{.Href}}">{{.Name}}</a>{{else}}{{.Name}}{{end}}</td><td class="num">{{size .Size}}</td><td>{{template "digest" .Digest}}</td><td>{{when .Time}}</td></tr>
+    {{- end}}
+    {{- end}}
+    </tbody>
+  </table>
+  {{- else}}<p class="empty">{{if $d.Cached}}Nothing is cached yet: files appear here once a client downloads them.{{else}}No files.{{end}}</p>{{end}}
+{{- else if eq $d.Kind "members"}}
+  <h2 id="contents-heading">Members</h2>
+  <p>Clients see one view merged from these repositories, consulted in order.
+  {{- if $d.Protected}} Dependency-confusion protection is on: once a hosted member owns a package name, proxy members are not consulted for it.
+  {{- else}} Dependency-confusion protection is off.{{end}}</p>
+  <table>
+    <thead><tr><th scope="col">#</th><th scope="col">Repository</th><th scope="col">Type</th><th scope="col">Includes</th><th scope="col">Excludes</th></tr></thead>
+    <tbody>
+    {{- range $i, $m := $d.Members}}
+    <tr><td class="num">{{inc $i}}</td><td>{{if $m.Href}}<a href="{{$m.Href}}">{{$m.Name}}</a>{{else}}{{$m.Name}}{{end}}{{if $m.PublishTo}} <span class="badge publish" title="Publishing to this repository goes here">publish target</span>{{end}}</td><td>{{$m.Type}}</td><td>{{join $m.Include ", "}}</td><td>{{join $m.Exclude ", "}}</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+{{- else}}
+  <h2 id="contents-heading">Contents</h2>
+  <p class="empty">This repository's contents are not browsable here; use a client.</p>
+{{- end}}
+{{- if $d.Next}}
+  <p class="pager"><a href="{{$d.Next}}" rel="next">Next page</a></p>
+{{- end}}
+</section>
+<aside>
+{{template "snippets" $}}
+</aside>
+</div>
+{{end}}
+
+{{define "filter" -}}
+<form method="get" action="{{.Href}}" class="filter" role="search">
+  {{- if .Dir}}<input type="hidden" name="dir" value="{{.Dir}}">{{end}}
+  <label for="q" class="visually-hidden">Filter</label>
+  <input id="q" name="q" type="search" placeholder="Filter" value="{{.Filter}}">
+  <button type="submit">Filter</button>
+</form>
+{{- end}}

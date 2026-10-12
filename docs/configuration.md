@@ -308,7 +308,7 @@ Some package protocols put absolute URLs into the metadata clients store, such a
 `publicURL` is the base of every absolute URL flint writes into served metadata, so those URLs stay the same however a client reached flint: through an ingress, a port forward, or an internal service name.
 It is an `http` or `https` URL without credentials, a query, or a fragment; it may have a path, when a reverse proxy serves flint under one and strips it before forwarding.
 Without it, absolute URLs are built from the scheme and host of each request, as seen through [trusted proxies](#trusted-proxies).
-It is also the base of the login URLs flint gives clients, such as Cargo's `login_url`.
+It is also the base of the login URLs flint gives clients, such as Cargo's `login_url`, which names the [web UI](ui.md#your-account)'s account page, and of the URLs in the UI's client setup.
 The Docker token realm, the token endpoint named in a registry's `401` challenge, does not use it and always follows the host the client used, so a client that reached flint by an internal name gets its token from that same host.
 Where a protocol allows relative URLs, such as PyPI's project pages and the classic Helm index, flint writes relative ones and `publicURL` does not matter.
 Cached upstream content is stored as the upstream sent it and rewritten when served, so changing `publicURL` takes effect at once.
@@ -582,6 +582,7 @@ These authenticate themselves, as [authentication](auth.md) describes:
 | `GET /auth/oidc/<provider>/login`, `GET /auth/oidc/<provider>/callback` | [Sign-in through an OIDC provider](auth.md#oidc-sign-in). |
 | `/api/v1/...` | The admin API: users, groups, API tokens, [backups](backup.md), the [audit log](operations.md#audit-log), yanking and deleting PyPI files, and deleting crate versions. |
 | `PUT /npm/<repository>/-/user/org.couchdb.user:<user>` | npm's legacy login, which mints an API token for a user name and password; see [npm](npm.md#logging-in-with-npm-login). |
+| `/ui/...` | The [web UI](ui.md), for browsers signed in on the [sign-in page](auth.md#signing-in); `GET /` redirects to it. |
 
 ## Signals and shutdown
 
