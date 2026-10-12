@@ -67,6 +67,14 @@ func schemeTag(tag string) (digest, kind string, ok bool) {
 	return "sha256:" + hex, kind, true
 }
 
+// attestationChild reports whether an index child is an attestation
+// manifest, such as BuildKit adds to the indexes it pushes, rather than a
+// platform's image.
+func attestationChild(c browse.Descriptor) bool {
+	return c.Platform == "unknown/unknown" ||
+		slices.Contains(c.Annotations, browse.Annotation{Key: "vnd.docker.reference.type", Value: "attestation-manifest"})
+}
+
 // imageConfigTypes are the config media types of plain container images.
 // The registry reports a manifest's config media type as its artifact
 // type, as the referrers API requires, but for an image that names
@@ -157,6 +165,9 @@ func groupImage(img *browse.ImageDetail, href func(digest string) string) ([]tag
 			if byDigest[c.Digest] != nil {
 				childOf[c.Digest] = true
 			}
+			if attestationChild(c) {
+				addProof(m.Digest, kindAttestation)
+			}
 		}
 		if m.Subject != "" {
 			kindOf[m.Digest] = referrerKind(m.ArtifactType)
@@ -200,14 +211,18 @@ func groupImage(img *browse.ImageDetail, href func(digest string) string) ([]tag
 		r.First = true
 		rows = append(rows, r)
 		for _, c := range m.Children {
-			cm := byDigest[c.Digest]
-			if cm == nil {
-				rows = append(rows, manifestRow{ManifestSummary: browse.ManifestSummary{Digest: c.Digest, MediaType: c.MediaType, Size: c.Size},
-					Depth: 1, Platform: c.Platform, Missing: true})
-				continue
+			var cr manifestRow
+			if cm := byDigest[c.Digest]; cm != nil {
+				cr = row(cm, 1)
+			} else {
+				cr = manifestRow{ManifestSummary: browse.ManifestSummary{Digest: c.Digest, MediaType: c.MediaType, Size: c.Size},
+					Depth: 1, Missing: true}
 			}
-			cr := row(cm, 1)
-			cr.Platform = c.Platform
+			if attestationChild(c) {
+				cr.Kind = kindAttestation
+			} else {
+				cr.Platform = c.Platform
+			}
 			rows = append(rows, cr)
 			addRefs(c.Digest, 2)
 		}
@@ -231,7 +246,7 @@ func groupImage(img *browse.ImageDetail, href func(digest string) string) ([]tag
 	platforms := map[string]bool{}
 	for _, m := range img.Manifests {
 		for _, c := range m.Children {
-			if c.Platform != "" && !platforms[c.Platform] {
+			if c.Platform != "" && !attestationChild(c) && !platforms[c.Platform] {
 				platforms[c.Platform] = true
 				st.Platforms = append(st.Platforms, c.Platform)
 			}
@@ -251,7 +266,7 @@ func groupImage(img *browse.ImageDetail, href func(digest string) string) ([]tag
 		if m := byDigest[t.Digest]; m != nil {
 			tr.Index, tr.Pushed = m.Index, m.Pushed
 			for _, c := range m.Children {
-				if c.Platform != "" {
+				if c.Platform != "" && !attestationChild(c) {
 					tr.Platforms = append(tr.Platforms, c.Platform)
 				}
 			}

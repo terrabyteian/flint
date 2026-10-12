@@ -59,10 +59,10 @@
 {{end}}
 
 {{define "kind" -}}
-{{- if .Missing}}<span class="badge kind image">manifest</span> <span class="sub">{{.Platform}}, not stored here</span>
+{{- if .Kind}}<span class="badge kind referrer">{{.Kind}}</span>
 {{- else if .Index}}<span class="badge kind index">index</span>
-{{- else if .Subject}}<span class="badge kind referrer">{{.Kind}}</span>
-{{- else}}<span class="badge kind image">manifest</span>{{if .Platform}} <span class="sub">{{.Platform}}</span>{{end}}{{end}}
+{{- else}}<span class="badge kind image">manifest</span>{{end}}
+{{- if or .Platform .Missing}} <span class="sub">{{.Platform}}{{if and .Platform .Missing}}, {{end}}{{if .Missing}}not stored here{{end}}</span>{{end}}
 {{- if .Artifact}} <span class="sub mono" title="{{.Artifact}}">{{.Artifact}}</span>{{end}}
 {{- end}}
 

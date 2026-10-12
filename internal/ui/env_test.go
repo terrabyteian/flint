@@ -94,7 +94,13 @@ const (
 	amdDigest   = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	sigDigest   = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
 	layerDigest = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+	attDigest   = "sha256:5555555555555555555555555555555555555555555555555555555555555555"
 )
+
+// buildkitAttestation is an index child as BuildKit adds to the indexes
+// it pushes: an attestation manifest, not a platform's image.
+var buildkitAttestation = browse.Descriptor{Digest: attDigest, Platform: "unknown/unknown", Size: 700,
+	Annotations: []browse.Annotation{{Key: "vnd.docker.reference.type", Value: "attestation-manifest"}}}
 
 func (fakeImages) ListImages(repo string, q browse.Query) ([]browse.Image, bool, error) {
 	if repo != "oci-local" && repo != "public" && repo != "secret" {
@@ -113,6 +119,20 @@ func (fakeImages) ListImages(repo string, q browse.Query) ([]browse.Image, bool,
 }
 
 func (fakeImages) Image(_ context.Context, repo, name string) (*browse.ImageDetail, error) {
+	if name == "tools/web" {
+		// Signed under cosign's tag scheme, built by BuildKit.
+		return &browse.ImageDetail{Name: name, Tags: []browse.ImageTag{
+			{Name: "sha256-" + strings.TrimPrefix(indexDigest, "sha256:") + ".sig", Digest: sigDigest},
+			{Name: "v2", Digest: indexDigest}},
+			Manifests: []browse.ManifestSummary{
+				{Digest: indexDigest, MediaType: "application/vnd.oci.image.index.v1+json", Index: true, Tags: []string{"v2"},
+					Children: []browse.Descriptor{{Digest: amdDigest, Platform: "linux/amd64", Size: 500, Stored: true}, buildkitAttestation}},
+				{Digest: sigDigest, MediaType: "application/vnd.oci.image.manifest.v1+json",
+					ArtifactType: "application/vnd.oci.image.config.v1+json"},
+				{Digest: amdDigest, MediaType: "application/vnd.oci.image.manifest.v1+json", Size: 500,
+					ArtifactType: "application/vnd.oci.image.config.v1+json"},
+			}}, nil
+	}
 	if name != "team/app" {
 		return nil, browse.ErrNotFound
 	}
@@ -136,7 +156,7 @@ func (fakeImages) Manifest(_ context.Context, repo, name, digest string) (*brows
 			ManifestSummary: browse.ManifestSummary{Digest: indexDigest, MediaType: "application/vnd.oci.image.index.v1+json",
 				Index: true, Tags: []string{"v1"}},
 			Manifests: []browse.Descriptor{{Digest: amdDigest, Platform: "linux/amd64", Size: 500, Stored: true},
-				{Digest: layerDigest, Platform: "linux/s390x"}},
+				{Digest: layerDigest, Platform: "linux/s390x"}, buildkitAttestation},
 			Referrers: []browse.Descriptor{{Digest: sigDigest, ArtifactType: "application/vnd.dev.cosign.artifact.sig.v1+json"}},
 		}, nil
 	case digest == amdDigest:

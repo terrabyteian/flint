@@ -25,7 +25,7 @@
     <thead><tr><th scope="col">Platform</th><th scope="col">Manifest</th><th scope="col" class="num">Size</th></tr></thead>
     <tbody>
     {{- range $d.Children}}
-    <tr><td>{{if .Platform}}<span class="plat">{{.Platform}}</span>{{else}}<span class="sub">{{if .ArtifactType}}{{.ArtifactType}}{{else}}unknown{{end}}</span>{{end}}</td>
+    <tr><td>{{if .Kind}}{{template "proof" .Kind}}{{else if .Platform}}<span class="plat">{{.Platform}}</span>{{else}}<span class="sub">{{if .ArtifactType}}{{.ArtifactType}}{{else}}unknown{{end}}</span>{{end}}</td>
       <td>{{if .Href}}<a href="{{.Href}}"><code title="{{.Digest}}">{{short .Digest}}</code></a>{{else}}<code title="{{.Digest}}">{{short .Digest}}</code> <span class="sub">not stored here</span>{{end}}</td>
       <td class="num">{{size .Size}}</td></tr>
     {{- end}}

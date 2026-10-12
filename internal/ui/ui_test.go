@@ -236,6 +236,17 @@ func TestBrowsePages(t *testing.T) {
 		`href="/ui/repositories/oci-local/manifests/`+url.PathEscape(amdDigest)+`/team/app"`)
 	// A child not stored under the image is not linked.
 	r.lacks(t, url.PathEscape(layerDigest)+"/team/app")
+	// An attestation manifest of the index is not one of its platforms.
+	r.has(t, ">attestation<")
+	r.lacks(t, "unknown/unknown")
+
+	// An image signed under cosign's tag scheme and built by BuildKit:
+	// the signature and the attestation read as such, are not platforms
+	// or releases, and the snippets name the release tag.
+	r = alice.expect("/ui/repositories/oci-local/images/tools/web", http.StatusOK)
+	r.has(t, `<span class="badge kind referrer">signature</span>`, `<span class="badge kind referrer">attestation</span>`,
+		"1 of 1 tagged", "/oci-local/tools/web:v2", "docker tag tools/web:v2")
+	r.lacks(t, "unknown/unknown", "/oci-local/tools/web:sha256-")
 	r = alice.expect("/ui/repositories/oci-local/manifests/"+amdDigest+"/team/app", http.StatusOK)
 	r.has(t, "Layers", "config", "3.0 MiB", "No signatures or other referrers", "docker login", "docker pull")
 	// The config media type is listed as the config's, not as an

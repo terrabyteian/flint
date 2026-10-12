@@ -517,23 +517,34 @@ func (h *Handler) imagePage(rq *request) {
 	}
 	d := imageData{RepoRow: rq.row(rc), Image: img, ImageHref: rq.imageHref(rc.Name, name)}
 	d.Tags, d.Manifests, d.Stats = groupImage(img, func(digest string) string { return rq.manifestHref(rc.Name, name, digest) })
-	ref := ""
-	if len(img.Tags) > 0 {
-		ref = ":" + img.Tags[0].Name
-		if i := slices.IndexFunc(img.Tags, func(t browse.ImageTag) bool { return t.Name == "latest" }); i >= 0 {
-			ref = ":latest"
-		}
-	} else if len(img.Manifests) > 0 {
-		ref = "@" + img.Manifests[0].Digest
-	}
-	d.Snippets = h.imageSnippets(rq, rc, name, ref, true)
+	d.Snippets = h.imageSnippets(rq, rc, name, imageRef(img.Tags, d.Manifests), true)
 	rq.render(http.StatusOK, "image", rc.Name+"/"+name, d)
+}
+
+// imageRef is the reference an image page's snippets pull and push:
+// latest, else the first other tag, else the first manifest that is not
+// an artifact, leaving out cosign's artifact tags.
+func imageRef(tags []browse.ImageTag, rows []manifestRow) string {
+	ref := ""
+	for _, t := range tags {
+		if _, _, artifact := schemeTag(t.Name); !artifact && (ref == "" || t.Name == "latest") {
+			ref = ":" + t.Name
+		}
+	}
+	if ref != "" {
+		return ref
+	}
+	if i := slices.IndexFunc(rows, func(r manifestRow) bool { return r.Depth == 0 && r.Kind == "" }); i >= 0 {
+		return "@" + rows[i].Digest
+	}
+	return ""
 }
 
 type descriptorRow struct {
 	browse.Descriptor
 	Href string
-	// Kind names a referrer's kind, such as "signature".
+	// Kind names a referrer's kind, such as "signature", or marks an
+	// index child that is an attestation.
 	Kind string
 }
 
@@ -573,6 +584,9 @@ func (h *Handler) manifestPage(rq *request) {
 		ArtifactType: artifactTypeOf(m.ArtifactType)}
 	for _, c := range m.Manifests {
 		row := descriptorRow{Descriptor: c}
+		if attestationChild(c) {
+			row.Kind = kindAttestation
+		}
 		if c.Stored {
 			row.Href = rq.manifestHref(rc.Name, name, c.Digest)
 		}

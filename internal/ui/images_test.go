@@ -188,3 +188,78 @@ func TestGroupImageCosignTags(t *testing.T) {
 		t.Errorf("stats %+v", st)
 	}
 }
+
+// TestGroupImageAttestationChildren treats the attestation manifests
+// BuildKit adds to an index as attestations of it, not as platforms.
+func TestGroupImageAttestationChildren(t *testing.T) {
+	att := []browse.Annotation{{Key: "vnd.docker.reference.type", Value: "attestation-manifest"}}
+	img := &browse.ImageDetail{
+		Tags: []browse.ImageTag{{Name: "v1", Digest: "idx"}},
+		Manifests: []browse.ManifestSummary{
+			{Digest: "idx", Index: true, Tags: []string{"v1"}, Children: []browse.Descriptor{
+				{Digest: "amd", Platform: "linux/amd64", Stored: true},
+				{Digest: "amd-att", Platform: "unknown/unknown", Annotations: att, Stored: true},
+				{Digest: "arm", Platform: "linux/arm64"},
+				{Digest: "arm-att", Platform: "unknown/unknown"},
+			}},
+			{Digest: "amd"}, {Digest: "amd-att"},
+		},
+	}
+	tags, rows, st := groupImage(img, func(d string) string { return "/m/" + d })
+
+	var got []string
+	for _, r := range rows {
+		s := strings.Repeat(">", r.Depth) + r.Digest
+		if r.Platform != "" {
+			s += "@" + r.Platform
+		}
+		if r.Kind != "" {
+			s += "=" + r.Kind
+		}
+		if r.Missing {
+			s += "!"
+		}
+		got = append(got, s)
+	}
+	want := []string{"idx", ">amd@linux/amd64", ">amd-att=attestation", ">arm@linux/arm64!", ">arm-att=attestation!"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("rows\n got %v\nwant %v", got, want)
+	}
+	if p := strings.Join(tags[0].Platforms, ","); p != "linux/amd64,linux/arm64" {
+		t.Errorf("tag platforms %q", p)
+	}
+	if p := strings.Join(tags[0].Proofs, ","); p != "attestation" {
+		t.Errorf("tag proofs %q", p)
+	}
+	if p := strings.Join(st.Platforms, ","); p != "linux/amd64,linux/arm64" || st.Signed != 0 || st.Tagged != 1 {
+		t.Errorf("stats %+v", st)
+	}
+}
+
+func TestImageRef(t *testing.T) {
+	sig := "sha256-" + strings.Repeat("a", 64) + ".sig"
+	rows := []manifestRow{
+		{ManifestSummary: browse.ManifestSummary{Digest: "orphan"}, Kind: kindSBOM},
+		{ManifestSummary: browse.ManifestSummary{Digest: "img"}},
+		{ManifestSummary: browse.ManifestSummary{Digest: "child"}, Depth: 1},
+	}
+	for _, c := range []struct {
+		tags []string
+		rows []manifestRow
+		want string
+	}{
+		{[]string{"a", "latest", "v1"}, rows, ":latest"},
+		{[]string{sig, "v1.2.0", "v1.3.0"}, rows, ":v1.2.0"},
+		{[]string{sig}, rows, "@img"},
+		{nil, rows, "@img"},
+		{[]string{sig}, rows[:1], ""},
+	} {
+		var tags []browse.ImageTag
+		for _, n := range c.tags {
+			tags = append(tags, browse.ImageTag{Name: n})
+		}
+		if got := imageRef(tags, c.rows); got != c.want {
+			t.Errorf("imageRef(%v) = %q, want %q", c.tags, got, c.want)
+		}
+	}
+}
