@@ -287,10 +287,9 @@ h1 code.digest { color: var(--text); font-size: 0.8em; }
 code.wrap-code { overflow-wrap: anywhere; }
 
 /* An image's manifests, grouped under each index. */
-.manifests td { white-space: nowrap; }
+.manifests td.tree-cell { white-space: nowrap; }
 .manifests th, .manifests td { padding-right: var(--s3); }
 .manifests td.wrap { white-space: normal; overflow-wrap: anywhere; min-width: 7rem; }
-.manifests .sub.mono { display: inline-block; max-width: 10rem; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .manifests td.when, .tags-table td.when { white-space: normal; overflow-wrap: normal; min-width: 6.5rem; }
 .manifests tr.depth-0 td { background: var(--surface-2); }
 .manifests tr.depth-0 td code { color: var(--text); font-weight: 600; }
@@ -448,6 +447,8 @@ td.act { text-align: right; width: 1%; }
   .scoped { margin-left: 0; }
   .stats > div { border-bottom: 1px solid var(--border); }
   .tags-table th:nth-child(3), .tags-table td:nth-child(3), .tags-table th:nth-child(5), .tags-table td:nth-child(5) { display: none; }
+  .tags-table th { white-space: normal; }
+  .tags-table .digest-wrap { flex-wrap: wrap; }
   .manifests th:nth-child(4), .manifests td:nth-child(4), .manifests th:nth-child(5), .manifests td:nth-child(5) { display: none; }
   .tokens thead { display: none; }
   .tokens tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--border); }

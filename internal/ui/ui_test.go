@@ -226,6 +226,8 @@ func TestBrowsePages(t *testing.T) {
 		t.Errorf("manifest rows %v, want %v", got, want)
 	}
 	r.has(t, "linux/s390x, not stored here", ">signature<")
+	// A referrer's artifact type is carried in its kind badge's title.
+	r.has(t, `<span class="badge kind referrer" title="application/vnd.dev.cosign.artifact.sig.v1+json">signature</span>`)
 	// Pushing goes to the hosted repository the page shows.
 	r = alice.expect("/ui/repositories/public/images/team/app", http.StatusOK)
 	r.has(t, "docker push 127.0.0.1"+strings.TrimPrefix(e.srv.URL, "http://127.0.0.1")+"/public/team/app:v1")
