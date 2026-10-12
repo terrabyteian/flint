@@ -158,10 +158,12 @@ func TestGoogleSignInRefused(t *testing.T) {
 			claims: map[string]any{"email": "Alice@Example.com"}},
 		{name: "email not allowed", cfg: func(p map[string]any) { p["allowedEmails"] = []string{"bob@gmail.com"} },
 			want: "not allowed to sign in"},
-		{name: "allowed email outside the hosted domains", cfg: func(p map[string]any) {
+		{name: "allowed Gmail address outside the hosted domains", cfg: func(p map[string]any) {
 			p["hostedDomains"] = []string{"example.org"}
-			p["allowedEmails"] = []string{"alice@example.com"}
-		}, claims: map[string]any{"hd": nil}},
+			p["allowedEmails"] = []string{"alice@gmail.com"}
+		}, claims: map[string]any{"email": "alice@gmail.com", "hd": nil}},
+		{name: "allowed email Google is not authoritative for", cfg: func(p map[string]any) { p["allowedEmails"] = []string{"alice@corp.com"} },
+			claims: map[string]any{"email": "alice@corp.com", "hd": nil}, want: "not allowed to sign in"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			e, p := newGoogleEnv(t, tt.cfg)
@@ -283,6 +285,34 @@ func TestOIDCAssignedByEmail(t *testing.T) {
 	}
 	if r := e.asRoot("POST", "/api/v1/users", `{"name": "bob", "oidc": {"provider": "google", "email": "bob@example.com"}}`); r.status != http.StatusCreated {
 		t.Errorf("assign again: %d %s", r.status, r.body)
+	}
+}
+
+// TestGoogleAssignedByEmailNotAuthoritative checks that an assigned
+// email links only an identity Google is authoritative for: a Workspace
+// account, with an hd claim, or a Gmail address.
+func TestGoogleAssignedByEmailNotAuthoritative(t *testing.T) {
+	e, p := newGoogleEnv(t, nil)
+	for _, body := range []string{
+		`{"name": "alice", "admin": true, "oidc": {"provider": "google", "email": "alice@corp.com"}}`,
+		`{"name": "bob", "oidc": {"provider": "google", "email": "bob@gmail.com"}}`,
+	} {
+		if r := e.asRoot("POST", "/api/v1/users", body); r.status != http.StatusCreated {
+			t.Fatalf("assign %s: %d %s", body, r.status, r.body)
+		}
+	}
+
+	p.set(func(p *idp) { p.subject, p.claims["email"], p.claims["hd"] = "1", "alice@corp.com", nil })
+	if resp := e.signInGoogle(googleBrowser(t, p)); !strings.Contains(resp.body, "Signed in as <strong>alice@corp.com</strong>") {
+		t.Errorf("sign-in with an email Google is not authoritative for: %d %s", resp.status, resp.body)
+	}
+	if u, _ := e.svc.getUser("alice"); u.OIDC.Subject != "" || u.OIDC.Email != "alice@corp.com" {
+		t.Errorf("an email Google is not authoritative for linked the assigned user: %+v", u.OIDC)
+	}
+
+	p.set(func(p *idp) { p.subject, p.claims["email"] = "2", "bob@gmail.com" })
+	if resp := e.signInGoogle(googleBrowser(t, p)); !strings.Contains(resp.body, "Signed in as <strong>bob</strong>") {
+		t.Errorf("sign-in with a Gmail address: %d %s", resp.status, resp.body)
 	}
 }
 

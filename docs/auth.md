@@ -81,8 +81,10 @@ To cut a user off at once, delete the user in flint, which ends its sessions and
 Google is built in: a provider of `"type": "google"` in [`auth.oidc`](configuration.md#google) needs only an OAuth client's ID and secret, and appears on the sign-in page as "Sign in with Google".
 [Configuration](configuration.md#google) describes how to create the OAuth client at Google and its redirect URI, which must be `https` on a real hostname, not an IP address.
 
-Google signs in only users whose email it says is verified, and the user's flint name is that email, lowercased.
-`hostedDomains` admits only accounts of your Google Workspace domains, by the ID token's `hd` claim, and `allowedEmails` admits individual accounts, such as a contractor's Gmail address, alongside them or alone; with both set, a user who matches either may sign in.
+Google signs in only users whose email it says is verified, and the user's flint name is, by default (`usernameClaim`), that email, lowercased.
+Google is authoritative for an email only if it belongs to a Google Workspace account, whose ID token has an `hd` claim, or is a Gmail address (`@gmail.com`): only such an email is taken as the user's own, by `allowedEmails` and [assignment](#assigning-users-by-email).
+A Google account registered with another address, such as `alice@corp.com` where `corp.com` is not on Workspace, still signs in if the other restrictions admit it, but is matched by issuer and subject only, never admitted or linked by its email.
+`hostedDomains` admits only accounts of your Google Workspace domains, by the ID token's `hd` claim, and `allowedEmails` admits individual accounts, such as a contractor's Gmail address, alongside them or alone, if Google is authoritative for the email; with both set, a user who matches either may sign in.
 `allowedDomains` is refused for Google, since the email's domain does not prove a Workspace account: use `hostedDomains`.
 One of them must be set, or else `allowAnyGoogleAccount: true`, which lets any Google account sign in: such a user has no permissions beyond anonymous pulls until it is given groups.
 flint accepts Google's ID tokens with the issuer `https://accounts.google.com` or, as Google sometimes sends it, `accounts.google.com`.
@@ -103,8 +105,8 @@ curl -u admin https://registry.example/api/v1/users -d '{
 }'
 ```
 
-The first sign-in through that provider whose email Google says is verified and is equal to the assigned one, compared lowercased, signs in as that user instead of creating one, and links the user to the identity's issuer and subject; from then on the user is matched by them like any other, and the email no longer matters.
-Assignment works only with providers of type `google`, whose emails are Google-verified account addresses; assigning a user at any other provider is refused with `400`, and other providers match their users by issuer and subject only, never by email.
+The first sign-in through that provider whose email Google says is verified, Google is [authoritative](#google-sign-in) for (a Workspace account's or a Gmail address), and is equal to the assigned one, compared lowercased, signs in as that user instead of creating one, and links the user to the identity's issuer and subject; from then on the user is matched by them like any other, and the email no longer matters.
+Assignment works only with providers of type `google`, and only for an email Google is authoritative for: an assignment of another address is never linked, and that account's sign-in creates a user of its own; assigning a user at any other provider is refused with `400`, and other providers match their users by issuer and subject only, never by email.
 An email can be assigned to one user, and a user assigned an email has no password.
 Assignment applies only to an identity's first sign-in: an identity that already signed in has its user, which an administrator deletes first to assign the email anew.
 The linked user keeps its groups and `admin` flag, as Google sends no groups.

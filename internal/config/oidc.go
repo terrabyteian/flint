@@ -88,8 +88,9 @@ type OIDCProvider struct {
 	// verified email is in one of these domains.
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
 	// AllowedEmails, for Google only, if set, admits users whose verified
-	// email is one of these, lowercase. With HostedDomains, a user
-	// matching either is admitted.
+	// email is one of these, lowercase, if Google is authoritative for it:
+	// a Workspace account's, with an hd claim, or a Gmail address. With
+	// HostedDomains, a user matching either is admitted.
 	AllowedEmails []string `json:"allowedEmails,omitempty"`
 	// HostedDomains, for Google only, if set, admits only users of these
 	// Google Workspace domains, as the ID token's hd claim names them.

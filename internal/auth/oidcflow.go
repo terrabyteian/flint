@@ -341,7 +341,11 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 		return "", &signInDenied{fmt.Sprintf("email %q is missing or not verified", printable(email)),
 			"Your Google account's email address is not verified."}
 	}
-	if !admitted(cfg, c, email, verified) {
+	// Google is authoritative only for the email of a Workspace account,
+	// which has an hd claim, or of a Gmail address; only such an email
+	// names its owner.
+	owned := cfg.IsGoogle() && verified && (c.String("hd") != "" || strings.HasSuffix(email, "@gmail.com"))
+	if !admitted(cfg, c, email, verified, owned) {
 		return "", &signInDenied{fmt.Sprintf("email %q (verified: %t, hosted domain %q) is not allowed", printable(email), verified,
 			printable(c.String("hd"))), "Your account is not allowed to sign in here."}
 	}
@@ -365,10 +369,10 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 		if u, ver, err = readUser(v, name); err != nil {
 			return "", err
 		}
-	} else if rec, ok := v.Get(oidcEmailKey(cfg.Issuer, email)); ok && cfg.IsGoogle() && verified {
-		// An administrator assigned this verified Google email to a user,
-		// which this identity's first sign-in links it to. Other providers
-		// match identities by issuer and subject only.
+	} else if rec, ok := v.Get(oidcEmailKey(cfg.Issuer, email)); ok && owned {
+		// An administrator assigned this Google email, which the identity
+		// owns, to a user, which its first sign-in links it to. Other
+		// identities are matched by issuer and subject only.
 		name := string(rec.Value)
 		if u, ver, err = readUser(v, name); err != nil {
 			return "", err
@@ -439,13 +443,14 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 
 // admitted reports whether p's allowedDomains, or Google's allowedEmails
 // and hostedDomains, admit a user: if any is set, the user must match one
-// of them, with a verified email for the first two.
-func admitted(cfg *config.OIDCProvider, c *idClaims, email string, verified bool) bool {
+// of them, with a verified email for allowedDomains and an owned one for
+// allowedEmails.
+func admitted(cfg *config.OIDCProvider, c *idClaims, email string, verified, owned bool) bool {
 	if len(cfg.AllowedDomains) == 0 && len(cfg.AllowedEmails) == 0 && len(cfg.HostedDomains) == 0 {
 		return true
 	}
 	_, domain, _ := strings.Cut(email, "@")
-	return verified && (slices.Contains(cfg.AllowedDomains, domain) || slices.Contains(cfg.AllowedEmails, email)) ||
+	return verified && slices.Contains(cfg.AllowedDomains, domain) || owned && slices.Contains(cfg.AllowedEmails, email) ||
 		slices.Contains(cfg.HostedDomains, c.String("hd"))
 }
 
