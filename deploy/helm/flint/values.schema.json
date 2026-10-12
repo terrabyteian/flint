@@ -120,39 +120,6 @@
         }
       }
     },
-    "googleSignIn": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Built-in Google sign-in: a provider of type google in config.auth.oidc, with its client secret mounted from existingSecret.",
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "clientId": {
-          "type": "string"
-        },
-        "existingSecret": {
-          "type": "string"
-        },
-        "hostedDomains": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "allowedEmails": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "allowAnyGoogleAccount": {
-          "type": "boolean"
-        }
-      }
-    },
     "containerPort": {
       "type": "integer",
       "minimum": 1,

@@ -204,30 +204,6 @@ oidcSecrets: []
 #   #   kubectl create secret generic flint-oidc-corp --from-literal=client-secret=...
 #   existingSecret: flint-oidc-corp
 
-# Built-in Google sign-in (docs/auth.md#google-sign-in). The chart adds a
-# provider of type google, named google, to config.auth.oidc, and mounts the
-# client secret, the key "client-secret" of existingSecret, at
-# /etc/flint/oidc/google. Register https://<your flint host>/auth/oidc/google/callback
-# as the OAuth client's redirect URI at Google: Google accepts only https on a
-# real hostname there, not an IP address; set config.publicURL to that URL.
-# Google sends no groups: manage its users' groups through the admin API.
-googleSignIn:
-  enabled: false
-  # The OAuth client ID, such as 1234567890-abc.apps.googleusercontent.com.
-  clientId: ""
-  # The Secret holding the client secret, such as one made with
-  #   kubectl create secret generic flint-google --from-literal=client-secret=...
-  existingSecret: ""
-  # If set, only users of these Google Workspace domains may sign in.
-  hostedDomains: []
-  # If set, these verified emails may sign in too (or only these, without
-  # hostedDomains).
-  allowedEmails: []
-  # Without hostedDomains or allowedEmails, any Google account may sign in
-  # only if this is true; it has no permissions beyond anonymous pulls until
-  # it is given groups.
-  allowAnyGoogleAccount: false
-
 # The first administrator, which flint creates at startup while no
 # administrator exists (docs/auth.md). Its password is the key "password" of
 # an existing Secret, mounted at /etc/flint/admin; flint reads it only while no
