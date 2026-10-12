@@ -12,55 +12,116 @@
 <script src="{{$.Base}}/ui/static/app.js?v={{.AssetVer}}"></script>
 </head>
 <body>
+{{template "icons"}}
 <a class="skip" href="#main">Skip to content</a>
 <header class="top">
   <nav class="bar" aria-label="Main">
-    <a class="brand" href="{{$.Base}}/ui/"><img src="{{$.Base}}/ui/static/favicon.svg?v={{.AssetVer}}" alt="" width="22" height="22"> flint</a>
+    <a class="brand" href="{{$.Base}}/ui/"><span class="mark">{{icon "bolt"}}</span>flint</a>
     <a href="{{$.Base}}/ui/"{{if eq .Nav "repos"}} aria-current="page"{{end}}>Repositories</a>
     <span class="spacer"></span>
     {{- if .User}}
     {{- if .User.Admin}}
-    <a href="{{$.Base}}/ui/admin"{{if eq .Nav "admin"}} aria-current="page"{{end}}>Status</a>
+    <a href="{{$.Base}}/ui/admin"{{if eq .Nav "admin"}} aria-current="page"{{end}}>{{icon "pulse"}}<span class="label">Status</span></a>
     {{- end}}
-    <a href="{{$.Base}}/ui/account"{{if eq .Nav "account"}} aria-current="page"{{end}} title="Account">{{.User.User}}</a>
+    <a href="{{$.Base}}/ui/account" class="user"{{if eq .Nav "account"}} aria-current="page"{{end}} title="Account"><span class="avatar" aria-hidden="true">{{initial .User.User}}</span><span class="label">{{.User.User}}</span></a>
     <form method="post" action="{{.SignOut}}" class="inline">
       <input type="hidden" name="return" value="{{$.Base}}/ui/">
-      <button type="submit" class="link">Sign out</button>
+      <button type="submit" class="link">{{icon "out"}}<span class="label">Sign out</span></button>
     </form>
     {{- else}}
-    <a href="{{.SignIn}}">Sign in</a>
+    <a href="{{.SignIn}}" class="signin">{{icon "login"}}Sign in</a>
     {{- end}}
   </nav>
 </header>
 <main id="main" tabindex="-1">
 {{template "content" .}}
 </main>
-<footer class="foot">flint {{.Version}}</footer>
+<footer class="foot">
+  <span class="foot-brand"><span class="mark small">{{icon "bolt"}}</span>flint {{.Version}}</span>
+  <nav aria-label="Footer">
+    <a href="{{$.Base}}/ui/">Repositories</a>
+    {{- if .User}}
+    <a href="{{$.Base}}/ui/account#tokens">API tokens</a>
+    {{- if .User.Admin}}<a href="{{$.Base}}/ui/admin">Status</a>{{end}}
+    {{- else}}
+    <a href="{{.SignIn}}">Sign in</a>
+    {{- end}}
+  </nav>
+</footer>
 </body>
 </html>
 {{- end}}
 
 {{define "badges" -}}
-<span class="badge fmt fmt-{{.Key}}">{{.Format}}</span>
-<span class="badge type type-{{.Type}}">{{.Type}}</span>
-{{- if .Anonymous}} <span class="badge public" title="Anyone may pull, without signing in">public</span>{{end}}
+<span class="badges"><span class="badge fmt fmt-{{.Key}}">{{.Format}}</span><span class="badge type type-{{.Type}}">{{.Type}}</span>
+{{- if .Anonymous}}<span class="badge public" title="Anyone may pull, without signing in">{{icon "globe"}}public</span>{{end}}</span>
+{{- end}}
+
+{{define "tile" -}}
+<span class="fmt-tile fmt-{{.Key}}" aria-hidden="true">{{mono .Key}}</span>
 {{- end}}
 
 {{define "snippets" -}}
 {{if .Data.Snippets}}
 <section class="snippets" aria-labelledby="setup-heading">
-  <h2 id="setup-heading">Client setup</h2>
+  <h2 id="setup-heading">{{icon "term"}}<span>Client setup</span></h2>
   {{- range $i, $s := .Data.Snippets}}
-  <details{{if eq $i 0}} open{{end}}>
-    <summary>{{$s.Title}}{{if $s.File}} <code class="file">{{$s.File}}</code>{{end}}</summary>
-    <div class="code"><pre><code>{{$s.Text}}</code></pre><button type="button" class="copy" data-copy hidden>Copy</button></div>
+  <details class="snippet"{{if lt $i 3}} open{{end}}>
+    <summary>{{icon (snippetIcon $s.Title)}}<span>{{$s.Title}}</span>{{if $s.File}} <code class="file">{{$s.File}}</code>{{end}}</summary>
+    <div class="code"><pre><code>{{$s.Text}}</code></pre><button type="button" class="copy" data-copy hidden aria-label="Copy: {{$s.Title}}">{{icon "copy"}}<span class="copy-label">Copy</span></button></div>
   </details>
   {{- end}}
-  <p class="hint">Create an API token for <code>$FLINT_TOKEN</code> on your <a href="{{$.Base}}/ui/account#tokens">account page</a>.</p>
+  <p class="hint">{{icon "key"}}<span>Create an API token for <code>$FLINT_TOKEN</code> on your <a href="{{$.Base}}/ui/account#tokens">account page</a>.</span></p>
 </section>
 {{end}}
 {{- end}}
 
 {{define "digest" -}}
-<code class="digest" title="{{.}}">{{short .}}</code><button type="button" class="copy small" data-copy-text="{{.}}" aria-label="Copy digest {{.}}" hidden>Copy</button>
+<span class="digest-wrap"><code class="digest" title="{{.}}">{{short .}}</code><button type="button" class="copy small" data-copy-text="{{.}}" aria-label="Copy digest {{.}}" hidden>{{icon "copy"}}<span class="copy-label">Copy</span></button></span>
+{{- end}}
+
+{{define "proof" -}}
+{{if eq . "signature"}}<span class="proof proof-signature">{{icon "shield"}}Signed</span>
+{{- else if eq . "SBOM"}}<span class="proof proof-sbom">{{icon "doc"}}SBOM</span>
+{{- else}}<span class="proof proof-other">{{icon "doc"}}{{.}}</span>{{end}}
+{{- end}}
+
+{{define "empty" -}}
+<p class="empty">{{icon "box"}}<span>{{.}}</span></p>
+{{- end}}
+
+{{/* icons are the UI's icons, drawn once per page and used by name with
+     the icon function, which writes <svg><use href="#i-name"/></svg>; the
+     stylesheet strokes them. */}}
+{{define "icons" -}}
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+<symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13.5 2 4 14h7l-1.5 8L20 9.5h-7.2z" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"/></symbol>
+<symbol id="i-tag" viewBox="0 0 24 24"><path d="M3.5 12.6V4.5a1 1 0 0 1 1-1h8.1l8 8a1.4 1.4 0 0 1 0 2l-6.1 6.1a1.4 1.4 0 0 1-2 0z"/><circle cx="8.5" cy="8.5" r="1.4"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3.5 8.5 4.5-8.5 4.5L3.5 8z"/><path d="m3.5 12 8.5 4.5 8.5-4.5"/><path d="m3.5 16 8.5 4.5 8.5-4.5"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.2 19 6v5.6c0 4.3-3 7.9-7 9.2-4-1.3-7-4.9-7-9.2V6z"/><path d="m8.8 12 2.2 2.2 4.3-4.4"/></symbol>
+<symbol id="i-doc" viewBox="0 0 24 24"><path d="M6.5 3.5h7.5l4 4v13h-11.5z"/><path d="M14 3.5v4h4"/><path d="M9.5 12.5h5M9.5 16h5"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="4"/><path d="m11 12.5 8.5-8.5M16.5 7l2.5 2.5M14.5 9l2 2"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.5 5.3 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.3-3.5-8.5s1.1-6.1 3.5-8.5z"/></symbol>
+<symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v12M6.5 10.5 12 16l5.5-5.5M5 20h14"/></symbol>
+<symbol id="i-up" viewBox="0 0 24 24"><path d="M12 20V8M6.5 13.5 12 8l5.5 5.5M5 4h14"/></symbol>
+<symbol id="i-login" viewBox="0 0 24 24"><path d="M14 4.5h4a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-4"/><path d="M4.5 12H15M11 8l4 4-4 4"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+<symbol id="i-box" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></symbol>
+<symbol id="i-out" viewBox="0 0 24 24"><path d="M10 4.5H6A1.5 1.5 0 0 0 4.5 6v12A1.5 1.5 0 0 0 6 19.5h4"/><path d="M19.5 12H9M15.5 8l4 4-4 4"/></symbol>
+<symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-term" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="m7.5 9.5 3 2.5-3 2.5M12.5 15h4"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4.3l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5V17A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17z"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M6.5 3.5h7.5l4 4v13h-11.5z"/><path d="M14 3.5v4h4"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 21 19.5H3z"/><path d="M12 10v4.5M12 17v.5"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.5"/><path d="M3 19.5c.8-3.2 3.2-4.8 6-4.8s5.2 1.6 6 4.8"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6M17.5 14.9c1.8.6 3 2.2 3.5 4.6"/></symbol>
+<symbol id="i-disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="2.5"/><path d="M4.5 6v12c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5V6M4.5 12c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13"/></symbol>
+<symbol id="i-merge" viewBox="0 0 24 24"><circle cx="6.5" cy="6" r="2"/><circle cx="6.5" cy="18" r="2"/><circle cx="17.5" cy="12" r="2"/><path d="M6.5 8v8M8.3 7.2l7.4 3.8M8.3 16.8l7.4-3.8"/></symbol>
+</svg>
 {{- end}}

@@ -1,7 +1,8 @@
 {{define "content"}}
-<section class="narrow">
+<section class="card error-card">
+  <span class="error-mark" aria-hidden="true">{{icon "alert"}}</span>
   <h1>{{.Data.Heading}}</h1>
   <p>{{.Data.Message}}</p>
-  <p><a href="{{$.Base}}/ui/">Back to the repositories</a></p>
+  <p><a class="button" href="{{$.Base}}/ui/">Back to the repositories</a></p>
 </section>
 {{end}}

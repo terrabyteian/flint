@@ -1,38 +1,45 @@
 {{define "content"}}
 {{$d := .Data}}{{$p := $d.Package}}
-<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <span aria-current="page">{{$p.Name}}</span></nav>
-<div class="head">
-  <h1>{{$p.Name}}</h1>
-  <span class="badges">{{template "badges" $d.RepoRow}}</span>
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a><span class="sep" aria-hidden="true">/</span><a href="{{$d.Href}}">{{$d.Name}}</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">{{$p.Name}}</span></nav>
+<div class="page-head">
+  <div class="title-row">
+    {{template "tile" $d.RepoRow}}
+    <div>
+      <h1>{{$p.Name}}</h1>
+      {{- if $p.Summary}}<p class="lede">{{$p.Summary}}</p>{{end}}
+    </div>
+  </div>
+  {{template "badges" $d.RepoRow}}
 </div>
-{{- if $p.Summary}}<p class="detail">{{$p.Summary}}</p>{{end}}
 <div class="split">
 <section class="contents">
   {{- if $p.Tags}}
-  <h2>Tags</h2>
-  <ul class="tags">
+  <h2>{{icon "tag"}}<span>Tags</span></h2>
+  <ul class="dist-tags">
     {{- range $p.Tags}}
-    <li><span class="badge tag">{{.Name}}</span> {{.Version}}</li>
+    <li><span class="badge tag">{{icon "tag"}}{{.Name}}</span><a href="#v-{{.Version}}" class="version">{{.Version}}</a></li>
     {{- end}}
   </ul>
   {{- end}}
-  <h2>Versions</h2>
+  <h2>{{icon "layers"}}<span>Versions</span></h2>
   {{- range $p.Versions}}
-  <article class="version card" id="v-{{.Version}}">
+  <article class="version-card card" id="v-{{.Version}}">
     <header>
       <h3>{{if .Version}}{{.Version}}{{else}}Unknown version{{end}}</h3>
-      {{- range .Notes}} <span class="badge note">{{.}}</span>{{end}}
-      {{- if not .Published.IsZero}}<span class="when">{{when .Published}}</span>{{end}}
+      {{- range .Notes}}<span class="badge note">{{.}}</span>{{end}}
+      {{- if not .Published.IsZero}}<span class="when">{{icon "clock"}}{{when .Published}}</span>{{end}}
     </header>
     {{- if .Files}}
+    <div class="table-wrap flat">
     <table>
       <thead><tr><th scope="col">File</th><th scope="col" class="num">Size</th><th scope="col">Digest</th></tr></thead>
       <tbody>
       {{- range .Files}}
-      <tr><td>{{if .URL}}<a href="{{$.Base}}{{.URL}}">{{.Name}}</a>{{else}}{{.Name}}{{end}}</td><td class="num">{{size .Size}}</td><td>{{template "digest" .Digest}}</td></tr>
+      <tr><td><span class="entry">{{icon "file"}}{{if .URL}}<a href="{{$.Base}}{{.URL}}">{{.Name}}</a>{{else}}<span>{{.Name}}</span>{{end}}</span></td><td class="num">{{size .Size}}</td><td>{{template "digest" .Digest}}</td></tr>
       {{- end}}
       </tbody>
     </table>
+    </div>
     {{- end}}
   </article>
   {{- end}}

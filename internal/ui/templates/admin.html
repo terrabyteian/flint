@@ -1,73 +1,81 @@
 {{define "content"}}
 {{$d := .Data}}
-<h1>Status</h1>
-<p class="hint">This page is read-only. Administration is through the admin API and the configuration file.</p>
+<div class="page-head">
+  <div>
+    <h1>Status</h1>
+    <p class="lede">Read-only. Administration is through the admin API and the configuration file.</p>
+  </div>
+</div>
 <div class="grid">
-  <section class="card" aria-labelledby="gc-heading">
-    <h2 id="gc-heading">Garbage collection</h2>
+  <section class="card status-card" aria-labelledby="gc-heading">
+    <h2 id="gc-heading">{{icon "trash"}}<span>Garbage collection</span></h2>
     {{- with $d.GC}}
     <dl class="facts">
-      {{- with .Running}}<dt>Running</dt><dd>{{.Phase}}, started {{when .Started}}</dd>{{end}}
+      {{- with .Running}}<dt>Running</dt><dd><span class="state warn">{{.Phase}}</span>, started {{when .Started}}</dd>{{end}}
       {{- with .Last}}
-      <dt>Last run</dt><dd>{{.State}}{{if .DryRun}} (dry run){{end}}, {{when .Finished}}, started by {{.Actor}}</dd>
+      <dt>Last run</dt><dd><span class="state {{if eq .State "succeeded"}}ok{{else}}bad{{end}}">{{.State}}</span>{{if .DryRun}} (dry run){{end}}, {{when .Finished}}, started by {{.Actor}}</dd>
       <dt>Deleted</dt><dd>{{.Deleted.Blobs}} blobs, {{size .Deleted.Bytes}}</dd>
       <dt>Stored</dt><dd>{{.Stored.Blobs}} blobs, {{size .Stored.Bytes}}</dd>
-      {{- if .Error}}<dt>Error</dt><dd>{{.Error}}</dd>{{end}}
+      {{- if .Error}}<dt>Error</dt><dd class="error-text">{{.Error}}</dd>{{end}}
       {{- else}}<dt>Last run</dt><dd>none since the server started</dd>{{end}}
       <dt>Grace period</dt><dd>{{.GracePeriod}}</dd>
       <dt>Schedule</dt><dd>{{if .Interval}}every {{.Interval}}{{with .NextRun}}, next {{when .}}{{end}}{{else}}only when an administrator starts it{{end}}</dd>
     </dl>
-    {{- else}}<p class="empty">Not available.</p>{{end}}
+    {{- else}}{{template "empty" "Not available."}}{{end}}
   </section>
-  <section class="card" aria-labelledby="backup-heading">
-    <h2 id="backup-heading">Backups</h2>
+  <section class="card status-card" aria-labelledby="backup-heading">
+    <h2 id="backup-heading">{{icon "box"}}<span>Backups</span></h2>
     {{- if $d.HasBackup}}{{with $d.Backup}}
     <dl class="facts">
       <dt>Directory</dt><dd><code>{{.Directory}}</code></dd>
-      {{- with .Running}}<dt>Running</dt><dd>{{.Phase}}, started {{when .Started}}</dd>{{end}}
+      {{- with .Running}}<dt>Running</dt><dd><span class="state warn">{{.Phase}}</span>, started {{when .Started}}</dd>{{end}}
       {{- with .LastSuccess}}<dt>Last complete</dt><dd>{{when .Started}}: {{.Blobs}} blobs, {{size .Bytes}}</dd>{{else}}<dt>Last complete</dt><dd>none</dd>{{end}}
-      {{- with .Last}}<dt>Last attempt</dt><dd>{{.State}}, {{when .Started}}{{if .Error}}: {{.Error}}{{end}}</dd>{{end}}
+      {{- with .Last}}<dt>Last attempt</dt><dd><span class="state {{if .Error}}bad{{else}}ok{{end}}">{{.State}}</span>, {{when .Started}}{{if .Error}}: {{.Error}}{{end}}</dd>{{end}}
     </dl>
-    {{end}}{{- else}}<p class="empty">Backups are not configured.</p>{{end}}
+    {{end}}{{- else}}{{template "empty" "Backups are not configured."}}{{end}}
   </section>
-  <section class="card" aria-labelledby="disk-heading">
-    <h2 id="disk-heading">Disk</h2>
+  <section class="card status-card" aria-labelledby="disk-heading">
+    <h2 id="disk-heading">{{icon "disk"}}<span>Disk</span></h2>
     {{- if $d.HasSpace}}
     <dl class="facts">
       <dt>Free space</dt><dd>{{size $d.Free}}</dd>
-      <dt>Proxy caching</dt><dd>{{if $d.Pressure}}<span class="badge note">paused</span> free space is below the minimum, so proxy repositories pass new content through without caching it{{else}}on{{end}}</dd>
+      <dt>Proxy caching</dt><dd>{{if $d.Pressure}}<span class="badge note">paused</span> free space is below the minimum, so proxy repositories pass new content through without caching it{{else}}<span class="state ok">on</span>{{end}}</dd>
     </dl>
-    {{- else}}<p class="empty">Free space is watched only while there are proxy repositories.</p>{{end}}
+    {{- else}}{{template "empty" "Free space is watched only while there are proxy repositories."}}{{end}}
   </section>
-  <section class="card" aria-labelledby="auth-heading">
-    <h2 id="auth-heading">Sign-in</h2>
-    <ul>{{range $d.Auth}}<li>{{.}}</li>{{end}}</ul>
+  <section class="card status-card" aria-labelledby="auth-heading">
+    <h2 id="auth-heading">{{icon "lock"}}<span>Sign-in</span></h2>
+    <ul class="plain">{{range $d.Auth}}<li>{{.}}</li>{{end}}</ul>
   </section>
 </div>
 
 <section aria-labelledby="repos-heading">
-  <h2 id="repos-heading">Repositories</h2>
+  <h2 id="repos-heading">{{icon "box"}}<span>Repositories</span></h2>
+  <div class="table-wrap">
   <table>
     <thead><tr><th scope="col">Name</th><th scope="col">Format and type</th><th scope="col">Upstream or members</th><th scope="col">Settings</th></tr></thead>
     <tbody>
     {{- range $d.Repos}}
-    <tr><td><a href="{{.Href}}">{{.Name}}</a></td><td>{{template "badges" .RepoRow}}</td><td>{{.Detail}}</td><td>{{join .Settings ", "}}</td></tr>
+    <tr><td><a class="strong" href="{{.Href}}">{{.Name}}</a></td><td>{{template "badges" .RepoRow}}</td><td class="wrap">{{.Detail}}</td><td class="wrap">{{join .Settings ", "}}</td></tr>
     {{- end}}
     </tbody>
   </table>
+  </div>
 </section>
 
 <section aria-labelledby="grants-heading">
-  <h2 id="grants-heading">Permission grants</h2>
+  <h2 id="grants-heading">{{icon "users"}}<span>Permission grants</span></h2>
   {{- if $d.Grants}}
+  <div class="table-wrap">
   <table>
     <thead><tr><th scope="col">Repositories</th><th scope="col">Role</th><th scope="col">Users</th><th scope="col">Groups</th></tr></thead>
     <tbody>
     {{- range $d.Grants}}
-    <tr><td>{{.Repositories}}</td><td>{{.Role}}</td><td>{{.Users}}</td><td>{{.Groups}}</td></tr>
+    <tr><td class="mono-cell">{{.Repositories}}</td><td><span class="badge role">{{.Role}}</span></td><td>{{.Users}}</td><td>{{.Groups}}</td></tr>
     {{- end}}
     </tbody>
   </table>
-  {{- else}}<p class="empty">No grants: only administrators, and anonymous pulls where allowed, reach repositories.</p>{{end}}
+  </div>
+  {{- else}}{{template "empty" "No grants: only administrators, and anonymous pulls where allowed, reach repositories."}}{{end}}
 </section>
 {{end}}

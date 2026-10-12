@@ -153,6 +153,10 @@ type ManifestSummary struct {
 	Subject string
 	// Index reports whether it is an index or manifest list.
 	Index bool
+	// Children are an index's manifests, with their platforms, in the
+	// index's order; nil for an image manifest. In an image's listing
+	// they let the UI group platform manifests under their index.
+	Children []Descriptor
 }
 
 // Manifest is one manifest with what it references.
@@ -198,8 +202,9 @@ type Images interface {
 	// ListImages lists the image names of repository repo in name
 	// order, and reports whether there are more after the page.
 	ListImages(repo string, q Query) ([]Image, bool, error)
-	// Image returns an image's tags and manifests.
-	Image(repo, name string) (*ImageDetail, error)
+	// Image returns an image's tags and manifests, with each index's
+	// children.
+	Image(ctx context.Context, repo, name string) (*ImageDetail, error)
 	// Manifest returns a manifest stored under an image, with what it
 	// references and its referrers.
 	Manifest(ctx context.Context, repo, name, digest string) (*Manifest, error)

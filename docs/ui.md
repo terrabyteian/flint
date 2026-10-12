@@ -4,8 +4,9 @@ flint serves a small web UI at `/ui/`, and redirects its root, `/`, there.
 It shows the repositories you may read and what is in them, tells you how to configure each client for them, and lets you change your password and manage your own [API tokens](auth.md#api-tokens).
 Administration stays in the [admin API](auth.md) and the [configuration](configuration.md); administrators get a read-only status page.
 
-The pages are rendered on the server from templates built into the binary, with a little hand-written JavaScript for conveniences such as copy buttons; everything works without it.
+The pages are rendered on the server from templates built into the binary, with one stylesheet, its icons drawn inline, and a little hand-written JavaScript for conveniences such as copy buttons; everything works without it.
 The layout adapts to narrow screens, follows the system's light or dark theme, and can be used with the keyboard alone.
+The sign-in page has the same look.
 Under a [public URL](configuration.md#public-url) with a path, such as `https://tools.example/flint`, the UI is at `https://tools.example/flint/ui/`, and its links, forms, and redirects stay under that path.
 
 ## Signing in
@@ -20,12 +21,13 @@ Without signing in, you see the repositories that allow anonymous pulls.
 ## Browsing
 
 The repository list shows every repository you may read, with its format and type, and what a proxy repository caches or a virtual repository merges.
+It can be filtered by name, format, or type, and narrowed to one format with the format buttons above it.
 A repository you may not read is not shown; its pages are not found, or, before you sign in, ask you to sign in.
 Reading a virtual repository needs `read` on it only, as its clients need; its members are linked only if you may read them too.
 
 | Repository | What the UI shows |
 | --- | --- |
-| OCI, hosted or proxy | Images; each image's tags and manifests, including untagged ones such as an index's platform manifests and signatures; each manifest's media and artifact type, size, config and layers with their sizes, an index's platforms, annotations, and the referrers that name it as their subject, such as signatures and attestations. A proxy repository shows what it cached. |
+| OCI, hosted or proxy | Images; each image's tags, with the platforms of the index a tag names and whether its manifest is signed or has an SBOM, and its manifests, including untagged ones, grouped: each index with its platform manifests and the attestation manifests BuildKit adds to it (which are not counted as platforms), and every manifest with the signatures, SBOMs, attestations, and other referrers that name it as their subject or that cosign stored under its tag scheme (`sha256-<digest>.sig`, `.att`, `.sbom`); a summary of the image's tags, manifests, platforms, signed tags (cosign's tag-scheme tags are not counted as tagged releases), and last push; each manifest's media type, artifact type (not shown for a plain image, whose artifact type is its config's media type), size, config and layers with their sizes, an index's platforms, annotations, and referrers. A proxy repository shows what it cached, and an index's platform manifests it did not cache are marked so. |
 | PyPI, hosted | Projects, their releases newest first, and each release's files, with yanked releases marked. |
 | PyPI, proxy | The files the repository cached, by project and version. |
 | npm, hosted | Packages, their dist-tags, and their versions with their tarballs; deprecated versions and those with provenance are marked. |
@@ -40,12 +42,12 @@ File names link to the routes clients download them from, which authenticate as 
 
 Every repository page has copyable client setup for its format: `docker login`, pull, and push commands, and for a repository with the [Helm view](helm-repository.md), `helm push` and `helm repo add`; the index URL for pip, `pip.conf`, and uv's `pyproject.toml`, and `twine upload`; `.npmrc` and `.yarnrc.yml`; Maven's `settings.xml` and `pom.xml` and Gradle's `settings.gradle.kts`; `GOPROXY` and `.netrc`; Cargo's `.cargo/config.toml`; and `curl` downloads and uploads.
 Publishing commands appear for hosted repositories and for virtual repositories with a `publishTo` member.
-Package and image pages add the command that installs or pulls that package or image.
+Package and image pages add the command that installs or pulls that package or image; an image's page also signs in to the registry and, for a hosted repository, tags and pushes a local build of the image, and a manifest's page pulls it by digest.
 The URLs are built from flint's [public URL](configuration.md#public-url), or else the address your browser used.
 
 ## Your account
 
-The account page, `/ui/account`, shows your user, your groups, and whether you are an administrator, and lists your API tokens.
+The account page, `/ui/account`, shows your user, your groups, and whether you are an administrator, and lists your API tokens: what each may do, which reads "All of your permissions" for a token that carries all of your repository permissions, and when it expires, marking a token that expires within 14 days and one that expired.
 
 - **Create a token** with a name, an expiry of 7, 30, 90, or 365 days or none, and either all of your repository permissions or one role on repositories you name, by name or pattern such as `team-a-*`.
   Administrators may also give a token the global admin role.

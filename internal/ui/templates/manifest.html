@@ -1,36 +1,41 @@
 {{define "content"}}
 {{$d := .Data}}{{$m := $d.Manifest}}
-<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <a href="{{$d.ImageHref}}">{{$d.Image}}</a> / <span aria-current="page">{{short $m.Digest}}</span></nav>
-<div class="head">
-  <h1>{{if $m.Index}}Index{{else}}Manifest{{end}} <code class="digest">{{short $m.Digest}}</code></h1>
-  <span class="badges">{{template "badges" $d.RepoRow}}</span>
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a><span class="sep" aria-hidden="true">/</span><a href="{{$d.Href}}">{{$d.Name}}</a><span class="sep" aria-hidden="true">/</span><a href="{{$d.ImageHref}}">{{$d.Image}}</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">{{short $m.Digest}}</span></nav>
+<div class="page-head">
+  <h1><span class="prefix">{{if $m.Index}}Index{{else if $m.Subject}}Referrer{{else}}Manifest{{end}}</span> <code class="digest">{{short $m.Digest}}</code></h1>
+  {{template "badges" $d.RepoRow}}
 </div>
 <div class="split">
 <section class="contents">
+  <div class="card facts-card">
   <dl class="facts">
     <dt>Digest</dt><dd>{{template "digest" $m.Digest}}</dd>
     <dt>Media type</dt><dd><code>{{$m.MediaType}}</code></dd>
-    {{- if $m.ArtifactType}}<dt>Artifact type</dt><dd><code>{{$m.ArtifactType}}</code></dd>{{end}}
-    <dt>Size</dt><dd>{{size $m.Size}}{{if not $m.Index}}; {{size $m.TotalSize}} with its config and layers{{end}}</dd>
-    {{- if $m.Tags}}<dt>Tags</dt><dd>{{join $m.Tags ", "}}</dd>{{end}}
+    {{- if $d.ArtifactType}}<dt>Artifact type</dt><dd><code>{{$d.ArtifactType}}</code></dd>{{end}}
+    <dt>Size</dt><dd>{{size $m.Size}}{{if not $m.Index}}<span class="sub">; {{size $m.TotalSize}} with its config and layers</span>{{end}}</dd>
+    {{- if $m.Tags}}<dt>Tags</dt><dd><span class="badges">{{range $m.Tags}}<span class="badge tag">{{icon "tag"}}{{.}}</span>{{end}}</span></dd>{{end}}
     {{- if not $m.Pushed.IsZero}}<dt>Pushed</dt><dd>{{when $m.Pushed}}</dd>{{end}}
     {{- if $m.Subject}}<dt>Subject</dt><dd><a href="{{$d.SubjectHref}}"><code title="{{$m.Subject}}">{{short $m.Subject}}</code></a></dd>{{end}}
   </dl>
+  </div>
   {{- if $m.Index}}
-  <h2>Platforms</h2>
+  <h2>{{icon "layers"}}<span>Platforms</span></h2>
+  <div class="table-wrap">
   <table>
     <thead><tr><th scope="col">Platform</th><th scope="col">Manifest</th><th scope="col" class="num">Size</th></tr></thead>
     <tbody>
     {{- range $d.Children}}
-    <tr><td>{{if .Platform}}{{.Platform}}{{else}}<span class="sub">{{if .ArtifactType}}{{.ArtifactType}}{{else}}unknown{{end}}</span>{{end}}</td>
-      <td>{{if .Href}}<a href="{{.Href}}"><code title="{{.Digest}}">{{short .Digest}}</code></a>{{else}}<code title="{{.Digest}}">{{short .Digest}}</code>{{end}}</td>
+    <tr><td>{{if .Kind}}{{template "proof" .Kind}}{{else if .Platform}}<span class="plat">{{.Platform}}</span>{{else}}<span class="sub">{{if .ArtifactType}}{{.ArtifactType}}{{else}}unknown{{end}}</span>{{end}}</td>
+      <td>{{if .Href}}<a href="{{.Href}}"><code title="{{.Digest}}">{{short .Digest}}</code></a>{{else}}<code title="{{.Digest}}">{{short .Digest}}</code> <span class="sub">not stored here</span>{{end}}</td>
       <td class="num">{{size .Size}}</td></tr>
     {{- end}}
     </tbody>
   </table>
+  </div>
   {{- else}}
-  <h2>Layers</h2>
-  <table>
+  <h2>{{icon "layers"}}<span>Layers</span></h2>
+  <div class="table-wrap">
+  <table class="layers">
     <thead><tr><th scope="col" class="num">#</th><th scope="col">Media type</th><th scope="col" class="num">Size</th><th scope="col">Digest</th></tr></thead>
     <tbody>
     {{- with $m.Config}}
@@ -41,25 +46,30 @@
     {{- end}}
     </tbody>
   </table>
+  </div>
   {{- end}}
   {{- if $m.Annotations}}
-  <h2>Annotations</h2>
+  <h2>{{icon "doc"}}<span>Annotations</span></h2>
+  <div class="card facts-card">
   <dl class="facts">
     {{- range $m.Annotations}}<dt><code>{{.Key}}</code></dt><dd>{{.Value}}</dd>{{end}}
   </dl>
+  </div>
   {{- end}}
-  <h2>Referrers</h2>
+  <h2>{{icon "shield"}}<span>Referrers</span></h2>
   {{- if $d.Referrers}}
   <p class="sub">Signatures, attestations, and other artifacts that refer to this manifest.</p>
+  <div class="table-wrap">
   <table>
-    <thead><tr><th scope="col">Artifact type</th><th scope="col">Manifest</th><th scope="col" class="num">Size</th></tr></thead>
+    <thead><tr><th scope="col">Kind</th><th scope="col">Artifact type</th><th scope="col">Manifest</th><th scope="col" class="num">Size</th></tr></thead>
     <tbody>
     {{- range $d.Referrers}}
-    <tr><td><code>{{if .ArtifactType}}{{.ArtifactType}}{{else}}{{.MediaType}}{{end}}</code></td><td><a href="{{.Href}}"><code title="{{.Digest}}">{{short .Digest}}</code></a></td><td class="num">{{size .Size}}</td></tr>
+    <tr><td>{{template "proof" .Kind}}</td><td><code class="wrap-code">{{if .ArtifactType}}{{.ArtifactType}}{{else}}{{.MediaType}}{{end}}</code></td><td><a href="{{.Href}}"><code title="{{.Digest}}">{{short .Digest}}</code></a></td><td class="num">{{size .Size}}</td></tr>
     {{- end}}
     </tbody>
   </table>
-  {{- else}}<p class="empty">No signatures or other referrers.</p>{{end}}
+  </div>
+  {{- else}}{{template "empty" "No signatures or other referrers."}}{{end}}
 </section>
 <aside>
 {{template "snippets" $}}

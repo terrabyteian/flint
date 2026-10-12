@@ -1,28 +1,44 @@
 {{define "content"}}
-<div class="head">
-  <h1>Repositories</h1>
+{{$d := .Data}}
+<div class="page-head">
+  <div>
+    <h1>Repositories</h1>
+    <p class="lede">{{if $d.Total}}{{$d.Total}} {{if eq $d.Total 1}}repository{{else}}repositories{{end}} you can read.{{else}}None you can read yet.{{end}}</p>
+  </div>
   <form method="get" action="{{$.Base}}/ui/" class="filter" role="search">
+    {{- if $d.Format}}<input type="hidden" name="format" value="{{$d.Format}}">{{end}}
     <label for="q" class="visually-hidden">Filter repositories</label>
-    <input id="q" name="q" type="search" placeholder="Filter by name, format, or type" value="{{.Data.Filter}}">
+    <span class="field">{{icon "search"}}<input id="q" name="q" type="search" placeholder="Filter by name, format, or type" value="{{$d.Filter}}"></span>
     <button type="submit">Filter</button>
   </form>
 </div>
-{{- if .Data.Repos}}
+{{- if $d.Formats}}
+<nav class="chips" aria-label="Formats">
+  <a href="{{$.Base}}/ui/{{if $d.Filter}}?q={{$d.Filter}}{{end}}"{{if not $d.Format}} aria-current="page"{{end}}>All <span class="count">{{$d.Total}}</span></a>
+  {{- range $d.Formats}}
+  <a href="{{.Href}}"{{if .Current}} aria-current="page"{{end}}>{{.Name}} <span class="count">{{.Count}}</span></a>
+  {{- end}}
+</nav>
+{{- end}}
+{{- if $d.Repos}}
 <ul class="repos">
-  {{- range .Data.Repos}}
-  <li class="card">
-    <a class="name" href="{{.Href}}">{{.Name}}</a>
-    <span class="badges">{{template "badges" .}}</span>
-    {{- if .Detail}}<p class="detail">{{.Detail}}</p>{{end}}
+  {{- range $d.Repos}}
+  <li class="card repo">
+    {{template "tile" .}}
+    <div class="repo-body">
+      <div class="repo-line"><a class="name" href="{{.Href}}">{{.Name}}</a>{{template "badges" .}}</div>
+      {{- if .Blurb}}<p class="detail">{{.Blurb}}</p>{{end}}
+    </div>
+    <span class="go" aria-hidden="true">{{icon "chev"}}</span>
   </li>
   {{- end}}
 </ul>
-{{- else if .Data.Filter}}
-<p class="empty">No repository matches “{{.Data.Filter}}”.</p>
+{{- else if or $d.Filter $d.Format}}
+{{template "empty" (printf "No repository matches “%s”." (or $d.Filter $d.Format))}}
 {{- else}}
-<p class="empty">There are no repositories you can see.</p>
+{{template "empty" "There are no repositories you can see."}}
 {{- end}}
-{{- if .Data.Hidden}}
-<p class="hint"><a href="{{.SignIn}}">Sign in</a> to see the repositories that need it.</p>
+{{- if $d.Hidden}}
+<p class="hint signin-hint">{{icon "lock"}}<span><a href="{{.SignIn}}">Sign in</a> to see the repositories that need it.</span></p>
 {{- end}}
 {{end}}
