@@ -52,7 +52,9 @@ import (
 // the request.
 var (
 	// ErrNotFound means the upstream answered 404: it does not have the
-	// content, or the name does not exist.
+	// content, or the name does not exist. A token service refusing a
+	// token for a repository with 400, 404, 410, or 451 is such an
+	// answer too.
 	ErrNotFound = errors.New("not found upstream")
 	// ErrDenied means the upstream refused access to the content even
 	// after authentication, or refused anonymous access to it.

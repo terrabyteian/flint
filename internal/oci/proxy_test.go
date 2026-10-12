@@ -1033,3 +1033,52 @@ func TestRunProxy(t *testing.T) {
 		t.Error("the pull times were not persisted on stop")
 	}
 }
+
+// TestProxyTokenRefusedName checks that a token service refusing an
+// anonymous token for a name, as ghcr.io answers 400 for a one-part name
+// and 403 for a name that does not exist, answers not found rather than
+// failing as an upstream that cannot be reached.
+func TestProxyTokenRefusedName(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden} {
+		pe := newProxyEnv(t, 0)
+		pe.up.SetStatus(func(r *http.Request) int {
+			if r.URL.Path == "/token" && strings.Contains(r.URL.Query().Get("scope"), "busybox") {
+				return status
+			}
+			return 0
+		})
+		want(t, pe.do("HEAD", "/v2/hub/busybox/manifests/test", nil), http.StatusNotFound, "")
+		want(t, pe.do("GET", "/v2/hub/busybox/manifests/test", nil), http.StatusNotFound, codeManifestUnknown)
+		want(t, pe.do("GET", "/v2/hub/busybox/tags/list", nil), http.StatusNotFound, codeNameUnknown)
+		if pe.h.repos["hub"].proxy.client.Offline() {
+			t.Errorf("%d: the refusal marked the upstream offline", status)
+		}
+		// Other names are still served.
+		img := pe.up.PutImage("app", "v1", []byte("x"))
+		pe.pull("hub/app", "v1", img)
+	}
+}
+
+// TestProxyTokenTimeoutServesCached checks that a token service answering
+// an anonymous request with a status that says nothing about the name,
+// such as 408, does not hide a cached tag.
+func TestProxyTokenTimeoutServesCached(t *testing.T) {
+	pe := newProxyEnv(t, 0)
+	img := pe.up.PutImage("app", "v1", []byte("x"))
+	pe.pull("hub/app", "v1", img)
+	tokens := pe.up.Count("GET", "/token")
+	pe.up.SetStatus(func(r *http.Request) int {
+		if r.URL.Path == "/token" {
+			return http.StatusRequestTimeout
+		}
+		return 0
+	})
+	pe.advance(time.Hour)
+	pe.pull("hub/app", "v1", img)
+	if pe.up.Count("GET", "/token") == tokens {
+		t.Error("the token was not requested again")
+	}
+	if got := pe.metric(`flint_proxy_requests_total{repository="hub",result="stale"}`); got != "1" {
+		t.Errorf("stale = %q, want 1", got)
+	}
+}

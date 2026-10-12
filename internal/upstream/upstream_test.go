@@ -317,6 +317,103 @@ func TestStatusErrors(t *testing.T) {
 	}
 }
 
+// TestTokenRefusals checks how a token service's refusal of a
+// repository's token is read: refused as registries refuse names that do
+// not exist, it is an answer about the name; refused with 401 or 403 for
+// flint's configured credentials, it is a failure of flint's access.
+func TestTokenRefusals(t *testing.T) {
+	pwFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(pwFile, []byte("s3cret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name        string
+		status      int
+		credentials bool
+		want        error
+		offline     bool
+	}{
+		// ghcr.io answers 400 NAME_INVALID for a one-part name.
+		{"anonymous 400", http.StatusBadRequest, false, upstream.ErrNotFound, false},
+		{"anonymous 404", http.StatusNotFound, false, upstream.ErrNotFound, false},
+		{"anonymous 410", http.StatusGone, false, upstream.ErrNotFound, false},
+		{"anonymous 451", http.StatusUnavailableForLegalReasons, false, upstream.ErrNotFound, false},
+		// A timeout says nothing about the name.
+		{"anonymous 408", http.StatusRequestTimeout, false, nil, false},
+		// ghcr.io answers 403 DENIED for a two-part name that does not exist.
+		{"anonymous 403", http.StatusForbidden, false, upstream.ErrDenied, false},
+		{"anonymous 401", http.StatusUnauthorized, false, upstream.ErrDenied, false},
+		{"credentials 401", http.StatusUnauthorized, true, upstream.ErrAuth, true},
+		{"credentials 403", http.StatusForbidden, true, upstream.ErrAuth, true},
+		{"credentials 400", http.StatusBadRequest, true, upstream.ErrNotFound, false},
+		{"credentials 404", http.StatusNotFound, true, upstream.ErrNotFound, false},
+		{"credentials 408", http.StatusRequestTimeout, true, nil, false},
+		{"anonymous 429", http.StatusTooManyRequests, false, upstream.ErrUnavailable, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := upstreamtest.New(t)
+			reg.SetStatus(func(r *http.Request) int {
+				if r.URL.Path == "/token" {
+					return tc.status
+				}
+				return 0
+			})
+			opts := upstream.Options{Attempts: 1}
+			if tc.credentials {
+				opts.Username, opts.PasswordFile = "bot", pwFile
+			}
+			c := newClient(t, reg.URL, opts)
+			_, err := c.GetManifest(ctx, "busybox", "test")
+			var ue *upstream.Error
+			if !errors.As(err, &ue) || ue.Status != tc.status {
+				t.Fatalf("got %v, want an error with status %d", err, tc.status)
+			}
+			for _, e := range []error{upstream.ErrNotFound, upstream.ErrDenied, upstream.ErrAuth, upstream.ErrUnavailable} {
+				if errors.Is(err, e) != (e == tc.want) {
+					t.Errorf("got %v, want %v", err, tc.want)
+				}
+			}
+			if c.Offline() != tc.offline {
+				t.Errorf("offline: %t, want %t", c.Offline(), tc.offline)
+			}
+		})
+	}
+
+	// A token is issued for any name, and the registry then refuses it,
+	// as Docker Hub does for a name that does not exist.
+	reg := upstreamtest.New(t)
+	reg.SetStatus(func(r *http.Request) int {
+		if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			return http.StatusUnauthorized
+		}
+		return 0
+	})
+	c := newClient(t, reg.URL, upstream.Options{})
+	if _, err := c.GetManifest(ctx, "library/missing", "latest"); !errors.Is(err, upstream.ErrDenied) || c.Offline() {
+		t.Errorf("refused with a token: %v (offline %t), want ErrDenied", err, c.Offline())
+	}
+
+	// A refused token for a scope other than a repository's is no answer
+	// about a name.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="http://`+r.Host+`/token",scope="registry:catalog:*"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	c = newClient(t, srv.URL, upstream.Options{})
+	resp, err := c.Do(ctx, http.MethodGet, "/v2/_catalog", nil, nil, "")
+	if err == nil {
+		resp.Body.Close()
+	}
+	if err == nil || errors.Is(err, upstream.ErrNotFound) {
+		t.Errorf("a refused catalog token: %v, want a failure other than ErrNotFound", err)
+	}
+}
+
 func TestRetriesAndOffline(t *testing.T) {
 	reg := upstreamtest.New(t)
 	reg.PutImage("a", "v1")
