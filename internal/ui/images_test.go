@@ -165,7 +165,7 @@ func TestGroupImageCosignTags(t *testing.T) {
 		}
 		got = append(got, s)
 	}
-	want := []string{app, ">sig=signature", ">att=attestation", ">sbom=SBOM", old, "stray"}
+	want := []string{app, ">sig=signature", ">att=attestation", ">sbom=SBOM", old, "stray=signature"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("rows\n got %v\nwant %v", got, want)
 	}
@@ -261,5 +261,24 @@ func TestImageRef(t *testing.T) {
 		if got := imageRef(tags, c.rows); got != c.want {
 			t.Errorf("imageRef(%v) = %q, want %q", c.tags, got, c.want)
 		}
+	}
+}
+
+// TestImageRefStrayArtifact never pulls a cosign artifact whose image is
+// gone: its row reads as its kind, and there is nothing to pull.
+func TestImageRefStrayArtifact(t *testing.T) {
+	img := &browse.ImageDetail{
+		Tags:      []browse.ImageTag{{Name: "sha256-" + strings.Repeat("a", 64) + ".sig", Digest: "sig"}},
+		Manifests: []browse.ManifestSummary{{Digest: "sig", ArtifactType: "application/vnd.oci.image.config.v1+json"}},
+	}
+	tags, rows, _ := groupImage(img, func(d string) string { return "/m/" + d })
+	if len(rows) != 1 || rows[0].Depth != 0 || rows[0].Kind != kindSignature {
+		t.Errorf("rows %+v", rows)
+	}
+	if ref := imageRef(img.Tags, rows); ref != "" {
+		t.Errorf("imageRef = %q", ref)
+	}
+	if len(tags) != 1 || len(tags[0].Proofs) != 0 {
+		t.Errorf("tags %+v", tags)
 	}
 }

@@ -183,9 +183,11 @@ func groupImage(img *browse.ImageDetail, href func(digest string) string) ([]tag
 			continue
 		}
 		addProof(d, k)
-		if m := byDigest[t.Digest]; m != nil && byDigest[d] != nil && kindOf[m.Digest] == "" {
-			refs[d] = append(refs[d], m)
+		if m := byDigest[t.Digest]; m != nil && kindOf[m.Digest] == "" {
 			kindOf[m.Digest] = k
+			if byDigest[d] != nil {
+				refs[d] = append(refs[d], m)
+			}
 		}
 	}
 	referred := map[string]bool{}
