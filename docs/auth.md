@@ -56,7 +56,7 @@ A sign-in in progress is held only in a short-lived cookie in the browser that s
 The cookie holds the sign-in's nonce, PKCE verifier, return path, and expiry, sealed with AES-256-GCM under a key generated on first start with a provider and kept in `<dataDir>/auth/oidc-state.key`, readable only by flint's user, so it can be neither read nor changed, and it opens only at the callback of the provider and state it was made for.
 Sign-ins in progress survive a restart; deleting the key file invalidates them at the next start, and their users sign in again.
 
-**Users.** A user who signs in through a provider is identified by the provider's issuer and the user's subject (`sub`), never by email or name.
+**Users.** A user who signs in through a provider is identified by the provider's issuer and the user's subject (`sub`), never by name, and never by email except to link a Google identity's first sign-in to a user [assigned its email](#assigning-users-by-email).
 On the first sign-in, flint creates the user, named after the provider's `usernameClaim` (by default the verified email), lowercased, unless, for Google, an administrator [assigned the identity's email](#assigning-users-by-email) to a user beforehand.
 If a user of that name already exists, local or from another identity, the sign-in is refused rather than take it over; an administrator resolves the conflict, for example by deleting the other user.
 Later sign-ins find the user by issuer and subject, so a changed email or name at the provider does not change the flint user.
