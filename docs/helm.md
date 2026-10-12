@@ -83,6 +83,7 @@ The main ones:
 | `tls.certManager.enabled` | `false` | Create a cert-manager Certificate from `tls.certManager.issuerRef`. Its names are `tls.certManager.dnsNames` and `ipAddresses` plus the Service's cluster names. |
 | `bootstrapAdmin.enabled`, `bootstrapAdmin.existingSecret` | `false`, none | Create the first administrator from a password in a Secret; see below. |
 | `upstreamSecrets` | none | Secrets with proxy repositories' upstream passwords; see below. |
+| `oidcSecrets` | none | Secrets with OIDC providers' client secrets and CA certificates; see below. |
 | `persistence.enabled` | `true` | Keep data on a volume; disabled, it is an `emptyDir` lost with the pod. |
 | `persistence.size`, `persistence.storageClass` | `10Gi`, cluster default | The claim template. Kubernetes does not let a StatefulSet's claim template change after install: to grow the volume, resize the claim directly if its storage class allows it. |
 | `persistence.existingClaim` | none | Use this claim instead of the claim template. |
@@ -147,6 +148,37 @@ upstreamSecrets:
 ```
 
 flint reads the file whenever it authenticates, so rotating the Secret takes effect without a restart once the kubelet updates the mount.
+The Secret must exist before the pod starts.
+
+### OIDC providers
+
+Users can sign in through [OpenID Connect providers](configuration.md#oidc-providers) configured in `config.auth.oidc`.
+Put a provider's client secret in a Secret under the key `client-secret`, and, if the provider's TLS certificates come from a private certificate authority, its certificates under `ca.crt`; list the Secret in `oidcSecrets` under a name, and the chart mounts its keys as files in `/etc/flint/oidc/<name>/`:
+
+```sh
+kubectl create secret generic flint-oidc-corp --namespace flint \
+  --from-literal=client-secret="$CLIENT_SECRET"
+```
+
+```yaml
+config:
+  publicURL: https://flint.example.com
+  auth:
+    oidc:
+      - name: corp
+        displayName: Corp SSO
+        issuer: https://sso.example.com/realms/corp
+        clientId: flint
+        clientSecretFile: /etc/flint/oidc/corp/client-secret
+        groupMappings:
+          engineering: [ci]
+oidcSecrets:
+  - name: corp
+    existingSecret: flint-oidc-corp
+```
+
+Register `https://flint.example.com/auth/oidc/corp/callback` as the client's redirect URI at the provider.
+flint reads the client secret at every sign-in, so rotating the Secret takes effect without a restart once the kubelet updates the mount.
 The Secret must exist before the pod starts.
 
 ### Backups

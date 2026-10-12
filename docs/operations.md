@@ -19,7 +19,7 @@ By default it is kept forever.
 | --- | --- |
 | `seq` | The batch's sequence number in the metadata store. Records are in increasing order, and each batch appears once. |
 | `time` | When the batch was committed, from the server's clock, in UTC. |
-| `actor` | Who made the change: a user name, such as `alice`, for a change made with a password; `alice (token <id>)` for one made with one of the user's API tokens, directly or through a bearer token from the Docker token endpoint; `(anonymous)` for an unauthenticated client, such as a containerd mirror pulling through a proxy repository; or `(system)` for flint's own background work, such as expiring abandoned uploads, and for the first administrator created at startup. User names never contain parentheses, so a user named `system` or `anonymous` is never confused with these. |
+| `actor` | Who made the change: a user name, such as `alice`, for a change made with a password or a [sign-in session](auth.md#signing-in), and for the user's own sign-ins; `alice (token <id>)` for one made with one of the user's API tokens, directly or through a bearer token from the Docker token endpoint; `(anonymous)` for an unauthenticated client, such as a containerd mirror pulling through a proxy repository; or `(system)` for flint's own background work, such as expiring abandoned uploads, and for the first administrator created at startup. User names never contain parentheses, so a user named `system` or `anonymous` is never confused with these. |
 | `action` | What the change was, such as `oci.manifest.push`; see below. |
 | `target` | What it changed, in a readable form, such as `docker-local/app:v1@sha256:...`, `user alice`, or `token <id> of user alice`. |
 | `keys` | The metadata keys the batch wrote (`"op": "put"`) or deleted (`"op": "delete"`), each as its components, such as `["oci", "tag", "docker-local", "app", "v1"]`. A key that is not UTF-8 is shown in hex as `keyHex`. |
@@ -60,6 +60,8 @@ Actions:
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |
+| `auth.session.create`, `auth.session.delete` | A user signed in, with a password or through an OIDC provider, or signed out. |
+| `auth.oidc.user.create`, `auth.oidc.user.sync` | A user created at its first sign-in through an OIDC provider, or its groups or admin flag changed by a later sign-in. |
 
 Further package formats add their own actions under their own prefix; their proxy repositories record `<format>.proxy.cache`, `<format>.proxy.pulled`, and `<format>.proxy.evict` like the ones above.
 
@@ -74,7 +76,7 @@ Both endpoints take the same filters as query parameters, all optional:
 | Parameter | Selects |
 | --- | --- |
 | `since`, `until` | Records committed at or after `since` and before `until`, as RFC 3339 times such as `2026-10-01T00:00:00Z`. |
-| `actor` | Records of one principal: a user name selects the user's changes, made with a password or any of the user's tokens; `alice (token <id>)` selects one token's; `(system)` and `(anonymous)` select themselves. |
+| `actor` | Records of one principal: a user name selects the user's changes, made with a password, a session, or any of the user's tokens; `alice (token <id>)` selects one token's; `(system)` and `(anonymous)` select themselves. |
 | `action` | Records of one action, or of every action under a prefix: `oci.manifest` selects `oci.manifest.push` and `oci.manifest.delete`, and `auth` every user, group, and token change. |
 | `target` | Records whose target starts with the value, such as `docker-local/app:` or `user alice`. |
 | `after` | Records after this sequence number. |

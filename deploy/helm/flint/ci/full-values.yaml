@@ -141,6 +141,19 @@ config:
       - repositories: ["docker-local", "releases", "pypi-local"]
         role: write
         groups: ["ci"]
+    sessionTTL: 8h
+    oidc:
+      - name: corp
+        displayName: Corp SSO
+        issuer: https://sso.example.com/realms/corp
+        clientId: flint
+        clientSecretFile: /etc/flint/oidc/corp/client-secret
+        caFile: /etc/flint/oidc/corp/ca.crt
+        scopes: [openid, email, profile, groups]
+        allowedDomains: [example.com]
+        groupMappings:
+          engineering: [ci]
+        adminGroups: [flint-admins]
 bootstrapAdmin:
   enabled: true
   username: root
@@ -150,6 +163,9 @@ upstreamSecrets:
     existingSecret: dockerhub-credentials
   - name: private-index
     existingSecret: private-index-credentials
+oidcSecrets:
+  - name: corp
+    existingSecret: flint-oidc-corp
 containerPort: 8443
 service:
   type: LoadBalancer

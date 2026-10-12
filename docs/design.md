@@ -92,6 +92,7 @@ The format packages translate protocol requests into blob and metadata operation
   meta/consumers/<name>        durable checkpoint of each registered log consumer
   auth/token-signing.key       Ed25519 key that signs the Docker token service's bearer tokens, generated on first start
   auth/url-signing.key         HMAC-SHA256 key that signs download URLs, generated on first start
+  auth/oidc-state.key          AES-256-GCM key that seals pending OIDC sign-ins into their cookie, generated on first start with a provider
   audit/<seq>.audit            append-only audit stream of batch origins and touched keys, never values; segments named by first sequence number
   RESTORE-INCOMPLETE           present only while flint restore writes the directory; serve refuses to start while it exists
 ```
@@ -191,9 +192,12 @@ Illustrative v1 key space:
 | `gc\0epoch` | GC epoch counter, incremented by each sweep round's start batch | `internal/gc` |
 | `gc\0doomed\0<digest>` | doomed set of the sweep round in progress; cleared when the round ends, and at startup | `internal/gc` |
 | `gc\0last` | report of the last garbage-collection run that was not a dry run | `internal/gc` |
-| `auth\0user\0<username>` | user record | `internal/auth` |
+| `auth\0user\0<username>` | user record; for a user from an OIDC provider, also its issuer and subject | `internal/auth` |
 | `auth\0token\0<token-id>` | token record with hashed secret | `internal/auth` |
 | `auth\0usertoken\0<username>\0<token-id>` | empty; indexes a user's tokens | `internal/auth` |
+| `auth\0session\0<session-id>` | sign-in session: user, hashed secret, creation and expiry, sign-in method | `internal/auth` |
+| `auth\0usersession\0<username>\0<session-id>` | empty; indexes a user's sessions | `internal/auth` |
+| `auth\0oidc\0<issuer>\0<subject>` | name of the user an OIDC identity signs in as | `internal/auth` |
 
 An index on disk can later replace the in-memory one behind the same interface if the record count outgrows RAM.
 
@@ -848,6 +852,8 @@ For Go modules, whose members are proxy repositories, so that no member owns a m
 ## Auth and permissions
 
 - **Identities.** Local users with passwords and groups, and OIDC login, in v1. LDAP is deferred. Passwords are hashed with PBKDF2-HMAC-SHA256 (`crypto/pbkdf2`) at a high iteration count, since bcrypt and Argon2 live outside the standard library.
+- **OIDC.** flint is a relying party for the UI's sign-in: the authorization code flow with PKCE, state, and nonce, against any number of configured providers. Discovery and the key set are fetched on first use and cached, with a rate-limited refetch for a key it has not seen, so providers can rotate keys. ID tokens are verified by hand (RS*, PS*, ES*, and EdDSA signatures from an allowed list, never `none` or HMAC, with the key's type and curve matching the algorithm; issuer, audience, authorized party, expiry, issue time, and nonce, with a minute of clock skew). Users are matched by issuer and subject, never by email, created on their first sign-in under a name from a configured claim, and refused rather than merged when that name is taken, so local and OIDC identities stay distinct. Groups, and optionally the admin flag, are synced from a groups claim at every sign-in, so removal at the provider takes effect at the next sign-in; deleting the user in flint cuts it off at once. Pending sign-ins keep no server state: each is sealed (AES-256-GCM, with the state and provider as additional data) into a short-lived cookie in the browser that started it, under a key in `auth/oidc-state.key`; the callback clears the cookie, and the provider redeems a code once.
+- **Sessions.** Signing in, with a password or through a provider, starts a session: a cookie with a random secret, stored hashed with an expiry, that authenticates the admin API and the UI but never registry or package endpoints, whose clients keep using API tokens. A session counts as signed in, like a password, so an OIDC user can create API tokens, capped by its permissions as every token is. Requests with a session that change anything must be same-origin (`Sec-Fetch-Site`, `Origin`), and the cookie is `HttpOnly` and `SameSite=Lax`.
 - **API tokens.** Random, high-entropy secrets, shown once and stored only as a SHA-256 hash. Tokens can be given an expiry and carry a subset of their owner's permissions, never more: on each use the owner's current role is capped by the token's scopes.
 - **Docker clients.** A built-in bearer-token service implements the Docker token authentication flow, issuing short-lived JWTs scoped to repositories and actions (pull, push, delete). The JWTs are hand-written and signed with an Ed25519 key generated on first start and kept in the data directory. Each registry request also checks the subject's current permissions, so deleting a user or revoking a token takes effect before the JWT expires.
 - **PyPI clients.** HTTP basic auth with the `__token__` username convention and an API token as the password, or a user name and its password or token. `internal/pypi` consumes it through `Permit(r, repo, actions...)`, which `internal/auth` implements: it answers as an HTTP status, and the PyPI handler writes the response with a `Basic` challenge.
@@ -888,7 +894,7 @@ For Go modules, whose members are proxy repositories, so that no member owns a m
   - **The target is a content-addressed blob store** (`internal/blob`'s filesystem layout) shared by every backup in it, plus `backups/<id>/` holding the metadata snapshot (`meta.WriteSnapshot` of the pinned view), the list of blobs the backup needs, and `backup.json`. Copies go through blob store uploads, so each is verified against its digest and fsynced before it counts. `backup.json` records the digests of the other two files and is renamed into place, then its directory fsynced, only after everything else is durable, so an interrupted backup never looks complete. Nothing is deleted from the target, not even incomplete backups.
   - **It copies every blob in the data directory**, not only those it can tell are referenced, so a backup never depends on every format package reporting its references correctly: every blob the view references was committed before the view was taken, so the blob walk finds it, and a blob that disappears during the walk was unreferenced. Each format package also reports the blobs its records reference (`oci.References`, `pypi.References`, `generic.References`, `cargo.References`, `npm.References`, `maven.References`), and the backup fails if one is missing.
   - **Restore** (`flint restore`) writes a backup into a new, empty data directory with `meta.Restore`, re-verifying every blob as it copies it, behind a `RESTORE-INCOMPLETE` marker that `flint serve` refuses. The restored store keeps every record's version and continues the log after the backup's sequence number. `flint backup verify` checks a backup the same way without restoring it.
-  - **Secrets.** A backup holds the metadata, including password and API token hashes, but not the signing keys: a restored server generates new ones, which only invalidates bearer tokens and signed URLs that live minutes anyway, so backups never contain private key material. The configuration file and the files it names (TLS keys, the bootstrap password, upstream credentials) belong to the deployment and are not backed up either.
+  - **Secrets.** A backup holds the metadata, including password and API token hashes, but not the signing keys or the OIDC state key: a restored server generates new ones, which only invalidates bearer tokens, signed URLs, and OIDC sign-ins in progress, which live minutes anyway, so backups never contain private key material. The configuration file and the files it names (TLS keys, the bootstrap password, upstream credentials) belong to the deployment and are not backed up either.
 
 ## Roadmap
 

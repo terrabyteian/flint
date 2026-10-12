@@ -24,9 +24,12 @@ func TestMinimalDefaults(t *testing.T) {
 		DataDir:         "/data",
 		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout, set: true},
 		Log:             Log{Level: DefaultLogLevel},
-		Auth:            Auth{LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true}},
-		ProxyCache:      ProxyCache{MinFreeSpace: FreeSpace{Percent: 5, text: "5%"}},
-		GC:              GC{GracePeriod: Duration{Duration: DefaultGCGracePeriod, set: true}},
+		Auth: Auth{
+			LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true},
+			SessionTTL:    Duration{Duration: DefaultSessionTTL, set: true},
+		},
+		ProxyCache: ProxyCache{MinFreeSpace: FreeSpace{Percent: 5, text: "5%"}},
+		GC:         GC{GracePeriod: Duration{Duration: DefaultGCGracePeriod, set: true}},
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("got %+v, want %+v", c, want)
@@ -90,6 +93,11 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
+	}
+	if o := c.Auth.OIDC; c.Auth.SessionTTL.Duration != 8*time.Hour || len(o) != 1 || o[0].Display() != "Corp SSO" ||
+		o[0].UsernameClaim != "email" || o[0].GroupsClaim != "groups" || !slices.Equal(o[0].Scopes, DefaultOIDCScopes) ||
+		!slices.Equal(o[0].GroupMappings["engineering"], []string{"ci", "team-a"}) {
+		t.Errorf("unexpected sign-in settings: %+v", c.Auth)
 	}
 	if c.GC.GracePeriod.Duration != 24*time.Hour || c.GC.Interval.Duration != 24*time.Hour {
 		t.Errorf("unexpected gc settings: %+v", c.GC)
@@ -203,6 +211,44 @@ func TestValidation(t *testing.T) {
 		{"zero login token ttl", `{"dataDir": "/d", "auth": {"loginTokenTTL": "0s"}}`, []string{"auth.loginTokenTTL: must be positive"}},
 		{"negative login token ttl", `{"dataDir": "/d", "auth": {"loginTokenTTL": "-1h"}}`, []string{"auth.loginTokenTTL: must be positive"}},
 		{"login token ttl syntax", `{"dataDir": "/d", "auth": {"loginTokenTTL": "90d"}}`, []string{`auth.loginTokenTTL: "90d" is not a duration`}},
+		{"session ttl", `{"dataDir": "/d", "auth": {"sessionTTL": "30m"}}`, nil},
+		{"zero session ttl", `{"dataDir": "/d", "auth": {"sessionTTL": "0s"}}`, []string{"auth.sessionTTL: must be positive"}},
+		{"session ttl syntax", `{"dataDir": "/d", "auth": {"sessionTTL": "1d"}}`, []string{`auth.sessionTTL: "1d" is not a duration`}},
+		{"oidc minimal", `{"dataDir": "/d", "auth": {"oidc": [{"name": "corp", "issuer": "https://idp.example", "clientId": "flint"}]}}`, nil},
+		{"oidc loopback http", `{"dataDir": "/d", "auth": {"oidc": [{"name": "dex", "issuer": "http://127.0.0.1:5556/dex", "clientId": "flint"}]}}`, nil},
+		{"oidc localhost http", `{"dataDir": "/d", "auth": {"oidc": [{"name": "dex", "issuer": "http://localhost:5556", "clientId": "flint"}]}}`, nil},
+		{"oidc empty", `{"dataDir": "/d", "auth": {"oidc": [{}]}}`,
+			[]string{`auth.oidc[0].name: "" is not a valid provider name`, "auth.oidc[0].issuer: is required", "auth.oidc[0].clientId: is required"}},
+		{"oidc bad issuer", `{"dataDir": "/d", "auth": {"oidc": [
+			{"name": "a", "issuer": "http://idp.example", "clientId": "c"},
+			{"name": "b", "issuer": "https://u:p@idp.example", "clientId": "c"},
+			{"name": "c", "issuer": "https://idp.example?x=1", "clientId": "c"},
+			{"name": "d", "issuer": "ldap://idp.example", "clientId": "c"},
+			{"name": "e", "issuer": "https://", "clientId": "c"}]}}`,
+			[]string{`auth.oidc[0].issuer: "http://idp.example" must be an https URL; http is allowed only for a loopback address`,
+				"auth.oidc[1].issuer: \"https://u:p@idp.example\" must not contain credentials",
+				"auth.oidc[2].issuer: \"https://idp.example?x=1\" must not have a query",
+				"auth.oidc[3].issuer: \"ldap://idp.example\" must be an https URL", "auth.oidc[4].issuer: \"https://\" has no host"}},
+		{"oidc duplicate name", `{"dataDir": "/d", "auth": {"oidc": [
+			{"name": "corp", "issuer": "https://a.example", "clientId": "c"},
+			{"name": "corp", "issuer": "https://b.example", "clientId": "c"}]}}`,
+			[]string{`auth.oidc[1].name: "corp" is already declared by auth.oidc[0]`}},
+		{"oidc bad fields", `{"dataDir": "/d", "auth": {"oidc": [{"name": "Corp", "issuer": "https://idp.example", "clientId": "c\n",
+			"displayName": "a\tb", "clientSecretFile": "secret", "caFile": "ca.pem", "scopes": ["email", "a b"],
+			"usernameClaim": " email", "groupsClaim": "g\n", "allowedDomains": ["Example.com", "a..b"], "allowedGroups": [""],
+			"adminGroups": ["ok", ""], "groupMappings": {"": ["ci"], "eng": [], "ops": ["Ops"]}, "signingAlgorithms": ["HS256", "none"]}]}}`,
+			[]string{`auth.oidc[0].name: "Corp"`, "auth.oidc[0].displayName: must be at most 128 bytes",
+				"auth.oidc[0].clientId: must not contain control characters",
+				`auth.oidc[0].clientSecretFile: "secret" must be an absolute path`, `auth.oidc[0].caFile: "ca.pem" must be an absolute path`,
+				`auth.oidc[0].scopes: must include "openid"`, `auth.oidc[0].scopes[1]: "a b" is not a valid scope`,
+				`auth.oidc[0].usernameClaim: " email" is not a claim name`, `auth.oidc[0].groupsClaim: "g\n" is not a claim name`,
+				`auth.oidc[0].allowedDomains[0]: "Example.com" is not a lowercase domain name`, `auth.oidc[0].allowedDomains[1]: "a..b"`,
+				"auth.oidc[0].allowedGroups[0]: group names must be non-empty", "auth.oidc[0].adminGroups[1]: group names must be non-empty",
+				`auth.oidc[0].groupMappings[""]: the provider's group name must be non-empty`,
+				`auth.oidc[0].groupMappings["eng"]: must name at least one flint group`, `auth.oidc[0].groupMappings["ops"][0]: "Ops" is not a valid name`,
+				`auth.oidc[0].signingAlgorithms[0]: "HS256" is not supported`, `auth.oidc[0].signingAlgorithms[1]: "none" is not supported`}},
+		{"oidc empty algorithms", `{"dataDir": "/d", "auth": {"oidc": [{"name": "c", "issuer": "https://idp.example", "clientId": "c", "signingAlgorithms": []}]}}`,
+			[]string{"auth.oidc[0].signingAlgorithms: must not be empty if set"}},
 		{"bad level", `{"dataDir": "/d", "log": {"level": "verbose"}}`, []string{`log.level: "verbose" is not one of`}},
 		{"repo bad name", `{"dataDir": "/d", "repositories": [{"name": "Docker", "format": "oci", "type": "hosted"}]}`,
 			[]string{`repositories[0].name: "Docker" is not a valid repository name`}},

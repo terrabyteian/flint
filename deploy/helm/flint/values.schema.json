@@ -98,6 +98,28 @@
         }
       }
     },
+    "oidcSecrets": {
+      "type": "array",
+      "description": "Secrets mounted at /etc/flint/oidc/<name>, each key a file, for OIDC providers' client secrets and CA certificates.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "existingSecret"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$"
+          },
+          "existingSecret": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "containerPort": {
       "type": "integer",
       "minimum": 1,

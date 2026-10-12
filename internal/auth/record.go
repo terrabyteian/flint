@@ -15,12 +15,21 @@ const (
 	userPrefix      = "auth\x00user\x00"      // + name: user record
 	tokenPrefix     = "auth\x00token\x00"     // + id: token record
 	userTokenPrefix = "auth\x00usertoken\x00" // + user + "\x00" + id: empty, indexes a user's tokens
+	// + id: sign-in session record
+	sessionPrefix = "auth\x00session\x00"
+	// + user + "\x00" + id: empty, indexes a user's sessions
+	userSessionPrefix = "auth\x00usersession\x00"
+	// + issuer + "\x00" + subject: the name of the user an OIDC identity signs in as
+	oidcPrefix = "auth\x00oidc\x00"
 )
 
 // GCMarker returns the auth marker for the garbage collector: users and
 // tokens reference no blobs.
 func GCMarker() gc.Marker {
-	return gc.Marker{userPrefix: nil, tokenPrefix: nil, userTokenPrefix: nil}
+	return gc.Marker{
+		userPrefix: nil, tokenPrefix: nil, userTokenPrefix: nil,
+		sessionPrefix: nil, userSessionPrefix: nil, oidcPrefix: nil,
+	}
 }
 
 func userKey(name string) []byte { return []byte(userPrefix + name) }
@@ -28,26 +37,49 @@ func tokenKey(id string) []byte  { return []byte(tokenPrefix + id) }
 func userTokenKey(user, id string) []byte {
 	return []byte(userTokenPrefix + user + "\x00" + id)
 }
+func sessionKey(id string) []byte { return []byte(sessionPrefix + id) }
+func userSessionKey(user, id string) []byte {
+	return []byte(userSessionPrefix + user + "\x00" + id)
+}
+func oidcKey(issuer, subject string) []byte {
+	return []byte(oidcPrefix + issuer + "\x00" + subject)
+}
 
-// Record schema versions: the first byte of each value.
+// Record schema versions: the first byte of each value. A user record
+// is version 1 for a local user and version 2, which adds the OIDC
+// identity, for a user who signs in through an OIDC provider.
 const (
-	userVersion  = 1
-	tokenVersion = 1
+	userVersion     = 1
+	oidcUserVersion = 2
+	tokenVersion    = 1
+	sessionVersion  = 1
 )
 
 const flagAdmin = 1 << 0
 
-// user is a stored local user.
+// user is a stored user: a local user, or one who signs in through an
+// OIDC provider.
 type user struct {
 	Name     string
 	Admin    bool
 	Created  time.Time
 	Password []byte // an encoded password hash; empty means password login is disabled
 	Groups   []string
+	OIDC     *oidcIdentity // nil for a local user
+}
+
+// oidcIdentity is the OIDC identity a user signs in with.
+type oidcIdentity struct {
+	Provider string // the configured provider's name when the user was created
+	Issuer   string
+	Subject  string
 }
 
 func (u *user) encode() []byte {
 	b := []byte{userVersion, 0}
+	if u.OIDC != nil {
+		b[0] = oidcUserVersion
+	}
 	if u.Admin {
 		b[1] |= flagAdmin
 	}
@@ -57,12 +89,18 @@ func (u *user) encode() []byte {
 	for _, g := range u.Groups {
 		b = appendBytes(b, []byte(g))
 	}
+	if u.OIDC != nil {
+		b = appendBytes(b, []byte(u.OIDC.Provider))
+		b = appendBytes(b, []byte(u.OIDC.Issuer))
+		b = appendBytes(b, []byte(u.OIDC.Subject))
+	}
 	return b
 }
 
 func decodeUser(name string, b []byte) (*user, error) {
 	d := decoder{b: b}
-	if v := d.byte(); v != userVersion {
+	v := d.byte()
+	if v != userVersion && v != oidcUserVersion {
 		return nil, errVersion(v)
 	}
 	u := &user{Name: name}
@@ -72,6 +110,9 @@ func decodeUser(name string, b []byte) (*user, error) {
 	n := d.count()
 	for range n {
 		u.Groups = append(u.Groups, string(d.bytes()))
+	}
+	if v == oidcUserVersion {
+		u.OIDC = &oidcIdentity{Provider: string(d.bytes()), Issuer: string(d.bytes()), Subject: string(d.bytes())}
 	}
 	return u, d.done()
 }
@@ -139,6 +180,45 @@ func decodeToken(id string, b []byte) (*token, error) {
 	}
 	return t, d.done()
 }
+
+// session is a stored sign-in session. The secret in the session cookie
+// is never stored, only its SHA-256 hash.
+type session struct {
+	ID      string
+	User    string
+	Hash    []byte // SHA-256 of the whole cookie value
+	Created time.Time
+	Expires time.Time
+	// Method is how the user signed in: "password", or "oidc:" and the
+	// provider's name.
+	Method string
+}
+
+func (s *session) encode() []byte {
+	b := []byte{sessionVersion}
+	b = appendBytes(b, []byte(s.User))
+	b = appendBytes(b, s.Hash)
+	b = binary.AppendVarint(b, s.Created.Unix())
+	b = binary.AppendVarint(b, s.Expires.Unix())
+	return appendBytes(b, []byte(s.Method))
+}
+
+func decodeSession(id string, b []byte) (*session, error) {
+	d := decoder{b: b}
+	if v := d.byte(); v != sessionVersion {
+		return nil, errVersion(v)
+	}
+	s := &session{ID: id}
+	s.User = string(d.bytes())
+	s.Hash = d.bytes()
+	s.Created = time.Unix(d.varint(), 0)
+	s.Expires = time.Unix(d.varint(), 0)
+	s.Method = string(d.bytes())
+	return s, d.done()
+}
+
+// expired reports whether the session has expired at now.
+func (s *session) expired(now time.Time) bool { return !now.Before(s.Expires) }
 
 // expired reports whether the token has expired at now.
 func (t *token) expired(now time.Time) bool {

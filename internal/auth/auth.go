@@ -8,7 +8,14 @@
 // Users are runtime data in the metadata store. A password is stored only
 // as a PBKDF2-HMAC-SHA256 hash with a per-user salt and the iteration
 // count it was derived with. A user may be a global administrator, and
-// belongs to any number of groups.
+// belongs to any number of groups. A user may instead sign in through an
+// OpenID Connect provider, which identifies it by issuer and subject;
+// such a user is created on its first sign-in and its groups are synced
+// at every sign-in (oidcflow.go).
+//
+// Browsers sign in on the sign-in page, with a password or through a
+// provider, and get a sign-in session, which authenticates the admin API
+// and the UI but not registry or package clients (session.go).
 //
 // An API token is a random secret shown once at creation; only its
 // SHA-256 hash is stored. It may expire, and it carries a subset of its
@@ -106,8 +113,8 @@ const bearerTTL = 5 * time.Minute
 type Options struct {
 	// Store holds users and tokens. Required.
 	Store meta.Store
-	// KeyDir is the directory of the token-signing and URL-signing keys,
-	// normally <data>/auth. Required.
+	// KeyDir is the directory of the token-signing, URL-signing, and OIDC
+	// state keys, normally <data>/auth. Required.
 	KeyDir string
 	// FS is the filesystem of KeyDir; nil means fsys.OS.
 	FS fsys.FS
@@ -123,6 +130,10 @@ type Options struct {
 	// PasswordIterations is the PBKDF2 iteration count for new password
 	// hashes; zero means DefaultPasswordIterations.
 	PasswordIterations int
+	// OIDCTransport, if set, carries the requests to OIDC providers
+	// instead of a transport configured from each provider's caFile, as
+	// in tests.
+	OIDCTransport http.RoundTripper
 }
 
 // Service authenticates requests and checks permissions. It implements
@@ -134,6 +145,7 @@ type Service struct {
 	urlKey     []byte      // signs download URLs
 	docker     *Authorizer // the registry API's authorizer
 	loginTTL   time.Duration
+	sessionTTL time.Duration
 	log        *slog.Logger
 	now        func() time.Time
 	iterations int
@@ -143,6 +155,9 @@ type Service struct {
 	// requests. Batches also carry preconditions on what they read.
 	mu sync.Mutex
 
+	crossOrigin *http.CrossOriginProtection
+	oidc        *oidcService // nil without OIDC providers
+
 	verified *verifiedCache
 	hashing  chan struct{} // bounds concurrent PBKDF2 derivations
 	dummy    []byte        // hash checked for unknown users, so timing does not reveal them
@@ -151,8 +166,9 @@ type Service struct {
 	issued   *metrics.CounterSeries
 }
 
-// New returns a Service, loading the token-signing and URL-signing keys
-// from KeyDir or generating and storing them on first start.
+// New returns a Service, loading the token-signing and URL-signing keys,
+// and with OIDC providers the OIDC state key, from KeyDir or generating
+// and storing them on first start.
 func New(opts Options) (*Service, error) {
 	if opts.Store == nil || opts.KeyDir == "" {
 		return nil, errors.New("auth: Options.Store and Options.KeyDir are required")
@@ -184,15 +200,33 @@ func New(opts Options) (*Service, error) {
 		now:        opts.Now,
 		iterations: opts.PasswordIterations,
 		loginTTL:   config.DefaultLoginTokenTTL,
+		sessionTTL: config.DefaultSessionTTL,
 		verified:   newVerifiedCache(passwordCacheTTL, 10000),
 		hashing:    make(chan struct{}, runtime.GOMAXPROCS(0)),
+
+		crossOrigin: http.NewCrossOriginProtection(),
 	}
 	s.docker = s.Authorizer(Challenge{Style: ChallengeDocker})
 	if opts.Config != nil && opts.Config.Auth.LoginTokenTTL.Duration > 0 {
 		s.loginTTL = opts.Config.Auth.LoginTokenTTL.Duration
 	}
+	if opts.Config != nil && opts.Config.Auth.SessionTTL.Duration > 0 {
+		s.sessionTTL = opts.Config.Auth.SessionTTL.Duration
+	}
+	if opts.Config != nil && len(opts.Config.Auth.OIDC) > 0 {
+		stateKey, stateKeyCreated, err := loadOrCreateSecretKey(opts.FS, opts.KeyDir, oidcStateKeyFileName)
+		if err != nil {
+			return nil, err
+		}
+		if stateKeyCreated {
+			s.log.Info("generated the OIDC state key", "path", filepath.Join(opts.KeyDir, oidcStateKeyFileName))
+		}
+		if s.oidc, err = newOIDCService(opts.Config.Auth.OIDC, stateKey, opts.OIDCTransport, s.now, s.log); err != nil {
+			return nil, err
+		}
+	}
 	var urlKeyCreated bool
-	if s.urlKey, urlKeyCreated, err = loadOrCreateURLKey(opts.FS, opts.KeyDir); err != nil {
+	if s.urlKey, urlKeyCreated, err = loadOrCreateSecretKey(opts.FS, opts.KeyDir, urlKeyFileName); err != nil {
 		return nil, err
 	}
 	if urlKeyCreated {
@@ -211,10 +245,12 @@ func New(opts Options) (*Service, error) {
 	return s, nil
 }
 
-// Register adds the token endpoint and the admin API to srv.
+// Register adds the token endpoint, the sign-in endpoints, and the admin
+// API to srv.
 func (s *Service) Register(srv *server.Server) {
 	srv.HandleFunc("GET "+TokenPath, s.handleToken)
 	srv.HandleFunc("POST "+TokenPath, s.handleToken)
+	s.registerSignIn(srv)
 	s.registerAPI(srv)
 }
 
@@ -232,6 +268,9 @@ type Principal struct {
 	TokenID string
 	// Password reports whether the client authenticated with a password.
 	Password bool
+	// SessionID is the sign-in session the client authenticated with, if
+	// any.
+	SessionID string
 
 	userAdmin bool    // the user's own admin flag, which a token's scopes then cap
 	scopes    []Scope // the token's scopes
@@ -239,9 +278,10 @@ type Principal struct {
 
 // credential kinds a request can present.
 const (
-	credNone   = iota // no credentials
-	credDirect        // a password or an API token, presented directly
-	credJWT           // bearer, with a token from the token service
+	credNone    = iota // no credentials
+	credDirect         // a password or an API token, presented directly
+	credJWT            // bearer, with a token from the token service
+	credSession        // a sign-in session's cookie
 )
 
 // credentials is what a request authenticated as.
