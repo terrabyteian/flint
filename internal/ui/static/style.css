@@ -273,7 +273,7 @@ tr.expired .tok-name { text-decoration: line-through; text-decoration-color: var
 code.digest { color: var(--muted); white-space: nowrap; }
 h1 code.digest { color: var(--text); font-size: 0.8em; }
 .plats, .proofs { display: inline-flex; flex-wrap: wrap; gap: 0.3rem; }
-.tags-table td:first-child { min-width: 9rem; }
+.tags-table td:first-child { min-width: 8.5rem; }
 .tags-table td:nth-child(3) { min-width: 12rem; }
 .tags-table .proofs { flex-direction: column; align-items: flex-start; gap: 0.15rem; }
 .plat { font: 500 0.75rem/1 var(--mono); padding: 0.25rem 0.4rem; border-radius: 4px; background: var(--surface-2); color: var(--muted); white-space: nowrap; }
