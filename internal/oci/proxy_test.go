@@ -1033,3 +1033,28 @@ func TestRunProxy(t *testing.T) {
 		t.Error("the pull times were not persisted on stop")
 	}
 }
+
+// TestProxyTokenRefusedName checks that a token service refusing an
+// anonymous token for a name, as ghcr.io answers 400 for a one-part name
+// and 403 for a name that does not exist, answers not found rather than
+// failing as an upstream that cannot be reached.
+func TestProxyTokenRefusedName(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden} {
+		pe := newProxyEnv(t, 0)
+		pe.up.SetStatus(func(r *http.Request) int {
+			if r.URL.Path == "/token" && strings.Contains(r.URL.Query().Get("scope"), "busybox") {
+				return status
+			}
+			return 0
+		})
+		want(t, pe.do("HEAD", "/v2/hub/busybox/manifests/test", nil), http.StatusNotFound, "")
+		want(t, pe.do("GET", "/v2/hub/busybox/manifests/test", nil), http.StatusNotFound, codeManifestUnknown)
+		want(t, pe.do("GET", "/v2/hub/busybox/tags/list", nil), http.StatusNotFound, codeNameUnknown)
+		if pe.h.repos["hub"].proxy.client.Offline() {
+			t.Errorf("%d: the refusal marked the upstream offline", status)
+		}
+		// Other names are still served.
+		img := pe.up.PutImage("app", "v1", []byte("x"))
+		pe.pull("hub/app", "v1", img)
+	}
+}

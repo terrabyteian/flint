@@ -62,6 +62,8 @@ busybox=busybox:1.36
 ghcr_image=terrabyteian/flint:v0.1.1
 mirrored_hub=library/hello-world:latest
 mirrored_ghcr=terrabyteian/flint:v0.2.0
+# A one-part name that neither upstream has, pushed with crane copy.
+onepart=flint-e2e-onepart:test
 # An image that no step pulls online, so it is never cached.
 uncached=library/redis:7-alpine
 
@@ -121,6 +123,18 @@ if [ "$mode" = online ]; then
 	crane pull "$reg/$virtual/e2e/app:v1" "$work/app-pulled.tar"
 	crane_login copy "$reg/$virtual/e2e/app:v1" "$reg/$virtual/e2e/copy:v1"
 	[ "$(crane digest "$reg/$virtual/e2e/copy:v1")" = "$got" ] || fail "the copy through $virtual differs"
+
+	# ghcr.io's token service refuses a one-part name with 400, which
+	# means the name is not there: crane copy checks the name with HEAD
+	# before it pushes, and needs not found rather than a failure.
+	step "crane copy to a one-part name no member has, through $virtual"
+	if crane digest "$reg/$virtual/$onepart" >/dev/null 2>"$work/err"; then
+		fail "$virtual/$onepart exists before it is pushed"
+	fi
+	grep -q MANIFEST_UNKNOWN "$work/err" || fail "the missing one-part name failed without MANIFEST_UNKNOWN: $(cat "$work/err")"
+	crane_login copy "$reg/$virtual/e2e/app:v1" "$reg/$virtual/$onepart"
+	[ "$(crane digest "$reg/$virtual/$onepart")" = "$got" ] || fail "the copy to $virtual/$onepart differs"
+	[ "$(crane_login digest "$reg/$hosted/$onepart")" = "$got" ] || fail "the copy to $virtual/$onepart did not land in $hosted"
 
 	step "Docker Hub images through $virtual"
 	want=$(command crane digest "docker.io/$alpine")

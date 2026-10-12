@@ -195,6 +195,11 @@ func (c *Client) fetchToken(ctx context.Context, ch challenge, scope string) (st
 		return "", &Error{Op: op, Status: resp.StatusCode, Err: fmt.Errorf("%w: the token service refused anonymous access", ErrDenied)}
 	case retryable(resp.StatusCode):
 		return "", &Error{Op: op, Status: resp.StatusCode, Err: ErrUnavailable}
+	case resp.StatusCode >= 400 && resp.StatusCode < 500 && c.username == "" && strings.HasPrefix(reqScope, "repository:"):
+		// A token service may refuse an anonymous token for a repository
+		// that does not exist with another 4xx, as ghcr.io answers 400
+		// for a one-part name: an answer about the name, like a 404.
+		return "", &Error{Op: op, Status: resp.StatusCode, Err: fmt.Errorf("%w: the token service refused the repository", ErrNotFound)}
 	case resp.StatusCode != http.StatusOK:
 		return "", &Error{Op: op, Status: resp.StatusCode, Err: errors.New("the token service failed")}
 	}
