@@ -1,5 +1,4 @@
-/* flint's web UI. Light and dark themes follow the system unless the
-   theme toggle chose one (html[data-theme]). */
+/* flint's web UI. Light and dark themes follow the system. */
 
 :root {
   --bg: #f7f7f8;
@@ -20,7 +19,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root {
     --bg: #111317;
     --surface: #1a1d23;
     --text: #e6e8eb;
@@ -37,24 +36,6 @@
     --shadow: none;
     color-scheme: dark;
   }
-}
-
-:root[data-theme="dark"] {
-  --bg: #111317;
-  --surface: #1a1d23;
-  --text: #e6e8eb;
-  --muted: #9aa2b1;
-  --border: #2e333c;
-  --accent: #f59e0b;
-  --accent-text: #111317;
-  --link: #8ab4ff;
-  --code-bg: #22262e;
-  --danger: #f87171;
-  --ok: #4ade80;
-  --focus: #8ab4ff;
-  --badge-bg: #262b34;
-  --shadow: none;
-  color-scheme: dark;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -195,7 +176,6 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
 button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 button.link { background: none; border: 0; padding: 0.35rem 0.1rem; color: var(--text); }
 button.link:hover { color: var(--link); }
-button.theme { font-size: 0.8rem; padding: 0.2rem 0.5rem; }
 button.copy { position: absolute; top: 0.4rem; right: 0.4rem; font-size: 0.75rem; padding: 0.15rem 0.5rem; }
 button.copy.small { position: static; margin-left: 0.3rem; }
 button:disabled { opacity: 0.7; cursor: default; }

@@ -4,13 +4,13 @@ flint serves a small web UI at `/ui/`, and redirects its root, `/`, there.
 It shows the repositories you may read and what is in them, tells you how to configure each client for them, and lets you change your password and manage your own [API tokens](auth.md#api-tokens).
 Administration stays in the [admin API](auth.md) and the [configuration](configuration.md); administrators get a read-only status page.
 
-The pages are rendered on the server from templates built into the binary, with a little hand-written JavaScript for conveniences such as copy buttons and the theme switch; everything works without it.
-The layout adapts to narrow screens, follows the system's light or dark theme unless you pick one, and can be used with the keyboard alone.
+The pages are rendered on the server from templates built into the binary, with a little hand-written JavaScript for conveniences such as copy buttons; everything works without it.
+The layout adapts to narrow screens, follows the system's light or dark theme, and can be used with the keyboard alone.
+Under a [public URL](configuration.md#public-url) with a path, such as `https://tools.example/flint`, the UI is at `https://tools.example/flint/ui/`, and its links, forms, and redirects stay under that path.
 
 ## Signing in
 
 The UI has no sign-in of its own: **Sign in** takes you to flint's [sign-in page](auth.md#signing-in), `/auth/login`, where you sign in with your user name and password or through an [OIDC provider](auth.md#oidc-sign-in), and which brings you back to the page you came from.
-`/ui/login` sends you there too.
 The sign-in session, its `flint_session` cookie, how long it lasts (`auth.sessionTTL`), and how it ends are as [authentication](auth.md#signing-in) describes; **Sign out** ends it.
 Changing your password on the account page keeps the session you changed it from and ends your others.
 Every page checks the session's user as it is at that moment, so a changed admin flag or group membership applies at once.
@@ -45,7 +45,7 @@ The URLs are built from flint's [public URL](configuration.md#public-url), or el
 
 ## Your account
 
-The account page, `/ui/account`, shows your user, groups, and when your session ends, and lists your API tokens.
+The account page, `/ui/account`, shows your user, your groups, and whether you are an administrator, and lists your API tokens.
 
 - **Create a token** with a name, an expiry of 7, 30, 90, or 365 days or none, and either all of your repository permissions or one role on repositories you name, by name or pattern such as `team-a-*`.
   Administrators may also give a token the global admin role.
@@ -81,7 +81,6 @@ Administrators get a read-only status page, `/ui/admin`, with:
 | --- | --- |
 | `GET /` | Redirects to `/ui/`. |
 | `GET /ui/` | The repository list. |
-| `GET /ui/login` | Redirects to the [sign-in page](auth.md#signing-in), `/auth/login`. |
 | `GET /ui/repositories/<repository>` | A repository's contents and client setup. |
 | `GET /ui/repositories/<repository>/packages/<package>` | A package's versions and files. |
 | `GET /ui/repositories/<repository>/images/<image>` | An OCI image's tags and manifests. |

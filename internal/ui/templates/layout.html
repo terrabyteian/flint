@@ -7,30 +7,29 @@
 <meta name="robots" content="noindex">
 <meta name="color-scheme" content="light dark">
 <title>{{.Title}} · flint</title>
-<link rel="icon" href="/ui/static/favicon.svg?v={{.AssetVer}}" type="image/svg+xml">
-<link rel="stylesheet" href="/ui/static/style.css?v={{.AssetVer}}">
-<script src="/ui/static/app.js?v={{.AssetVer}}"></script>
+<link rel="icon" href="{{$.Base}}/ui/static/favicon.svg?v={{.AssetVer}}" type="image/svg+xml">
+<link rel="stylesheet" href="{{$.Base}}/ui/static/style.css?v={{.AssetVer}}">
+<script src="{{$.Base}}/ui/static/app.js?v={{.AssetVer}}"></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="top">
   <nav class="bar" aria-label="Main">
-    <a class="brand" href="/ui/"><img src="/ui/static/favicon.svg?v={{.AssetVer}}" alt="" width="22" height="22"> flint</a>
-    <a href="/ui/"{{if eq .Nav "repos"}} aria-current="page"{{end}}>Repositories</a>
+    <a class="brand" href="{{$.Base}}/ui/"><img src="{{$.Base}}/ui/static/favicon.svg?v={{.AssetVer}}" alt="" width="22" height="22"> flint</a>
+    <a href="{{$.Base}}/ui/"{{if eq .Nav "repos"}} aria-current="page"{{end}}>Repositories</a>
     <span class="spacer"></span>
     {{- if .User}}
     {{- if .User.Admin}}
-    <a href="/ui/admin"{{if eq .Nav "admin"}} aria-current="page"{{end}}>Status</a>
+    <a href="{{$.Base}}/ui/admin"{{if eq .Nav "admin"}} aria-current="page"{{end}}>Status</a>
     {{- end}}
-    <a href="/ui/account"{{if eq .Nav "account"}} aria-current="page"{{end}} title="Account">{{.User.User}}</a>
+    <a href="{{$.Base}}/ui/account"{{if eq .Nav "account"}} aria-current="page"{{end}} title="Account">{{.User.User}}</a>
     <form method="post" action="{{.SignOut}}" class="inline">
-      <input type="hidden" name="return" value="/ui/">
+      <input type="hidden" name="return" value="{{$.Base}}/ui/">
       <button type="submit" class="link">Sign out</button>
     </form>
     {{- else}}
     <a href="{{.SignIn}}">Sign in</a>
     {{- end}}
-    <button type="button" class="theme" data-theme-toggle hidden>Theme: auto</button>
   </nav>
 </header>
 <main id="main" tabindex="-1">
@@ -48,16 +47,16 @@
 {{- end}}
 
 {{define "snippets" -}}
-{{if .}}
+{{if .Data.Snippets}}
 <section class="snippets" aria-labelledby="setup-heading">
   <h2 id="setup-heading">Client setup</h2>
-  {{- range $i, $s := .}}
+  {{- range $i, $s := .Data.Snippets}}
   <details{{if eq $i 0}} open{{end}}>
     <summary>{{$s.Title}}{{if $s.File}} <code class="file">{{$s.File}}</code>{{end}}</summary>
     <div class="code"><pre><code>{{$s.Text}}</code></pre><button type="button" class="copy" data-copy hidden>Copy</button></div>
   </details>
   {{- end}}
-  <p class="hint">Create an API token for <code>$FLINT_TOKEN</code> on your <a href="/ui/account#tokens">account page</a>.</p>
+  <p class="hint">Create an API token for <code>$FLINT_TOKEN</code> on your <a href="{{$.Base}}/ui/account#tokens">account page</a>.</p>
 </section>
 {{end}}
 {{- end}}

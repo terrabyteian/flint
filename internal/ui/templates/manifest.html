@@ -1,6 +1,6 @@
 {{define "content"}}
 {{$d := .Data}}{{$m := $d.Manifest}}
-<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <a href="{{$d.ImageHref}}">{{$d.Image}}</a> / <span aria-current="page">{{short $m.Digest}}</span></nav>
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <a href="{{$d.ImageHref}}">{{$d.Image}}</a> / <span aria-current="page">{{short $m.Digest}}</span></nav>
 <div class="head">
   <h1>{{if $m.Index}}Index{{else}}Manifest{{end}} <code class="digest">{{short $m.Digest}}</code></h1>
   <span class="badges">{{template "badges" $d.RepoRow}}</span>
@@ -62,7 +62,7 @@
   {{- else}}<p class="empty">No signatures or other referrers.</p>{{end}}
 </section>
 <aside>
-{{template "snippets" $d.Snippets}}
+{{template "snippets" $}}
 </aside>
 </div>
 {{end}}

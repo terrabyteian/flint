@@ -1,6 +1,6 @@
 {{define "content"}}
 {{$d := .Data}}{{$img := $d.Image}}
-<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <span aria-current="page">{{$img.Name}}</span></nav>
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <span aria-current="page">{{$img.Name}}</span></nav>
 <div class="head">
   <h1>{{$d.Name}}/{{$img.Name}}</h1>
   <span class="badges">{{template "badges" $d.RepoRow}}</span>
@@ -35,7 +35,7 @@
   </table>
 </section>
 <aside>
-{{template "snippets" $d.Snippets}}
+{{template "snippets" $}}
 </aside>
 </div>
 {{end}}

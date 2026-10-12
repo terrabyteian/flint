@@ -190,7 +190,10 @@ func TestBrowsePages(t *testing.T) {
 	alice.expect("/ui/repositories/oci-local/manifests/sha256:nope/team/app", http.StatusNotFound)
 
 	r = alice.expect("/ui/repositories/pypi-local", http.StatusOK)
-	r.has(t, "acme-lib", "The acme library", "pip install --index-url "+e.srv.URL+"/pypi/pypi-local/simple/")
+	r.has(t, "acme-lib", "The acme library", "pip install --index-url "+e.srv.URL+"/pypi/pypi-local/simple/",
+		"machine 127.0.0.1\nlogin __token__")
+	// .netrc names the host without the port, as clients look it up.
+	r.lacks(t, "machine 127.0.0.1:")
 	r = alice.expect("/ui/repositories/pypi-local/packages/acme-lib", http.StatusOK)
 	r.has(t, "2.0", "yanked: broken", "acme_lib-2.0.tar.gz", "2.0 KiB", `href="/pypi/x/files/acme-lib/acme_lib-2.0.tar.gz"`,
 		"pip install --index-url", "acme-lib==2.0")
@@ -209,7 +212,9 @@ func TestBrowsePages(t *testing.T) {
 	r = alice.expect("/ui/repositories/files?dir=tools/", http.StatusOK)
 	r.has(t, "tool-1.0.tar.gz", `<a href="/ui/repositories/files?dir=tools%2F">tools</a>`)
 	alice.expect("/ui/repositories/files?dir=missing/", http.StatusNotFound)
-	alice.expect("/ui/repositories/go-remote", http.StatusOK).has(t, "Cached files", "go env -w GOPROXY="+e.srv.URL+"/go/go-remote")
+	r = alice.expect("/ui/repositories/go-remote", http.StatusOK)
+	r.has(t, "Cached files", "go env -w GOPROXY="+e.srv.URL+"/go/go-remote", "machine 127.0.0.1\nlogin __token__")
+	r.lacks(t, "machine 127.0.0.1:")
 	// A view's failure is a server error, which does not leak the error.
 	r = alice.expect("/ui/repositories/broken", http.StatusInternalServerError)
 	r.lacks(t, errBroken.Error())
@@ -221,14 +226,8 @@ func TestSignIn(t *testing.T) {
 	b := e.browser()
 	b.expect("/ui/", http.StatusOK).has(t, `href="/auth/login?return=%2Fui%2F"`)
 	b.expect("/ui/repositories/public", http.StatusOK).has(t, `href="/auth/login?return=%2Fui%2Frepositories%2Fpublic"`)
-	for next, want := range map[string]string{
-		"/ui/login":                            "/auth/login?return=%2Fui%2F",
-		"/ui/login?next=/ui/account":           "/auth/login?return=%2Fui%2Faccount",
-		"/ui/login?next=https://evil.example/": "/auth/login?return=%2Fui%2F",
-	} {
-		if r := b.get(next); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != want {
-			t.Errorf("GET %s: %d to %q, want %q", next, r.StatusCode, r.Header.Get("Location"), want)
-		}
+	if r := b.get("/ui/account"); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/auth/login?return=%2Fui%2Faccount" {
+		t.Errorf("GET /ui/account: %d to %q", r.StatusCode, r.Header.Get("Location"))
 	}
 
 	r := b.post(auth.SignInPath, url.Values{"username": {"alice"}, "password": {"wrong-password"}, "return": {"/ui/account"}})
@@ -244,27 +243,54 @@ func TestSignIn(t *testing.T) {
 	}
 	r = b.expect("/ui/account", http.StatusOK)
 	r.has(t, ">alice<", `action="/auth/logout"`, `name="return" value="/ui/"`)
-	// Signed in, /ui/login goes where it was asked to.
-	if r := b.get("/ui/login?next=/ui/account"); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/ui/account" {
-		t.Errorf("/ui/login when signed in: %d to %q", r.StatusCode, r.Header.Get("Location"))
-	}
 }
 
-// TestNextPath never redirects off the UI after signing in.
-func TestNextPath(t *testing.T) {
-	for next, want := range map[string]string{
-		"/ui/account":          "/ui/account",
-		"/ui/repositories/x?a": "/ui/repositories/x?a",
-		"":                     "/ui/",
-		"//evil.example/ui/":   "/ui/",
-		"https://evil.example": "/ui/",
-		"/api/v1/users":        "/ui/",
-		"/ui/\\evil":           "/ui/",
-		"/ui/\r\nSet-Cookie:":  "/ui/",
+// TestPathPrefix serves the UI under a public URL with a path, behind a
+// reverse proxy that strips the path: every link, form, asset, and
+// redirect stays under it.
+func TestPathPrefix(t *testing.T) {
+	e := newEnvAt(t, "https://tools.example/flint")
+	b := e.browser()
+	// Unprefixed URLs in attributes the pages write.
+	unprefixed := []string{`="/ui/`, `="/auth/`, `="/pypi/`, `="/generic/`, "return=%2Fui"}
+	if r := b.get("/"); r.StatusCode != http.StatusFound || r.Header.Get("Location") != "/flint/ui/" {
+		t.Errorf("GET /: %d to %q", r.StatusCode, r.Header.Get("Location"))
+	}
+	r := b.expect("/ui/", http.StatusOK)
+	r.has(t, `href="/flint/ui/static/style.css?v=`+e.h.assetVersion, `src="/flint/ui/static/app.js?v=`+e.h.assetVersion,
+		`href="/flint/ui/"`, `action="/flint/ui/"`, `href="/flint/ui/repositories/public"`,
+		`href="/flint/auth/login?return=%2Fflint%2Fui%2F"`)
+	r.lacks(t, unprefixed...)
+	if r := b.get("/ui/account"); r.StatusCode != http.StatusSeeOther ||
+		r.Header.Get("Location") != "/flint/auth/login?return=%2Fflint%2Fui%2Faccount" {
+		t.Errorf("GET /ui/account: %d to %q", r.StatusCode, r.Header.Get("Location"))
+	}
+
+	r = b.post(auth.SignInPath, url.Values{"username": {"alice"}, "password": {"alice-password"}, "return": {"/flint/ui/"}})
+	if r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/flint/ui/" {
+		t.Fatalf("sign-in: %d to %q", r.StatusCode, r.Header.Get("Location"))
+	}
+	for path, want := range map[string][]string{
+		"/ui/repositories/files": {`href="/flint/ui/repositories/files?dir=tools%2F"`, `href="/flint/generic/files/notes.txt"`},
+		"/ui/repositories/pypi-local/packages/acme-lib": {`href="/flint/ui/repositories/pypi-local"`,
+			`href="/flint/pypi/x/files/acme-lib/acme_lib-2.0.tar.gz"`, `href="/flint/ui/account#tokens"`,
+			"pip install --index-url https://tools.example/flint/pypi/pypi-local/simple/ acme-lib==2.0"},
+		"/ui/repositories/oci-local/images/team/app": {`href="/flint/ui/repositories/oci-local/manifests/`},
+		"/ui/account": {`action="/flint/ui/account/tokens"`, `action="/flint/ui/account/password"`,
+			`action="/flint/auth/logout"`, `name="return" value="/flint/ui/"`},
 	} {
-		if got := nextPath(next); got != want {
-			t.Errorf("nextPath(%q) = %q, want %q", next, got, want)
-		}
+		r := b.expect(path, http.StatusOK)
+		r.has(t, want...)
+		r.lacks(t, unprefixed...)
+	}
+
+	r = b.post("/ui/account/tokens", url.Values{"name": {"ci"}, "expiry": {"30d"}, "scope": {"all"}})
+	m := regexp.MustCompile(`action="/flint(/ui/account/tokens/[^"]+/revoke)"`).FindStringSubmatch(r.body)
+	if r.StatusCode != http.StatusOK || m == nil {
+		t.Fatalf("creating a token: %d\n%s", r.StatusCode, r.body)
+	}
+	if r := b.post(m[1], nil); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/flint/ui/account#tokens" {
+		t.Errorf("revoking a token: %d to %q", r.StatusCode, r.Header.Get("Location"))
 	}
 }
 

@@ -21,15 +21,17 @@ type snippet struct {
 type endpoints struct {
 	base string // the server's base URL, such as "https://registry.example"
 	host string // its host, as image references name it
-	url  string // the repository's URL, ending in "/"
-	user string // the signed-in user, or a placeholder
+	// machine is its host name without the port, as .netrc names it.
+	machine string
+	url     string // the repository's URL, ending in "/"
+	user    string // the signed-in user, or a placeholder
 }
 
 func (h *Handler) endpoints(rq *request, rc *config.Repository) endpoints {
 	base := server.BaseURL(rq.r)
-	e := endpoints{base: base, host: base, user: rq.p.User}
+	e := endpoints{base: base, host: base, machine: base, user: rq.p.User}
 	if u, err := url.Parse(base); err == nil && u.Host != "" {
-		e.host = u.Host
+		e.host, e.machine = u.Host, u.Hostname()
 	}
 	e.url = base + repo.Path(rc.Format, rc.Name)
 	if e.user == "" {
@@ -78,7 +80,7 @@ func (h *Handler) repoSnippets(rq *request, rc *config.Repository) []snippet {
 		if pub {
 			add("Publish with twine", "", "twine upload --repository-url "+e.url+"legacy/ \\\n  -u __token__ -p \"$FLINT_TOKEN\" dist/*")
 		}
-		add("Authenticate", ".netrc", "machine "+e.host+"\nlogin __token__\npassword $FLINT_TOKEN")
+		add("Authenticate", ".netrc", "machine "+e.machine+"\nlogin __token__\npassword $FLINT_TOKEN")
 	case config.FormatNPM:
 		add("Use with npm, pnpm, Yarn classic, or Bun", ".npmrc",
 			"registry="+e.url+"\n//"+strings.TrimPrefix(strings.TrimPrefix(e.url, "https://"), "http://")+":_authToken=${FLINT_TOKEN}")
@@ -103,7 +105,7 @@ func (h *Handler) repoSnippets(rq *request, rc *config.Repository) []snippet {
 			"\"\n                password = System.getenv(\"FLINT_TOKEN\")\n            }\n        }\n    }\n}")
 	case config.FormatGo:
 		add("Use with the go command", "", "go env -w GOPROXY="+strings.TrimSuffix(e.url, "/"))
-		add("Authenticate", ".netrc", "machine "+e.host+"\nlogin __token__\npassword $FLINT_TOKEN")
+		add("Authenticate", ".netrc", "machine "+e.machine+"\nlogin __token__\npassword $FLINT_TOKEN")
 	case config.FormatCargo:
 		cfg := "[registries." + rc.Name + "]\nindex = \"sparse+" + e.url + "\"\ncredential-provider = \"cargo:token\""
 		if rc.Type != config.TypeHosted {

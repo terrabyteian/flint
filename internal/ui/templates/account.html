@@ -41,7 +41,7 @@
 
   <h3 id="new-token">Create a token</h3>
   {{- if $d.TokenMessage}}<p class="alert error" role="alert">{{$d.TokenMessage}}</p>{{end}}
-  <form method="post" action="/ui/account/tokens" class="stack card">
+  <form method="post" action="{{$.Base}}/ui/account/tokens" class="stack card">
     <label for="token-name">Name</label>
     <input id="token-name" name="name" required maxlength="128" placeholder="such as ci-deploy or laptop" value="{{$d.Form.Name}}">
     <label for="token-expiry">Expires after</label>
@@ -76,7 +76,7 @@
   <h2 id="password-heading">Password</h2>
   {{- if $d.PasswordMessage}}<p class="alert{{if not $d.PasswordOK}} error{{end}}" role="{{if $d.PasswordOK}}status{{else}}alert{{end}}">{{$d.PasswordMessage}}</p>{{end}}
   {{- if $d.HasPassword}}
-  <form method="post" action="/ui/account/password" class="stack card">
+  <form method="post" action="{{$.Base}}/ui/account/password" class="stack card">
     <input type="text" name="username" value="{{.User.User}}" autocomplete="username" hidden>
     <label for="current">Current password</label>
     <input id="current" name="current" type="password" autocomplete="current-password" required>

@@ -51,6 +51,7 @@ import (
 	"github.com/terrabyteian/flint/internal/browse"
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/gc"
+	"github.com/terrabyteian/flint/internal/server"
 )
 
 // Prefix is the path the UI is served under.
@@ -186,23 +187,35 @@ func New(opts Options) (*Handler, error) {
 // to the UI.
 func (h *Handler) Register(srv interface{ Handle(string, http.Handler) }) {
 	for pattern, f := range map[string]func(*request){
-		"GET /ui/{$}":                 h.home,
-		"GET /ui/login":               h.loginPage,
-		"GET /ui/repositories/{repo}": h.repository,
+		"GET /ui/{$}":                                              h.home,
+		"GET /ui/repositories/{repo}":                              h.repository,
 		"GET /ui/repositories/{repo}/packages/{name...}":           h.packagePage,
 		"GET /ui/repositories/{repo}/images/{name...}":             h.imagePage,
 		"GET /ui/repositories/{repo}/manifests/{digest}/{name...}": h.manifestPage,
-		"GET /ui/account":                     h.account,
-		"POST /ui/account/password":           h.changePassword,
-		"POST /ui/account/tokens":             h.createToken,
-		"POST /ui/account/tokens/{id}/revoke": h.revokeToken,
-		"GET /ui/admin":                       h.admin,
-		"/ui/":                                h.notFoundPage,
+		"GET /ui/account":                                          h.account,
+		"POST /ui/account/password":                                h.changePassword,
+		"POST /ui/account/tokens":                                  h.createToken,
+		"POST /ui/account/tokens/{id}/revoke":                      h.revokeToken,
+		"GET /ui/admin":                                            h.admin,
+		"/ui/":                                                     h.notFoundPage,
 	} {
 		srv.Handle(pattern, h.wrap(f))
 	}
 	srv.Handle("GET /ui/static/{file}", http.HandlerFunc(h.serveStatic))
-	srv.Handle("GET /{$}", http.RedirectHandler(Prefix, http.StatusFound))
+	srv.Handle("GET /{$}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, basePath(r)+Prefix, http.StatusFound)
+	}))
+}
+
+// basePath returns the path a reverse proxy serves flint under, the path
+// of its public URL, such as "/flint", or "". Every URL the UI writes is
+// this path followed by a path from the server's root.
+func basePath(r *http.Request) string {
+	u, err := url.Parse(server.BaseURL(r))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(u.EscapedPath(), "/")
 }
 
 // request is a UI request with its principal.
@@ -212,6 +225,8 @@ type request struct {
 	h *Handler
 	// p is the signed-in principal, or an anonymous one.
 	p *auth.Principal
+	// base is the request's basePath.
+	base string
 }
 
 func (rq *request) signedIn() bool { return rq.p.User != "" }
@@ -226,7 +241,7 @@ func (h *Handler) wrap(f func(*request)) http.Handler {
 		hdr.Set("X-Frame-Options", "DENY")
 		hdr.Set("Referrer-Policy", "same-origin")
 		hdr.Set("Cache-Control", "no-store")
-		rq := &request{w: w, r: r, h: h, p: &auth.Principal{}}
+		rq := &request{w: w, r: r, h: h, p: &auth.Principal{}, base: basePath(r)}
 		switch p, err := h.auth.SessionPrincipal(r); {
 		case err == nil && p != nil:
 			rq.p = p
@@ -274,6 +289,8 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request) {
 // page is what every template receives.
 type page struct {
 	Title string
+	// Base is the basePath that every URL the page writes starts with.
+	Base string
 	// Nav names the active navigation entry.
 	Nav      string
 	User     *auth.Principal
@@ -289,8 +306,8 @@ type page struct {
 func (rq *request) render(status int, name, title string, data any) {
 	h := rq.h
 	t := h.pages[name]
-	pg := &page{Title: title, User: rq.p, Version: h.opts.Version, AssetVer: h.assetVersion,
-		SignIn: signInHref(rq.r.URL.RequestURI()), SignOut: auth.SignOutPath, Data: data}
+	pg := &page{Title: title, Base: rq.base, User: rq.p, Version: h.opts.Version, AssetVer: h.assetVersion,
+		SignIn: rq.signInHref(), SignOut: rq.base + auth.SignOutPath, Data: data}
 	if !rq.signedIn() {
 		pg.User = nil
 	}
@@ -326,12 +343,13 @@ func (rq *request) denied() {
 		rq.notFound()
 		return
 	}
-	http.Redirect(rq.w, rq.r, signInHref(rq.r.URL.RequestURI()), http.StatusSeeOther)
+	http.Redirect(rq.w, rq.r, rq.signInHref(), http.StatusSeeOther)
 }
 
-// signInHref is the sign-in page, which returns to path after signing in.
-func signInHref(path string) string {
-	return auth.SignInPath + "?return=" + url.QueryEscape(path)
+// signInHref is the sign-in page, which returns to this page after
+// signing in.
+func (rq *request) signInHref() string {
+	return rq.base + auth.SignInPath + "?return=" + url.QueryEscape(rq.base+rq.r.URL.RequestURI())
 }
 
 func (h *Handler) serverError(rq *request, err error) {

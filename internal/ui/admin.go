@@ -65,7 +65,7 @@ func (h *Handler) admin(rq *request) {
 	}
 	for i := range h.repos {
 		rc := &h.repos[i]
-		d.Repos = append(d.Repos, adminRepo{RepoRow: h.row(rc), Settings: settingsOf(rc)})
+		d.Repos = append(d.Repos, adminRepo{RepoRow: rq.row(rc), Settings: settingsOf(rc)})
 	}
 	for _, p := range cfg.Auth.Permissions {
 		d.Grants = append(d.Grants, grantRow{Repositories: strings.Join(p.Repositories, ", "), Role: p.Role,

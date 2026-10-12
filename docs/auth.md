@@ -34,7 +34,7 @@ The audit trail of the metadata store records who changed which user or token, n
 Browsers sign in on the sign-in page at `/auth/login`, with a user name and password or through an [OIDC provider](#oidc-sign-in), and get a sign-in session.
 The session is a cookie, `flint_session`, holding a random secret of which flint stores only the SHA-256 hash; it is `HttpOnly`, `SameSite=Lax`, and `Secure` when the browser reached flint over HTTPS.
 It lasts `auth.sessionTTL` (default 12 hours; see [configuration](configuration.md#fields)), and signing out (`POST /auth/logout`) ends it at once, as deleting the user does.
-Setting a user's password ends the user's sessions, except the one that set it, so changing your own password on the [web UI](ui.md#your-account)'s account page signs out your other browsers.
+Setting a user's password, on the [web UI](ui.md#your-account)'s account page or through the [admin API](#users), ends the user's sessions, except the one that set it: changing your own password signs out your other browsers, and an administrator setting another user's password signs that user out everywhere.
 A user keeps at most 50 sessions; signing in again beyond that ends the oldest.
 
 A session authenticates the [admin API](#admin-api) and the [web UI](ui.md), never the registry or package endpoints: Docker, PyPI, npm, and every other package client use [API tokens](#api-tokens).
@@ -323,7 +323,7 @@ The response, here `201 Created`, and every other user response has this form:
 `password` reports whether password login is enabled.
 A user who signs in through an [OIDC provider](#oidc-sign-in) also has `"oidc": {"provider": "corp", "issuer": "https://sso.example.com/realms/corp", "subject": "..."}`, the identity it signs in with.
 `PATCH /api/v1/users/{name}` takes `{"admin": true}`, `{"groups": ["ci"]}`, or both; a field left out is unchanged.
-`PUT /api/v1/users/{name}/password` takes `{"password": "..."}` and returns `204`.
+`PUT /api/v1/users/{name}/password` takes `{"password": "..."}` and returns `204`; it ends the user's [sign-in sessions](#signing-in), except the one of the request that set it.
 
 ### Groups
 

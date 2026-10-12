@@ -244,28 +244,57 @@ func hostedFiles(v meta.View, rp *repository, project string) ([]browseFile, err
 }
 
 // cachedFiles returns the files a proxy repository cached, of project
-// only if it is not "".
+// only if it is not "". For a project, it scans only the file names that
+// start with one of its namePrefixes.
 func cachedFiles(v meta.View, rp *repository, project string) ([]browseFile, error) {
 	var out []browseFile
 	var failure error
 	pfx := []byte(nsFile + rp.name + "\x00")
-	v.Scan(pfx, nil, func(k []byte, rec meta.Record) bool {
-		f, err := decodeFile(rec.Value)
-		if err != nil {
-			failure = fmt.Errorf("pypi: file record %q: %w", k, err)
-			return false
-		}
-		if f.Kind != kindCached || project != "" && f.Project != project {
+	for _, np := range namePrefixes(project) {
+		v.Scan(append(slices.Clip(pfx), np...), nil, func(k []byte, rec meta.Record) bool {
+			f, err := decodeFile(rec.Value)
+			if err != nil {
+				failure = fmt.Errorf("pypi: file record %q: %w", k, err)
+				return false
+			}
+			if f.Kind != kindCached || project != "" && f.Project != project {
+				return true
+			}
+			filename := string(k[len(pfx):])
+			d, _ := parseFilename(filename, f.Project)
+			out = append(out, browseFile{project: f.Project, version: d.Version,
+				file: browse.File{Name: filename, Size: f.Size, Digest: f.Digest.String(),
+					URL: fileDownload(rp.name, f.Project, filename)}})
 			return true
+		})
+		if failure != nil {
+			break
 		}
-		filename := string(k[len(pfx):])
-		d, _ := parseFilename(filename, f.Project)
-		out = append(out, browseFile{project: f.Project, version: d.Version,
-			file: browse.File{Name: filename, Size: f.Size, Digest: f.Digest.String(),
-				URL: fileDownload(rp.name, f.Project, filename)}})
-		return true
-	})
+	}
 	return out, failure
+}
+
+// namePrefixes returns prefixes, in order, one of which the name of every
+// file a proxy repository caches for project starts with: a proxy keeps
+// only the files whose names start with the project's name, in any case
+// and with any separators (see parseFilename), so the prefixes spell the
+// project's first letters, up to four and up to its first separator, in
+// either case. Without such letters, the one prefix is "", every file.
+func namePrefixes(project string) []string {
+	out := []string{""}
+	for i := 0; i < len(project) && i < 4 && project[i] != '-'; i++ {
+		c := project[i]
+		next := make([]string, 0, 2*len(out))
+		for _, p := range out {
+			next = append(next, p+string(c))
+			if c >= 'a' && c <= 'z' {
+				next = append(next, p+string(c-'a'+'A'))
+			}
+		}
+		out = next
+	}
+	slices.Sort(out)
+	return out
 }
 
 // fileDownload is the path a file is downloaded from.

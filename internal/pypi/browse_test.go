@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -75,25 +76,52 @@ func TestBrowseProxy(t *testing.T) {
 	e := newEnv(t)
 	a := wheel("pkg", "1.0", nil)
 	b := wheel("pkg", "2.0", nil)
-	e.up.add("pkg", upFile{dist: a}, upFile{dist: b})
+	// A file name may spell the project in any case.
+	c := sdist("pkg", "3.0", nil)
+	c.filename = "PKG-3.0.tar.gz"
+	// Another project's name starts the same.
+	x := wheel("pkgx", "1.0", nil)
+	e.up.add("pkg", upFile{dist: a}, upFile{dist: b}, upFile{dist: c})
+	e.up.add("pkgx", upFile{dist: x})
 	e.up.add("other", upFile{dist: wheel("other", "1.0", nil)})
 	e.page("remote", "pkg")
+	e.page("remote", "pkgx")
 	e.page("remote", "other")
 	e.get("/pypi/remote/files/pkg/"+a.filename, http.StatusOK)
+	e.get("/pypi/remote/files/pkg/"+c.filename, http.StatusOK)
+	e.get("/pypi/remote/files/pkgx/"+x.filename, http.StatusOK)
 	e.settle()
 
 	pkgs, more, err := e.h.ListPackages("remote", browse.Query{})
-	if err != nil || more || len(pkgs) != 1 || pkgs[0].Name != "pkg" || pkgs[0].Latest != "1.0" {
+	if err != nil || more || len(pkgs) != 2 || pkgs[0].Name != "pkg" || pkgs[0].Latest != "3.0" || pkgs[1].Name != "pkgx" {
 		t.Fatalf("cached packages: %+v, %v, %v", pkgs, more, err)
 	}
 	d, err := e.h.Package(context.Background(), "remote", "pkg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.Versions) != 1 || d.Versions[0].Version != "1.0" || d.Versions[0].Files[0].Name != a.filename {
+	if len(d.Versions) != 2 || d.Versions[0].Version != "3.0" || d.Versions[0].Files[0].Name != c.filename ||
+		d.Versions[1].Version != "1.0" || d.Versions[1].Files[0].Name != a.filename {
 		t.Errorf("cached detail %+v", d)
+	}
+	if d, err := e.h.Package(context.Background(), "remote", "PkgX"); err != nil || len(d.Versions) != 1 || d.Versions[0].Files[0].Name != x.filename {
+		t.Errorf("cached detail of pkgx: %+v, %v", d, err)
 	}
 	if _, err := e.h.Package(context.Background(), "remote", "other"); !errors.Is(err, browse.ErrNotFound) {
 		t.Errorf("project with nothing cached: got %v", err)
+	}
+}
+
+func TestNamePrefixes(t *testing.T) {
+	for project, want := range map[string][]string{
+		"pkg":    {"PKG", "PKg", "PkG", "Pkg", "pKG", "pKg", "pkG", "pkg"},
+		"a-b":    {"A", "a"},
+		"1x2yz9": {"1X2Y", "1X2y", "1x2Y", "1x2y"},
+		"-a":     {""},
+		"":       {""},
+	} {
+		if got := namePrefixes(project); !slices.Equal(got, want) {
+			t.Errorf("namePrefixes(%q) = %q, want %q", project, got, want)
+		}
 	}
 }

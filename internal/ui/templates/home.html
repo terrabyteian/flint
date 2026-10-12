@@ -1,7 +1,7 @@
 {{define "content"}}
 <div class="head">
   <h1>Repositories</h1>
-  <form method="get" action="/ui/" class="filter" role="search">
+  <form method="get" action="{{$.Base}}/ui/" class="filter" role="search">
     <label for="q" class="visually-hidden">Filter repositories</label>
     <input id="q" name="q" type="search" placeholder="Filter by name, format, or type" value="{{.Data.Filter}}">
     <button type="submit">Filter</button>

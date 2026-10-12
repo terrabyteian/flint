@@ -195,7 +195,11 @@ type env struct {
 	cfg   *config.Config
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvAt(t, "") }
+
+// newEnvAt returns an env whose server has the public URL publicURL, or
+// none if it is "".
+func newEnvAt(t *testing.T, publicURL string) *env {
 	t.Helper()
 	cfg, err := config.Parse([]byte(testConfig))
 	if err != nil {
@@ -243,7 +247,7 @@ func newEnv(t *testing.T) *env {
 	}
 	// The sign-in endpoints and the admin API are served beside the UI,
 	// as flint serves them.
-	srv, err := server.New(server.Options{Addr: "127.0.0.1:0", Logger: quiet, Metrics: metrics.NewRegistry()})
+	srv, err := server.New(server.Options{Addr: "127.0.0.1:0", Logger: quiet, Metrics: metrics.NewRegistry(), PublicURL: publicURL})
 	if err != nil {
 		t.Fatal(err)
 	}

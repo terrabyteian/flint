@@ -1,6 +1,6 @@
 {{define "content"}}
 {{$d := .Data}}{{$p := $d.Package}}
-<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <span aria-current="page">{{$p.Name}}</span></nav>
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$.Base}}/ui/">Repositories</a> / <a href="{{$d.Href}}">{{$d.Name}}</a> / <span aria-current="page">{{$p.Name}}</span></nav>
 <div class="head">
   <h1>{{$p.Name}}</h1>
   <span class="badges">{{template "badges" $d.RepoRow}}</span>
@@ -29,7 +29,7 @@
       <thead><tr><th scope="col">File</th><th scope="col" class="num">Size</th><th scope="col">Digest</th></tr></thead>
       <tbody>
       {{- range .Files}}
-      <tr><td>{{if .URL}}<a href="{{.URL}}">{{.Name}}</a>{{else}}{{.Name}}{{end}}</td><td class="num">{{size .Size}}</td><td>{{template "digest" .Digest}}</td></tr>
+      <tr><td>{{if .URL}}<a href="{{$.Base}}{{.URL}}">{{.Name}}</a>{{else}}{{.Name}}{{end}}</td><td class="num">{{size .Size}}</td><td>{{template "digest" .Digest}}</td></tr>
       {{- end}}
       </tbody>
     </table>
@@ -38,7 +38,7 @@
   {{- end}}
 </section>
 <aside>
-{{template "snippets" $d.Snippets}}
+{{template "snippets" $}}
 </aside>
 </div>
 {{end}}

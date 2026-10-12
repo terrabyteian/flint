@@ -1,31 +1,9 @@
 // flint's web UI: progressive enhancements only. Every page works
-// without this script. It is loaded from the page's head, so the theme
-// is applied before the page is drawn, and wires the page up once it is
-// parsed. The Content-Security-Policy allows no inline script.
+// without this script. It is loaded from the page's head and wires the
+// page up once it is parsed. The Content-Security-Policy allows no inline
+// script.
 (function () {
   "use strict";
-
-  var THEMES = ["auto", "light", "dark"];
-  var root = document.documentElement;
-
-  function storedTheme() {
-    try {
-      var t = window.localStorage.getItem("flint-theme");
-      return THEMES.indexOf(t) >= 0 ? t : "auto";
-    } catch (e) {
-      return "auto";
-    }
-  }
-
-  function applyTheme(t) {
-    if (t === "auto") {
-      root.removeAttribute("data-theme");
-    } else {
-      root.setAttribute("data-theme", t);
-    }
-  }
-
-  applyTheme(storedTheme());
 
   function copy(text, button) {
     function done(ok) {
@@ -59,23 +37,6 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    var toggle = document.querySelector("[data-theme-toggle]");
-    if (toggle) {
-      var label = function (t) { toggle.textContent = "Theme: " + t; };
-      label(storedTheme());
-      toggle.hidden = false;
-      toggle.addEventListener("click", function () {
-        var t = THEMES[(THEMES.indexOf(storedTheme()) + 1) % THEMES.length];
-        try {
-          window.localStorage.setItem("flint-theme", t);
-        } catch (e) {
-          // Storage refused: the choice lasts for this page only.
-        }
-        applyTheme(t);
-        label(t);
-      });
-    }
-
     document.querySelectorAll("[data-copy], [data-copy-text]").forEach(function (button) {
       button.hidden = false;
       button.addEventListener("click", function () {

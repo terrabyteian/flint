@@ -76,16 +76,20 @@ func escapePath(p string) string {
 	return strings.Join(segs, "/")
 }
 
-func repoHref(name string) string { return "/ui/repositories/" + url.PathEscape(name) }
-
-func packageHref(repo, name string) string {
-	return repoHref(repo) + "/packages/" + escapePath(name)
+func (rq *request) repoHref(name string) string {
+	return rq.base + "/ui/repositories/" + url.PathEscape(name)
 }
 
-func imageHref(repo, name string) string { return repoHref(repo) + "/images/" + escapePath(name) }
+func (rq *request) packageHref(repo, name string) string {
+	return rq.repoHref(repo) + "/packages/" + escapePath(name)
+}
 
-func manifestHref(repo, name, digest string) string {
-	return repoHref(repo) + "/manifests/" + url.PathEscape(digest) + "/" + escapePath(name)
+func (rq *request) imageHref(repo, name string) string {
+	return rq.repoHref(repo) + "/images/" + escapePath(name)
+}
+
+func (rq *request) manifestHref(repo, name, digest string) string {
+	return rq.repoHref(repo) + "/manifests/" + url.PathEscape(digest) + "/" + escapePath(name)
 }
 
 // withQuery returns href with the query parameters kv, name and value
@@ -111,8 +115,8 @@ type RepoRow struct {
 	Anonymous                             bool
 }
 
-func (h *Handler) row(rc *config.Repository) RepoRow {
-	r := RepoRow{Name: rc.Name, Format: formatName(rc.Format), Key: rc.Format, Type: rc.Type, Href: repoHref(rc.Name), Anonymous: rc.AnonymousPull}
+func (rq *request) row(rc *config.Repository) RepoRow {
+	r := RepoRow{Name: rc.Name, Format: formatName(rc.Format), Key: rc.Format, Type: rc.Type, Href: rq.repoHref(rc.Name), Anonymous: rc.AnonymousPull}
 	switch {
 	case rc.Proxy != nil:
 		r.Detail = "Proxy of " + rc.Proxy.URL
@@ -168,7 +172,7 @@ func (h *Handler) home(rq *request) {
 			continue
 		}
 		if q.Match(rc.Name) || q.Match(rc.Format) || q.Match(rc.Type) {
-			d.Repos = append(d.Repos, h.row(rc))
+			d.Repos = append(d.Repos, rq.row(rc))
 		}
 	}
 	slices.SortFunc(d.Repos, func(a, b RepoRow) int { return strings.Compare(a.Name, b.Name) })
@@ -266,7 +270,7 @@ func (h *Handler) repository(rq *request) {
 	}
 	query := rq.r.URL.Query()
 	q := browse.Query{Filter: strings.TrimSpace(query.Get("q")), After: query.Get("after"), Limit: pageSize}
-	d := repoData{RepoRow: h.row(rc), Repo: rc, Kind: h.contentsOf(rc), Snippets: h.repoSnippets(rq, rc), Filter: q.Filter}
+	d := repoData{RepoRow: rq.row(rc), Repo: rc, Kind: h.contentsOf(rc), Snippets: h.repoSnippets(rq, rc), Filter: q.Filter}
 	next := func(last string) {
 		d.Next = withQuery(d.Href, "q", q.Filter, "dir", d.Dir, "after", last)
 	}
@@ -278,7 +282,7 @@ func (h *Handler) repository(rq *request) {
 			return
 		}
 		for _, img := range imgs {
-			d.Images = append(d.Images, imageRow{Image: img, Href: imageHref(rc.Name, img.Name)})
+			d.Images = append(d.Images, imageRow{Image: img, Href: rq.imageHref(rc.Name, img.Name)})
 		}
 		if more {
 			next(imgs[len(imgs)-1].Name)
@@ -290,7 +294,7 @@ func (h *Handler) repository(rq *request) {
 			return
 		}
 		for _, p := range pkgs {
-			d.Packages = append(d.Packages, packageRow{Package: p, Href: packageHref(rc.Name, p.Name)})
+			d.Packages = append(d.Packages, packageRow{Package: p, Href: rq.packageHref(rc.Name, p.Name)})
 		}
 		if more {
 			next(pkgs[len(pkgs)-1].Name)
@@ -316,7 +320,10 @@ func (h *Handler) repository(rq *request) {
 			d.Crumbs = append(d.Crumbs, crumb{Name: part, Href: withQuery(d.Href, "dir", acc)})
 		}
 		for _, e := range entries {
-			row := entryRow{Entry: e, Href: e.URL}
+			row := entryRow{Entry: e}
+			if e.URL != "" {
+				row.Href = rq.base + e.URL
+			}
 			if e.Dir {
 				row.Href = withQuery(d.Href, "dir", d.Dir+e.Name)
 			}
@@ -332,7 +339,7 @@ func (h *Handler) repository(rq *request) {
 			if mc := h.byName[m.Name]; mc != nil {
 				mr.Type = mc.Type
 				if rq.canRead(m.Name) {
-					mr.Href = repoHref(m.Name)
+					mr.Href = rq.repoHref(m.Name)
 				}
 			}
 			d.Members = append(d.Members, mr)
@@ -364,7 +371,7 @@ func (h *Handler) packagePage(rq *request) {
 		rq.browseError(err)
 		return
 	}
-	d := packageData{RepoRow: h.row(rc), Package: p, PkgHref: packageHref(rc.Name, p.Name)}
+	d := packageData{RepoRow: rq.row(rc), Package: p, PkgHref: rq.packageHref(rc.Name, p.Name)}
 	latest := ""
 	if len(p.Versions) > 0 {
 		latest = p.Versions[0].Version
@@ -409,12 +416,12 @@ func (h *Handler) imagePage(rq *request) {
 		rq.browseError(err)
 		return
 	}
-	d := imageData{RepoRow: h.row(rc), Image: img, ImageHref: imageHref(rc.Name, name)}
+	d := imageData{RepoRow: rq.row(rc), Image: img, ImageHref: rq.imageHref(rc.Name, name)}
 	for _, t := range img.Tags {
-		d.Tags = append(d.Tags, tagRow{ImageTag: t, Href: manifestHref(rc.Name, name, t.Digest)})
+		d.Tags = append(d.Tags, tagRow{ImageTag: t, Href: rq.manifestHref(rc.Name, name, t.Digest)})
 	}
 	for _, m := range img.Manifests {
-		d.Manifests = append(d.Manifests, manifestRow{ManifestSummary: m, Href: manifestHref(rc.Name, name, m.Digest)})
+		d.Manifests = append(d.Manifests, manifestRow{ManifestSummary: m, Href: rq.manifestHref(rc.Name, name, m.Digest)})
 	}
 	ref := ""
 	if len(img.Tags) > 0 {
@@ -463,42 +470,22 @@ func (h *Handler) manifestPage(rq *request) {
 		rq.browseError(err)
 		return
 	}
-	d := manifestData{RepoRow: h.row(rc), Image: name, ImageHref: imageHref(rc.Name, name), Manifest: m}
+	d := manifestData{RepoRow: rq.row(rc), Image: name, ImageHref: rq.imageHref(rc.Name, name), Manifest: m}
 	for _, c := range m.Manifests {
 		row := descriptorRow{Descriptor: c}
 		if c.Stored {
-			row.Href = manifestHref(rc.Name, name, c.Digest)
+			row.Href = rq.manifestHref(rc.Name, name, c.Digest)
 		}
 		d.Children = append(d.Children, row)
 	}
 	for _, c := range m.Referrers {
-		d.Referrers = append(d.Referrers, descriptorRow{Descriptor: c, Href: manifestHref(rc.Name, name, c.Digest)})
+		d.Referrers = append(d.Referrers, descriptorRow{Descriptor: c, Href: rq.manifestHref(rc.Name, name, c.Digest)})
 	}
 	if m.Subject != "" {
-		d.SubjectHref = manifestHref(rc.Name, name, m.Subject)
+		d.SubjectHref = rq.manifestHref(rc.Name, name, m.Subject)
 	}
 	d.Snippets = h.imageSnippets(rq, rc, name, "@"+m.Digest)
 	rq.render(http.StatusOK, "manifest", rc.Name+"/"+name+"@"+shortDigest(m.Digest), d)
-}
-
-// nextPath returns the page to go to after signing in: next if it is a
-// UI page, else the UI's home page.
-func nextPath(next string) string {
-	if strings.HasPrefix(next, Prefix) && !strings.HasPrefix(next, "//") && !strings.ContainsAny(next, "\\\r\n") {
-		return next
-	}
-	return Prefix
-}
-
-// loginPage sends /ui/login, with an optional "next" page, to the sign-in
-// page.
-func (h *Handler) loginPage(rq *request) {
-	next := nextPath(rq.r.URL.Query().Get("next"))
-	if rq.signedIn() {
-		http.Redirect(rq.w, rq.r, next, http.StatusSeeOther)
-		return
-	}
-	http.Redirect(rq.w, rq.r, signInHref(next), http.StatusSeeOther)
 }
 
 type tokenRow struct {
@@ -553,13 +540,13 @@ func (h *Handler) accountData(rq *request) (*accountData, error) {
 		return nil, err
 	}
 	for _, t := range tokens {
-		d.Tokens = append(d.Tokens, tokenRowOf(t))
+		d.Tokens = append(d.Tokens, rq.tokenRowOf(t))
 	}
 	return d, nil
 }
 
-func tokenRowOf(t auth.TokenInfo) tokenRow {
-	r := tokenRow{TokenInfo: t, RevokeHref: "/ui/account/tokens/" + url.PathEscape(t.ID) + "/revoke", NeverExpire: t.Expires.IsZero()}
+func (rq *request) tokenRowOf(t auth.TokenInfo) tokenRow {
+	r := tokenRow{TokenInfo: t, RevokeHref: rq.base + "/ui/account/tokens/" + url.PathEscape(t.ID) + "/revoke", NeverExpire: t.Expires.IsZero()}
 	for _, s := range t.Scopes {
 		r.Scopes = append(r.Scopes, s.Role.String()+" on "+strings.Join(s.Repositories, ", "))
 	}
@@ -681,7 +668,7 @@ func (h *Handler) createToken(rq *request) {
 		rq.render(http.StatusBadRequest, "account", "Account", d)
 		return
 	}
-	row := tokenRowOf(info)
+	row := rq.tokenRowOf(info)
 	d.Created, d.CreatedSecret = &row, secret
 	rq.render(http.StatusOK, "account", "Account", d)
 }
@@ -698,5 +685,5 @@ func (h *Handler) revokeToken(rq *request) {
 	}
 	// Revoking a token that is gone already, as when the form is sent
 	// twice, leaves the account as wanted.
-	http.Redirect(rq.w, rq.r, "/ui/account#tokens", http.StatusSeeOther)
+	http.Redirect(rq.w, rq.r, rq.base+"/ui/account#tokens", http.StatusSeeOther)
 }
