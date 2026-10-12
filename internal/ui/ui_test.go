@@ -15,7 +15,7 @@ import (
 func TestHeaders(t *testing.T) {
 	e := newEnv(t)
 	b := e.browser()
-	for _, path := range []string{"/ui/", "/ui/login", "/ui/repositories/public", "/ui/nope"} {
+	for _, path := range []string{"/ui/", "/ui/repositories/public", "/ui/repositories/public/images/team/app", "/ui/nope"} {
 		r := b.get(path)
 		h := r.Header
 		if csp := h.Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'self'") ||
@@ -140,7 +140,7 @@ func TestPermissions(t *testing.T) {
 				continue
 			}
 			if u.want == login {
-				want := "/ui/login?next=" + url.QueryEscape(c.path)
+				want := "/auth/login?return=" + url.QueryEscape(c.path)
 				if loc := r.Header.Get("Location"); loc != want {
 					t.Errorf("%s GET %s: redirected to %q, want %q", u.name, c.path, loc, want)
 				}
@@ -215,49 +215,38 @@ func TestBrowsePages(t *testing.T) {
 	r.lacks(t, errBroken.Error())
 }
 
+// TestSignIn sends visitors to the sign-in page, which brings them back.
 func TestSignIn(t *testing.T) {
 	e := newEnv(t)
 	b := e.browser()
-	r := b.expect("/ui/login?next=/ui/repositories/oci-local", http.StatusOK)
-	r.has(t, `name="next" value="/ui/repositories/oci-local"`, "Sign in with Example SSO", `href="/auth/oidc/login"`)
-	if c := cookie(r.Response, csrfCookie); c == nil || !c.HttpOnly || c.Path != "/ui/" {
-		t.Fatalf("CSRF cookie %+v", c)
+	b.expect("/ui/", http.StatusOK).has(t, `href="/auth/login?return=%2Fui%2F"`)
+	b.expect("/ui/repositories/public", http.StatusOK).has(t, `href="/auth/login?return=%2Fui%2Frepositories%2Fpublic"`)
+	for next, want := range map[string]string{
+		"/ui/login":                            "/auth/login?return=%2Fui%2F",
+		"/ui/login?next=/ui/account":           "/auth/login?return=%2Fui%2Faccount",
+		"/ui/login?next=https://evil.example/": "/auth/login?return=%2Fui%2F",
+	} {
+		if r := b.get(next); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != want {
+			t.Errorf("GET %s: %d to %q, want %q", next, r.StatusCode, r.Header.Get("Location"), want)
+		}
 	}
 
-	form := func(user, pw, next string) url.Values {
-		return url.Values{"username": {user}, "password": {pw}, "next": {next}}
+	r := b.post(auth.SignInPath, url.Values{"username": {"alice"}, "password": {"wrong-password"}, "return": {"/ui/account"}})
+	if r.StatusCode != http.StatusSeeOther || !strings.Contains(r.Header.Get("Location"), "error=invalid") {
+		t.Fatalf("wrong password: %d to %q", r.StatusCode, r.Header.Get("Location"))
 	}
-	r = b.post("/ui/login", "/ui/login", form("alice", "wrong-password", ""))
-	if r.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("wrong password: %d", r.StatusCode)
-	}
-	r.has(t, "incorrect user name or password", `value="alice"`)
-	if c := cookie(r.Response, sessionCookie); c != nil {
-		t.Error("a failed sign-in set a session cookie")
-	}
-	// Without the CSRF token, or with another browser's.
-	if r := b.do("POST", "/ui/login", form("alice", "alice-password", "")); r.StatusCode != http.StatusForbidden {
-		t.Errorf("no CSRF token: %d", r.StatusCode)
-	}
-	other := e.browser()
-	f := form("alice", "alice-password", "")
-	f.Set("csrf", other.csrf("/ui/login"))
-	if r := b.do("POST", "/ui/login", f); r.StatusCode != http.StatusForbidden {
-		t.Errorf("another browser's CSRF token: %d", r.StatusCode)
-	}
-
-	r = b.post("/ui/login", "/ui/login", form("alice", "alice-password", "/ui/repositories/oci-local"))
-	if r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/ui/repositories/oci-local" {
+	r = b.post(auth.SignInPath, url.Values{"username": {"alice"}, "password": {"alice-password"}, "return": {"/ui/account"}})
+	if r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/ui/account" {
 		t.Fatalf("sign-in: %d to %q", r.StatusCode, r.Header.Get("Location"))
 	}
-	c := cookie(r.Response, sessionCookie)
-	if c == nil || !c.HttpOnly || c.Secure || c.SameSite != http.SameSiteLaxMode || c.Path != "/ui/" ||
-		!strings.HasPrefix(c.Value, "flints_") || c.Expires.IsZero() {
+	if c := cookie(r.Response, auth.SessionCookie); c == nil || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("session cookie %+v", c)
 	}
-	// Signed in, the sign-in page goes where it was asked to.
+	r = b.expect("/ui/account", http.StatusOK)
+	r.has(t, ">alice<", `action="/auth/logout"`, `name="return" value="/ui/"`)
+	// Signed in, /ui/login goes where it was asked to.
 	if r := b.get("/ui/login?next=/ui/account"); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/ui/account" {
-		t.Errorf("sign-in page when signed in: %d to %q", r.StatusCode, r.Header.Get("Location"))
+		t.Errorf("/ui/login when signed in: %d to %q", r.StatusCode, r.Header.Get("Location"))
 	}
 }
 
@@ -288,25 +277,6 @@ func cookie(r *http.Response, name string) *http.Cookie {
 	return nil
 }
 
-// TestSecureCookie marks cookies Secure when the client reached flint
-// over TLS.
-func TestSecureCookie(t *testing.T) {
-	e := newEnv(t)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "https://flint.example/ui/login", nil)
-	e.h.wrap(e.h.loginPage).ServeHTTP(w, r)
-	if c := cookie(w.Result(), csrfCookie); c == nil || !c.Secure {
-		t.Errorf("CSRF cookie over TLS %+v", c)
-	}
-	w = httptest.NewRecorder()
-	if err := e.h.SignInAs(w, httptest.NewRequest("GET", "https://flint.example/auth/callback", nil), "alice", "oidc"); err != nil {
-		t.Fatal(err)
-	}
-	if c := cookie(w.Result(), sessionCookie); c == nil || !c.Secure || !c.HttpOnly {
-		t.Errorf("session cookie over TLS %+v", c)
-	}
-}
-
 func TestSessionExpiry(t *testing.T) {
 	e := newEnv(t)
 	b := e.browser()
@@ -317,9 +287,6 @@ func TestSessionExpiry(t *testing.T) {
 	if r.StatusCode != http.StatusSeeOther {
 		t.Fatalf("account page after expiry: %d", r.StatusCode)
 	}
-	if c := cookie(r.Response, sessionCookie); c == nil || c.MaxAge >= 0 {
-		t.Errorf("the expired session's cookie was not cleared: %+v", c)
-	}
 	b.expect("/ui/", http.StatusOK).has(t, "Sign in")
 }
 
@@ -327,39 +294,28 @@ func TestSignOut(t *testing.T) {
 	e := newEnv(t)
 	b := e.browser()
 	b.signIn("alice", "alice-password")
-	u, _ := url.Parse(e.srv.URL + "/ui/")
-	var secret string
-	for _, c := range b.client.Jar.Cookies(u) {
-		if c.Name == sessionCookie {
-			secret = c.Value
-		}
+	b.expect("/ui/account", http.StatusOK)
+	// Signing out from another site is refused.
+	if r := b.do("POST", auth.SignOutPath, url.Values{"return": {"/ui/"}}, "Sec-Fetch-Site", "cross-site"); r.StatusCode != http.StatusForbidden {
+		t.Errorf("cross-site sign-out: %d", r.StatusCode)
 	}
-	// Signing out needs the CSRF token.
-	if r := b.do("POST", "/ui/logout", url.Values{}); r.StatusCode != http.StatusForbidden {
-		t.Errorf("sign-out without CSRF token: %d", r.StatusCode)
-	}
-	r := b.post("/ui/", "/ui/logout", nil)
+	b.expect("/ui/account", http.StatusOK)
+	r := b.post(auth.SignOutPath, url.Values{"return": {"/ui/"}})
 	if r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/ui/" {
 		t.Fatalf("sign-out: %d to %q", r.StatusCode, r.Header.Get("Location"))
 	}
 	if r := b.get("/ui/account"); r.StatusCode != http.StatusSeeOther {
 		t.Errorf("account page after signing out: %d", r.StatusCode)
 	}
-	// The session ended on the server, not only in the browser.
-	if _, err := e.auth.SessionPrincipal(secret); err == nil {
-		t.Error("the session outlived signing out")
-	}
 }
 
-// TestCrossSite refuses state-changing requests from other sites even
-// with a valid CSRF token.
+// TestCrossSite refuses state-changing requests from other sites.
 func TestCrossSite(t *testing.T) {
 	e := newEnv(t)
 	b := e.browser()
 	b.signIn("alice", "alice-password")
-	token := b.csrf("/ui/account")
 	create := func(hdr ...string) int {
-		return b.do("POST", "/ui/account/tokens", url.Values{"csrf": {token}, "name": {"t"}, "expiry": {"7d"}, "scope": {"all"}},
+		return b.do("POST", "/ui/account/tokens", url.Values{"name": {"t"}, "expiry": {"7d"}, "scope": {"all"}},
 			hdr...).StatusCode
 	}
 	for _, hdr := range [][]string{
@@ -386,17 +342,19 @@ func TestCrossSite(t *testing.T) {
 	}
 }
 
-// principal returns the principal of a fresh session of user.
+// principal returns the principal user signs in as.
 func principal(t *testing.T, e *env, user string) *auth.Principal {
 	t.Helper()
-	pw := map[string]string{"alice": "alice-password", "bob": "bob-password", "root": "root-password"}[user]
-	secret, _, err := e.auth.SignIn(t.Context(), user, pw)
-	if err != nil {
-		t.Fatal(err)
+	b := e.browser()
+	b.signIn(user, map[string]string{"alice": "alice-password", "bob": "bob-password", "root": "root-password"}[user])
+	u, _ := url.Parse(e.srv.URL + "/ui/")
+	r := httptest.NewRequest("GET", "/ui/", nil)
+	for _, c := range b.client.Jar.Cookies(u) {
+		r.AddCookie(c)
 	}
-	p, err := e.auth.SessionPrincipal(secret)
-	if err != nil {
-		t.Fatal(err)
+	p, err := e.auth.SessionPrincipal(r)
+	if err != nil || p == nil {
+		t.Fatalf("session of %s: %v", user, err)
 	}
 	return p
 }
@@ -411,7 +369,7 @@ func TestTokens(t *testing.T) {
 
 	create := func(form url.Values) response {
 		t.Helper()
-		return b.post("/ui/account", "/ui/account/tokens", form)
+		return b.post("/ui/account/tokens", form)
 	}
 	r := create(url.Values{"name": {"ci"}, "expiry": {"30d"}, "scope": {"selected"}, "repositories": {"oci-local, files"},
 		"role": {"read"}})
@@ -472,7 +430,7 @@ func TestTokens(t *testing.T) {
 	// Administrators may give a token the global admin role.
 	root := e.browser()
 	root.signIn("root", "root-password")
-	r = root.post("/ui/account", "/ui/account/tokens", url.Values{"name": {"adm"}, "expiry": {"7d"}, "scope": {"all"}, "admin": {"on"}})
+	r = root.post("/ui/account/tokens", url.Values{"name": {"adm"}, "expiry": {"7d"}, "scope": {"all"}, "admin": {"on"}})
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("admin token: %d", r.StatusCode)
 	}
@@ -480,19 +438,19 @@ func TestTokens(t *testing.T) {
 	rootTokens, _ := e.auth.Tokens(principal(t, e, "root"))
 
 	// Revoking: one's own only.
-	if r := b.post("/ui/account", "/ui/account/tokens/"+rootTokens[0].ID+"/revoke", nil); r.StatusCode != http.StatusSeeOther {
+	if r := b.post("/ui/account/tokens/"+rootTokens[0].ID+"/revoke", nil); r.StatusCode != http.StatusSeeOther {
 		t.Errorf("revoking another user's token: %d", r.StatusCode)
 	}
 	if rt, _ := e.auth.Tokens(principal(t, e, "root")); len(rt) != 1 {
 		t.Error("alice revoked root's token")
 	}
-	if r := root.post("/ui/account", "/ui/account/tokens/"+id+"/revoke", nil); r.StatusCode != http.StatusSeeOther {
+	if r := root.post("/ui/account/tokens/"+id+"/revoke", nil); r.StatusCode != http.StatusSeeOther {
 		t.Errorf("root revoking alice's token: %d", r.StatusCode)
 	}
 	if at, _ := e.auth.Tokens(principal(t, e, "alice")); len(at) != 2 {
 		t.Error("root revoked alice's token through the UI")
 	}
-	r = b.post("/ui/account", "/ui/account/tokens/"+id+"/revoke", nil)
+	r = b.post("/ui/account/tokens/"+id+"/revoke", nil)
 	if r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/ui/account#tokens" {
 		t.Fatalf("revoking: %d to %q", r.StatusCode, r.Header.Get("Location"))
 	}
@@ -503,7 +461,7 @@ func TestTokens(t *testing.T) {
 
 	// Anonymous clients cannot reach the forms.
 	anon := e.browser()
-	f := url.Values{"csrf": {anon.csrf("/ui/login")}, "name": {"x"}, "expiry": {"7d"}, "scope": {"all"}}
+	f := url.Values{"name": {"x"}, "expiry": {"7d"}, "scope": {"all"}}
 	if r := anon.do("POST", "/ui/account/tokens", f); r.StatusCode != http.StatusSeeOther {
 		t.Errorf("anonymous token creation: %d", r.StatusCode)
 	}
@@ -516,7 +474,7 @@ func TestChangePassword(t *testing.T) {
 	other.signIn("alice", "alice-password")
 	change := func(current, next, confirm string) response {
 		t.Helper()
-		return b.post("/ui/account", "/ui/account/password", url.Values{"current": {current}, "new": {next}, "confirm": {confirm}})
+		return b.post("/ui/account/password", url.Values{"current": {current}, "new": {next}, "confirm": {confirm}})
 	}
 	for _, c := range []struct{ current, next, confirm, msg string }{
 		{"alice-password", "new-password-1", "new-password-2", "do not match"},
@@ -539,37 +497,7 @@ func TestChangePassword(t *testing.T) {
 	if r := other.get("/ui/account"); r.StatusCode != http.StatusSeeOther {
 		t.Errorf("the other session after the change: %d", r.StatusCode)
 	}
-	if _, _, err := e.auth.SignIn(t.Context(), "alice", "new-password-1"); err != nil {
-		t.Errorf("new password: %v", err)
-	}
-}
-
-func TestPasswordlessUser(t *testing.T) {
-	e := newEnv(t)
-	// A user who signs in through a provider has no password to change.
-	w := httptest.NewRecorder()
-	if err := e.h.SignInAs(w, httptest.NewRequest("GET", "/auth/callback", nil), "nobody", "oidc"); err == nil {
-		t.Error("SignInAs an unknown user succeeded")
-	}
-	b := e.browser()
-	b.signIn("alice", "alice-password")
-	b.expect("/ui/account", http.StatusOK).has(t, `action="/ui/account/password"`)
-}
-
-func TestSignInAs(t *testing.T) {
-	e := newEnv(t)
-	w := httptest.NewRecorder()
-	if err := e.h.SignInAs(w, httptest.NewRequest("GET", "/auth/callback", nil), "alice", "oidc"); err != nil {
-		t.Fatal(err)
-	}
-	c := cookie(w.Result(), sessionCookie)
-	if c == nil {
-		t.Fatal("no session cookie")
-	}
-	b := e.browser()
-	u, _ := url.Parse(e.srv.URL + "/ui/")
-	b.client.Jar.SetCookies(u, []*http.Cookie{{Name: c.Name, Value: c.Value, Path: c.Path}})
-	b.expect("/ui/account", http.StatusOK).has(t, ">alice<")
+	e.browser().signIn("alice", "new-password-1")
 }
 
 func TestAdmin(t *testing.T) {

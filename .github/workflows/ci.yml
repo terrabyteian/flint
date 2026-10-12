@@ -583,6 +583,93 @@ jobs:
         if: always()
         run: cat "$RUNNER_TEMP/flint.log"
 
+  oidc:
+    name: OIDC sign-in end to end
+    runs-on: ubuntu-latest
+    env:
+      DEX_IMAGE: ghcr.io/dexidp/dex:v2.41.1@sha256:bc7cfce7c17f52864e2bb2a4dc1d2f86a41e3019f6d42e81d92a301fad0c8a1d
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Start Dex
+        run: |
+          # Dex's mock connector signs in kilgore@kilgore.trout, in group
+          # "authors", without a login form.
+          cat >"$RUNNER_TEMP/dex.yaml" <<'YAML'
+          issuer: http://127.0.0.1:5556/dex
+          storage:
+            type: memory
+          web:
+            http: 0.0.0.0:5556
+          oauth2:
+            skipApprovalScreen: true
+          staticClients:
+            - id: flint
+              name: flint
+              secretEnv: FLINT_CLIENT_SECRET
+              redirectURIs: ["http://127.0.0.1:5000/auth/oidc/dex/callback"]
+          connectors:
+            - type: mockCallback
+              id: mock
+              name: Mock
+          YAML
+          client_secret=$(openssl rand -hex 16)
+          echo "::add-mask::$client_secret"
+          printf '%s\n' "$client_secret" >"$RUNNER_TEMP/client-secret"
+          docker run -d --name dex -p 127.0.0.1:5556:5556 -e FLINT_CLIENT_SECRET="$client_secret" \
+            -v "$RUNNER_TEMP/dex.yaml:/etc/dex/config.yaml:ro" "$DEX_IMAGE" dex serve /etc/dex/config.yaml
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5556/dex/.well-known/openid-configuration >/dev/null && break
+            sleep 0.2
+          done
+      - name: Start flint
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/flint" ./cmd/flint
+          admin_password=$(openssl rand -hex 16)
+          echo "::add-mask::$admin_password"
+          printf '%s\n' "$admin_password" >"$RUNNER_TEMP/admin-password"
+          echo "ADMIN_PASSWORD=$admin_password" >>"$GITHUB_ENV"
+          cat >"$RUNNER_TEMP/flint.json" <<JSON
+          {
+            "listen": "127.0.0.1:5000",
+            "dataDir": "$RUNNER_TEMP/flint-data",
+            "log": {"level": "debug"},
+            "repositories": [
+              {"name": "docker-local", "format": "oci", "type": "hosted"},
+              {"name": "generic-local", "format": "generic", "type": "hosted"}
+            ],
+            "auth": {
+              "bootstrapAdmin": {"passwordFile": "$RUNNER_TEMP/admin-password"},
+              "permissions": [
+                {"repositories": ["docker-local", "generic-local"], "role": "write", "groups": ["ci"]}
+              ],
+              "oidc": [{
+                "name": "dex", "displayName": "Dex", "issuer": "http://127.0.0.1:5556/dex",
+                "clientId": "flint", "clientSecretFile": "$RUNNER_TEMP/client-secret",
+                "scopes": ["openid", "email", "profile", "groups"],
+                "importGroups": true, "groupMappings": {"authors": ["ci"]}
+              }]
+            }
+          }
+          JSON
+          "$RUNNER_TEMP/flint" serve -config "$RUNNER_TEMP/flint.json" >"$RUNNER_TEMP/flint.log" 2>&1 &
+          for _ in $(seq 50); do
+            curl -fsS http://127.0.0.1:5000/readyz && break
+            sleep 0.2
+          done
+      - name: Sign in through Dex and use the user's API token
+        env:
+          E2E_ADMIN_PASSWORD: ${{ env.ADMIN_PASSWORD }}
+        run: scripts/e2e-oidc.sh 127.0.0.1:5000 dex docker-local generic-local
+      - name: Show the logs
+        if: always()
+        run: |
+          cat "$RUNNER_TEMP/flint.log"
+          docker logs dex
+
   ui:
     name: Web UI end to end
     runs-on: ubuntu-latest

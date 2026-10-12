@@ -8,7 +8,14 @@
 // Users are runtime data in the metadata store. A password is stored only
 // as a PBKDF2-HMAC-SHA256 hash with a per-user salt and the iteration
 // count it was derived with. A user may be a global administrator, and
-// belongs to any number of groups.
+// belongs to any number of groups. A user may instead sign in through an
+// OpenID Connect provider, which identifies it by issuer and subject;
+// such a user is created on its first sign-in and its groups are synced
+// at every sign-in (oidcflow.go).
+//
+// Browsers sign in on the sign-in page, with a password or through a
+// provider, and get a sign-in session, which authenticates the admin API
+// and the UI but not registry or package clients (session.go).
 //
 // An API token is a random secret shown once at creation; only its
 // SHA-256 hash is stored. It may expire, and it carries a subset of its
@@ -17,16 +24,11 @@
 // owner's global admin role applies only if the token was created with
 // it.
 //
-// # Web UI sessions
+// # Accounts
 //
-// The web UI signs users in to sessions: SignIn checks a password, and
-// StartSession serves sign-in providers that authenticate users
-// themselves. A session is a random secret, stored only as its hash,
-// that SessionPrincipal resolves to its user as the user is now, until
-// it expires after auth.sessionTTL or is ended by EndSession, a new
-// password, or the user's deletion; see session.go. The account
-// operations, such as CreateToken and ChangePassword, serve the UI's
-// account page; see account.go.
+// The account operations, such as CreateToken and ChangePassword, serve
+// a signed-in user managing their own account, as the web UI's account
+// page does (account.go).
 //
 // # Permissions
 //
@@ -134,6 +136,10 @@ type Options struct {
 	// PasswordIterations is the PBKDF2 iteration count for new password
 	// hashes; zero means DefaultPasswordIterations.
 	PasswordIterations int
+	// OIDCTransport, if set, carries the requests to OIDC providers
+	// instead of a transport configured from each provider's caFile, as
+	// in tests.
+	OIDCTransport http.RoundTripper
 }
 
 // Service authenticates requests and checks permissions. It implements
@@ -154,6 +160,9 @@ type Service struct {
 	// last administrator cannot be removed" hold across concurrent
 	// requests. Batches also carry preconditions on what they read.
 	mu sync.Mutex
+
+	crossOrigin *http.CrossOriginProtection
+	oidc        *oidcService // nil without OIDC providers
 
 	verified *verifiedCache
 	hashing  chan struct{} // bounds concurrent PBKDF2 derivations
@@ -199,6 +208,8 @@ func New(opts Options) (*Service, error) {
 		sessionTTL: config.DefaultSessionTTL,
 		verified:   newVerifiedCache(passwordCacheTTL, 10000),
 		hashing:    make(chan struct{}, runtime.GOMAXPROCS(0)),
+
+		crossOrigin: http.NewCrossOriginProtection(),
 	}
 	s.docker = s.Authorizer(Challenge{Style: ChallengeDocker})
 	if opts.Config != nil && opts.Config.Auth.LoginTokenTTL.Duration > 0 {
@@ -206,6 +217,11 @@ func New(opts Options) (*Service, error) {
 	}
 	if opts.Config != nil && opts.Config.Auth.SessionTTL.Duration > 0 {
 		s.sessionTTL = opts.Config.Auth.SessionTTL.Duration
+	}
+	if opts.Config != nil && len(opts.Config.Auth.OIDC) > 0 {
+		if s.oidc, err = newOIDCService(opts.Config.Auth.OIDC, opts.OIDCTransport, s.now, s.log); err != nil {
+			return nil, err
+		}
 	}
 	var urlKeyCreated bool
 	if s.urlKey, urlKeyCreated, err = loadOrCreateURLKey(opts.FS, opts.KeyDir); err != nil {
@@ -227,10 +243,12 @@ func New(opts Options) (*Service, error) {
 	return s, nil
 }
 
-// Register adds the token endpoint and the admin API to srv.
+// Register adds the token endpoint, the sign-in endpoints, and the admin
+// API to srv.
 func (s *Service) Register(srv *server.Server) {
 	srv.HandleFunc("GET "+TokenPath, s.handleToken)
 	srv.HandleFunc("POST "+TokenPath, s.handleToken)
+	s.registerSignIn(srv)
 	s.registerAPI(srv)
 }
 
@@ -248,10 +266,9 @@ type Principal struct {
 	TokenID string
 	// Password reports whether the client authenticated with a password.
 	Password bool
-	// SessionID identifies the web UI session the client authenticated
-	// with, if any, and SessionExpires is when it expires.
-	SessionID      string
-	SessionExpires time.Time
+	// SessionID is the sign-in session the client authenticated with, if
+	// any.
+	SessionID string
 
 	userAdmin bool    // the user's own admin flag, which a token's scopes then cap
 	scopes    []Scope // the token's scopes
@@ -259,9 +276,10 @@ type Principal struct {
 
 // credential kinds a request can present.
 const (
-	credNone   = iota // no credentials
-	credDirect        // a password or an API token, presented directly
-	credJWT           // bearer, with a token from the token service
+	credNone    = iota // no credentials
+	credDirect         // a password or an API token, presented directly
+	credJWT            // bearer, with a token from the token service
+	credSession        // a sign-in session's cookie
 )
 
 // credentials is what a request authenticated as.

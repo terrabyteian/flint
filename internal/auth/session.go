@@ -2,259 +2,222 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
+	"crypto/subtle"
 	"errors"
+	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/terrabyteian/flint/internal/meta"
+	"github.com/terrabyteian/flint/internal/server"
 )
 
-// Sessions are the web UI's sign-ins. A session is a random secret that
-// the browser keeps in a cookie; like an API token's, only its SHA-256
-// hash is stored, so neither the metadata nor a backup of it holds a
-// secret that signs anyone in. A session lasts until it expires, after
-// auth.sessionTTL, or its user signs out, is deleted, or has a new
-// password set. Every request resolves the session's user as it is
-// then, so a changed admin flag or group membership applies at once.
+// A sign-in session is how a browser stays signed in, after the user
+// signed in on the sign-in page with a password or through an OIDC
+// provider. Its cookie holds a random secret, of which only the SHA-256
+// hash is stored, and it lasts auth.sessionTTL. Sessions authenticate the
+// admin API and the UI, never the registry or package endpoints, whose
+// clients use API tokens. A session counts as having signed in, as a
+// password does: it may create API tokens, so a user who signs in only
+// through an OIDC provider can make tokens for package clients.
 //
-// Sessions are not accepted on the API or package routes: only the UI
-// reads the cookie, and it protects its forms against cross-site
-// requests.
+// The cookie is HttpOnly and SameSite=Lax, and a request authenticated
+// by one that changes anything must not come from another origin, which
+// browsers say in the Sec-Fetch-Site and Origin headers, so another site
+// cannot act with a signed-in user's session.
 
-// Session methods, recorded with each session.
-const (
-	// SessionPassword is a session started by signing in with a password.
-	SessionPassword = "password"
-)
+// SessionCookie is the name of the session cookie.
+const SessionCookie = "flint_session"
 
-// maxUserSessions bounds a user's sessions: starting one more ends the
-// oldest. Expired sessions are removed when the user next signs in.
-const maxUserSessions = 64
+// maxSessionsPerUser bounds the sessions one user keeps; signing in once
+// more ends the oldest.
+const maxSessionsPerUser = 50
 
-// Session secrets are "flints_<secret>": 32 random bytes in lowercase
-// base32. The prefix tells them apart from API tokens in logs and secret
-// scanners.
-const (
-	sessionStringPrefix = "flints_"
-	sessionSecretLen    = 52
-)
-
-// session is a stored session. Its key is the hex SHA-256 of its secret.
-type session struct {
-	ID      string // the hex SHA-256 of the secret
-	User    string
-	Method  string
-	Created time.Time
-	Expires time.Time
+// Session cookie values are "<id>_<secret>", in the form of an API token
+// string without its prefix.
+func parseSessionCookie(v string) (string, bool) {
+	return parseTokenString(tokenStringPrefix + v)
 }
 
-const sessionVersion = 1
+// errNoSession means the request carries no session cookie.
+var errNoSession = errors.New("no session")
 
-func (ss *session) encode() []byte {
-	b := []byte{sessionVersion}
-	b = appendBytes(b, []byte(ss.User))
-	b = appendBytes(b, []byte(ss.Method))
-	b = binary.AppendVarint(b, ss.Created.Unix())
-	return binary.AppendVarint(b, ss.Expires.Unix())
-}
-
-func decodeSession(id string, b []byte) (*session, error) {
-	d := decoder{b: b}
-	if v := d.byte(); v != sessionVersion {
-		return nil, errVersion(v)
+// checkSession authenticates a request's session cookie.
+func (s *Service) checkSession(r *http.Request) (*Principal, error) {
+	c, err := r.Cookie(SessionCookie)
+	if err != nil || c.Value == "" {
+		return nil, errNoSession
 	}
-	ss := &session{ID: id, User: string(d.bytes()), Method: string(d.bytes())}
-	ss.Created = time.Unix(d.varint(), 0)
-	ss.Expires = time.Unix(d.varint(), 0)
-	return ss, d.done()
+	id, ok := parseSessionCookie(c.Value)
+	if !ok {
+		s.attempts.With("session", "failure").Inc()
+		return nil, ErrInvalidCredentials
+	}
+	sess, err := s.getSession(id)
+	if errors.Is(err, errNoSuchSession) {
+		s.attempts.With("session", "failure").Inc()
+		return nil, ErrInvalidCredentials
+	}
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(c.Value))
+	if subtle.ConstantTimeCompare(sum[:], sess.Hash) != 1 || sess.expired(s.now()) {
+		s.attempts.With("session", "failure").Inc()
+		return nil, ErrInvalidCredentials
+	}
+	u, err := s.getUser(sess.User)
+	if errors.Is(err, errNoSuchUser) {
+		s.attempts.With("session", "failure").Inc()
+		return nil, ErrInvalidCredentials
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.attempts.With("session", "success").Inc()
+	p := userPrincipal(u)
+	p.SessionID = sess.ID
+	return p, nil
 }
 
-// sessionID returns the identifier of a well-formed session secret, the
-// hex SHA-256 of the whole secret.
-func sessionID(secret string) (string, bool) {
-	rest, ok := strings.CutPrefix(secret, sessionStringPrefix)
-	if !ok || len(rest) != sessionSecretLen {
-		return "", false
+var errNoSuchSession = errors.New("no such session")
+
+func (s *Service) getSession(id string) (*session, error) {
+	v := s.store.View()
+	defer v.Release()
+	rec, ok := v.Get(sessionKey(id))
+	if !ok {
+		return nil, errNoSuchSession
 	}
-	for i := 0; i < len(rest); i++ {
-		if c := rest[i]; !(c >= 'a' && c <= 'z' || c >= '2' && c <= '7') {
-			return "", false
-		}
+	sess, err := decodeSession(id, rec.Value)
+	if err != nil {
+		return nil, fmt.Errorf("session %s: %w", id, err)
 	}
-	sum := sha256.Sum256([]byte(secret))
-	return hex.EncodeToString(sum[:]), true
+	return sess, nil
 }
 
-// SignIn verifies a user's password and starts a web UI session for the
-// user. It returns the session's secret, for the browser's cookie and
-// the only time it is available, and when the session expires. It
-// returns ErrInvalidCredentials if the user does not exist, has no
-// password, or the password is wrong; an API token is not accepted in
-// place of the password.
-func (s *Service) SignIn(ctx context.Context, name, password string) (secret string, expires time.Time, err error) {
-	if _, err := s.checkPassword(ctx, name, password); err != nil {
-		return "", time.Time{}, err
+// SessionPrincipal returns the principal of the request's session
+// cookie: nil and no error if the request has none, and
+// ErrInvalidCredentials if the session is unknown, expired, or its user
+// was deleted. It is for the UI, whose pages authenticate with the
+// session; a handler that changes anything must also call
+// CheckCrossOrigin.
+func (s *Service) SessionPrincipal(r *http.Request) (*Principal, error) {
+	p, err := s.checkSession(r)
+	if errors.Is(err, errNoSession) {
+		return nil, nil
 	}
-	return s.StartSession(ctx, name, SessionPassword)
+	return p, err
 }
 
-// StartSession starts a web UI session for user name, whom the caller
-// has authenticated, as with SessionPassword or an OpenID Connect sign-in;
-// method names how, such as "oidc", for the audit log. It returns the
-// session's secret and when the session expires, or ErrInvalidCredentials
-// if the user does not exist.
-func (s *Service) StartSession(ctx context.Context, name, method string) (secret string, expires time.Time, err error) {
-	var sb [32]byte
-	rand.Read(sb[:])
-	secret = sessionStringPrefix + b32.EncodeToString(sb[:])
-	id, _ := sessionID(secret)
-	now := s.now().Truncate(time.Second)
-	ss := &session{ID: id, User: name, Method: method, Created: now, Expires: now.Add(s.sessionTTL)}
+// CheckCrossOrigin returns an error if r is a browser request from
+// another origin, which a request that is authenticated with a session
+// cookie and changes anything must not be. Requests that are not from a
+// browser, which send neither Sec-Fetch-Site nor Origin, pass.
+func (s *Service) CheckCrossOrigin(r *http.Request) error {
+	return s.crossOrigin.Check(r)
+}
+
+// startSession creates a session for user, ending the user's expired
+// sessions and, beyond maxSessionsPerUser, the oldest, and sets its
+// cookie on w. method is how the user signed in.
+func (s *Service) startSession(ctx context.Context, w http.ResponseWriter, r *http.Request, name, method string) error {
+	id, secret := newTokenString()
+	value := strings.TrimPrefix(secret, tokenStringPrefix)
+	sum := sha256.Sum256([]byte(value))
+	now := s.now()
+	sess := &session{
+		ID: id, User: name, Hash: sum[:], Method: method,
+		Created: now.Truncate(time.Second), Expires: now.Add(s.sessionTTL).Truncate(time.Second),
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.store.View()
 	defer v.Release()
 	_, ver, err := readUser(v, name)
-	if errors.Is(err, errNoSuchUser) {
-		return "", time.Time{}, ErrInvalidCredentials
-	}
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	b := new(meta.Batch)
-	b.Require(userKey(name), ver)
-	// Remove the user's expired sessions, and the oldest beyond the
-	// bound, counting the new one.
-	live, err := userSessions(v, name)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	live = slices.DeleteFunc(live, func(o *session) bool {
-		if !now.Before(o.Expires) {
-			deleteSession(b, o)
-			return true
-		}
-		return false
-	})
-	slices.SortFunc(live, func(a, b *session) int { return a.Created.Compare(b.Created) })
-	for len(live) >= maxUserSessions {
-		deleteSession(b, live[0])
-		live = live[1:]
-	}
-	b.Require(sessionKey(id), 0)
-	b.Put(sessionKey(id), ss.encode())
-	b.Put(userSessionKey(name, id), nil)
-	if err := s.commit(ctx, b, &Principal{User: name}, "auth.session.create", "session of user "+name+" ("+method+")"); err != nil {
-		return "", time.Time{}, err
-	}
-	return secret, ss.Expires, nil
-}
-
-// SessionPrincipal returns the principal a web UI session's secret
-// stands for: its user as the user is now. It returns
-// ErrInvalidCredentials if the secret is malformed or unknown, the
-// session has expired or ended, or its user no longer exists.
-func (s *Service) SessionPrincipal(secret string) (*Principal, error) {
-	id, ok := sessionID(secret)
-	if !ok {
-		return nil, ErrInvalidCredentials
-	}
-	v := s.store.View()
-	defer v.Release()
-	rec, ok := v.Get(sessionKey(id))
-	if !ok {
-		return nil, ErrInvalidCredentials
-	}
-	ss, err := decodeSession(id, rec.Value)
-	if err != nil {
-		return nil, err
-	}
-	if !s.now().Before(ss.Expires) {
-		return nil, ErrInvalidCredentials
-	}
-	u, _, err := readUser(v, ss.User)
-	if errors.Is(err, errNoSuchUser) {
-		return nil, ErrInvalidCredentials
-	}
-	if err != nil {
-		return nil, err
-	}
-	p := userPrincipal(u)
-	p.SessionID = id
-	p.SessionExpires = ss.Expires
-	return p, nil
-}
-
-// EndSession ends the web UI session whose secret is secret, as signing
-// out does. Ending an unknown session is not an error.
-func (s *Service) EndSession(ctx context.Context, secret string) error {
-	id, ok := sessionID(secret)
-	if !ok {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v := s.store.View()
-	defer v.Release()
-	rec, ok := v.Get(sessionKey(id))
-	if !ok {
-		return nil
-	}
-	ss, err := decodeSession(id, rec.Value)
 	if err != nil {
 		return err
 	}
 	b := new(meta.Batch)
-	b.Require(sessionKey(id), rec.Version)
-	deleteSession(b, ss)
-	err = s.commit(ctx, b, &Principal{User: ss.User}, "auth.session.delete", "session of user "+ss.User)
-	if errors.Is(err, meta.ErrConflict) {
-		return nil // ended meanwhile
-	}
-	return err
-}
-
-// userSessions returns a user's sessions.
-func userSessions(v meta.View, user string) ([]*session, error) {
-	var out []*session
-	var err error
-	prefix := []byte(userSessionPrefix + user + "\x00")
+	b.Require(userKey(name), ver)
+	b.Require(sessionKey(id), 0)
+	b.Put(sessionKey(id), sess.encode())
+	b.Put(userSessionKey(name, id), nil)
+	var live []*session
+	prefix := []byte(userSessionPrefix + name + "\x00")
 	v.Scan(prefix, nil, func(key []byte, _ meta.Record) bool {
-		id := string(key[len(prefix):])
-		rec, ok := v.Get(sessionKey(id))
-		if !ok {
-			out = append(out, &session{ID: id, User: user}) // a dangling index entry
-			return true
+		oid := string(key[len(prefix):])
+		rec, ok := v.Get(sessionKey(oid))
+		var old *session
+		if ok {
+			old, err = decodeSession(oid, rec.Value)
 		}
-		var ss *session
-		if ss, err = decodeSession(id, rec.Value); err != nil {
+		switch {
+		case err != nil:
 			return false
+		case !ok || old.expired(now):
+			b.Delete(key)
+			b.Delete(sessionKey(oid))
+		default:
+			live = append(live, old)
 		}
-		out = append(out, ss)
 		return true
 	})
-	return out, err
-}
-
-func deleteSession(b *meta.Batch, ss *session) {
-	b.Delete(sessionKey(ss.ID))
-	b.Delete(userSessionKey(ss.User, ss.ID))
-}
-
-// endUserSessions adds to b the deletion of every session of user but
-// keep, which may be "".
-func endUserSessions(v meta.View, b *meta.Batch, user, keep string) error {
-	sessions, err := userSessions(v, user)
-	for _, ss := range sessions {
-		if ss.ID != keep {
-			deleteSession(b, ss)
-		}
+	if err != nil {
+		return err
 	}
-	return err
+	slices.SortStableFunc(live, func(a, b *session) int { return a.Created.Compare(b.Created) })
+	for len(live) >= maxSessionsPerUser {
+		b.Delete(userSessionKey(name, live[0].ID))
+		b.Delete(sessionKey(live[0].ID))
+		live = live[1:]
+	}
+	actor := &Principal{User: name}
+	if err := s.commit(ctx, b, actor, "auth.session.create", "session "+id+" of user "+name); err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookie,
+		Value:    value,
+		Path:     "/",
+		Expires:  sess.Expires,
+		MaxAge:   int(sess.Expires.Sub(now) / time.Second),
+		Secure:   secureCookie(r),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil
+}
+
+// endSession deletes the request's session, if it has a valid one, and
+// clears its cookie.
+func (s *Service) endSession(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+	http.SetCookie(w, &http.Cookie{
+		Name: SessionCookie, Value: "", Path: "/", MaxAge: -1,
+		Secure: secureCookie(r), HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	p, err := s.checkSession(r)
+	if errors.Is(err, errNoSession) || errors.Is(err, ErrInvalidCredentials) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := new(meta.Batch)
+	b.Delete(sessionKey(p.SessionID))
+	b.Delete(userSessionKey(p.User, p.SessionID))
+	return s.commit(ctx, b, p, "auth.session.delete", "session "+p.SessionID+" of user "+p.User)
+}
+
+// secureCookie reports whether cookies for r should be Secure: whether
+// the client reached flint over HTTPS, directly or through a trusted
+// proxy.
+func secureCookie(r *http.Request) bool {
+	return r.TLS != nil || strings.HasPrefix(server.Origin(r), "https://")
 }

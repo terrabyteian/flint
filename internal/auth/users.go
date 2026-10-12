@@ -210,7 +210,7 @@ func (s *Service) changeUser(ctx context.Context, actor *Principal, name, action
 	return u, nil
 }
 
-// setPassword replaces a user's password and ends the user's web UI
+// setPassword replaces a user's password and ends the user's sign-in
 // sessions, except the actor's own if the user is the actor.
 func (s *Service) setPassword(ctx context.Context, actor *Principal, name, password string) error {
 	if err := checkPassword(password); err != nil {
@@ -225,13 +225,19 @@ func (s *Service) setPassword(ctx context.Context, actor *Principal, name, passw
 		keep = actor.SessionID
 	}
 	_, err = s.changeUser(ctx, actor, name, "auth.user.password", func(v meta.View, b *meta.Batch, u *user) error {
+		if u.OIDC != nil {
+			return invalidf("user %q signs in through OIDC provider %s and cannot have a password", name, u.OIDC.Provider)
+		}
 		u.Password = hash
-		return endUserSessions(v, b, name, keep)
+		endUserSessions(v, b, name, keep)
+		return nil
 	})
 	return err
 }
 
-// deleteUser deletes a user, the user's tokens, and the user's sessions.
+// deleteUser deletes a user, the user's tokens and sessions, and the
+// link from the user's OIDC identity, if any, so the identity's next
+// sign-in creates the user anew.
 func (s *Service) deleteUser(ctx context.Context, actor *Principal, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -259,8 +265,14 @@ func (s *Service) deleteUser(ctx context.Context, actor *Principal, name string)
 		b.Delete(tokenKey(string(key[len(prefix):])))
 		return true
 	})
-	if err := endUserSessions(v, b, name, ""); err != nil {
-		return err
+	prefix = []byte(userSessionPrefix + name + "\x00")
+	v.Scan(prefix, nil, func(key []byte, _ meta.Record) bool {
+		b.Delete(key)
+		b.Delete(sessionKey(string(key[len(prefix):])))
+		return true
+	})
+	if u.OIDC != nil {
+		b.Delete(oidcKey(u.OIDC.Issuer, u.OIDC.Subject))
 	}
 	return s.commit(ctx, b, actor, "auth.user.delete", "user "+name)
 }

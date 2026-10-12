@@ -9,17 +9,11 @@ The layout adapts to narrow screens, follows the system's light or dark theme un
 
 ## Signing in
 
-Sign in at `/ui/login` with your user name and password.
-A session lasts `auth.sessionTTL`, 12 hours by default (see [configuration](configuration.md#fields)), and ends earlier when you sign out, when your password is changed, by you or an administrator, or when your user is deleted.
-Changing your own password on the account page keeps the session you changed it from and ends your others.
+The UI has no sign-in of its own: **Sign in** takes you to flint's [sign-in page](auth.md#signing-in), `/auth/login`, where you sign in with your user name and password or through an [OIDC provider](auth.md#oidc-sign-in), and which brings you back to the page you came from.
+`/ui/login` sends you there too.
+The sign-in session, its `flint_session` cookie, how long it lasts (`auth.sessionTTL`), and how it ends are as [authentication](auth.md#signing-in) describes; **Sign out** ends it.
+Changing your password on the account page keeps the session you changed it from and ends your others.
 Every page checks the session's user as it is at that moment, so a changed admin flag or group membership applies at once.
-
-A user without a password cannot sign in here with one; sign-in providers, such as OpenID Connect, add their own buttons to the sign-in page.
-
-Sessions are held in the `flint_session` cookie, which is `HttpOnly`, `SameSite=Lax`, scoped to `/ui/`, and `Secure` when the browser reached flint over HTTPS, directly or through a [trusted proxy](configuration.md#trusted-proxies) that says so in `X-Forwarded-Proto`.
-Only the UI reads it: the admin API and the package and registry routes never accept it, so a browser session cannot be used against them.
-flint stores only a hash of the session's secret, as it does for API tokens, so neither the metadata nor a [backup](backup.md) holds anything that signs anyone in.
-Signing in and out are recorded in the [audit log](operations.md#audit-log).
 
 Without signing in, you see the repositories that allow anonymous pulls.
 
@@ -56,10 +50,10 @@ The account page, `/ui/account`, shows your user, groups, and when your session 
 - **Create a token** with a name, an expiry of 7, 30, 90, or 365 days or none, and either all of your repository permissions or one role on repositories you name, by name or pattern such as `team-a-*`.
   Administrators may also give a token the global admin role.
   The token is shown once, right after it is created; flint keeps only its hash.
-  Signing in to the UI counts as signing in with your password, so you can create tokens from a session, but an API token can never create another.
+  A sign-in session counts as signing in, so you can create tokens from the UI whether you signed in with a password or through a provider, but an API token can never create another.
 - **Revoke a token**, which takes effect at once.
   The UI revokes only your own tokens; administrators revoke others' through the [admin API](auth.md#api-tokens).
-- **Change your password**, which needs your current one.
+- **Change your password**, which needs your current one. Users who sign in through an OIDC provider have no password here.
 
 `cargo login` sends you to this page to create a token.
 
@@ -76,10 +70,9 @@ Administrators get a read-only status page, `/ui/admin`, with:
 ## Security
 
 - Every page is sent with a strict `Content-Security-Policy` that allows only the UI's own scripts, styles, and images, forms that post back to the UI, and no framing; the pages hold no inline script or style.
-- Every form that changes anything is a `POST` carrying a CSRF token: an HMAC keyed by the session's secret, or for the sign-in form, by the random value of the `flint_csrf` cookie.
-  Requests the browser marks as coming from another site, by `Sec-Fetch-Site` or `Origin`, are refused even with a valid token.
+- Every form that changes anything is a `POST`, which is refused when the browser says it comes from another origin, by `Sec-Fetch-Site` or `Origin`, as every request with a sign-in session is; the session cookie is also `SameSite=Lax`.
 - Pages are sent with `Cache-Control: no-store`, so a page that shows a new token is never cached, and with `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: same-origin`.
-- After signing in, the UI only redirects to its own pages.
+- After signing in, the sign-in page returns only to a path on flint.
 - Static assets are served from `/ui/static/` with their content's hash in the URL, so browsers cache them until flint is upgraded.
 
 ## Endpoints
@@ -88,7 +81,7 @@ Administrators get a read-only status page, `/ui/admin`, with:
 | --- | --- |
 | `GET /` | Redirects to `/ui/`. |
 | `GET /ui/` | The repository list. |
-| `GET, POST /ui/login`, `POST /ui/logout` | Signing in and out. |
+| `GET /ui/login` | Redirects to the [sign-in page](auth.md#signing-in), `/auth/login`. |
 | `GET /ui/repositories/<repository>` | A repository's contents and client setup. |
 | `GET /ui/repositories/<repository>/packages/<package>` | A package's versions and files. |
 | `GET /ui/repositories/<repository>/images/<image>` | An OCI image's tags and manifests. |

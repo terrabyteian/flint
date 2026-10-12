@@ -48,7 +48,7 @@ Only one backup runs at a time: starting another while one runs fails with `409`
 | `POST /api/v1/backup` | Start a backup. `202 Accepted` with the backup, in the form of the status's `running`; `409` if one is running; `404` if `backup.directory` is not configured. |
 | `GET /api/v1/backup` | The status: the running backup, the last one that finished since the server started, and the last complete one. |
 
-Both need the global admin role, with a password or an API token created with `"admin": true`.
+Both need the global admin role, with a password, a [sign-in session](auth.md#signing-in), or an API token created with `"admin": true`.
 The status looks like this:
 
 ```json

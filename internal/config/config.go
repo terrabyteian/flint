@@ -46,8 +46,6 @@ const (
 	// DefaultLoginTokenTTL is how long an API token minted by a client's
 	// login command stays valid.
 	DefaultLoginTokenTTL = 90 * 24 * time.Hour
-	// DefaultSessionTTL is how long a web UI sign-in lasts.
-	DefaultSessionTTL = 12 * time.Hour
 )
 
 // Config is the configuration file.
@@ -280,9 +278,11 @@ type Auth struct {
 	// LoginTokenTTL is how long an API token minted by a package
 	// client's login command stays valid. Default 2160h (90 days).
 	LoginTokenTTL Duration `json:"loginTokenTTL,omitzero"`
-	// SessionTTL is how long a web UI sign-in lasts before the user must
-	// sign in again. Default 12h.
+	// SessionTTL is how long a sign-in session, from the sign-in page or
+	// an OIDC provider, lasts. Default 12h.
 	SessionTTL Duration `json:"sessionTTL,omitzero"`
+	// OIDC lists the OpenID Connect providers users may sign in through.
+	OIDC []OIDCProvider `json:"oidc,omitempty"`
 }
 
 // BootstrapAdmin names the first administrator and the file holding its
@@ -399,6 +399,7 @@ func (c *Config) setDefaults() {
 	if g := &c.GC.GracePeriod; !g.set && g.invalid == "" {
 		*g = Duration{Duration: DefaultGCGracePeriod, set: true}
 	}
+	c.setOIDCDefaults()
 }
 
 // decodeError turns a json decoding error into a message naming the field
@@ -656,12 +657,7 @@ func (c *Config) Validate() error {
 	case d.Duration <= 0:
 		v.addf("auth.loginTokenTTL", "must be positive")
 	}
-	switch d := c.Auth.SessionTTL; {
-	case d.invalid != "":
-		v.addf("auth.sessionTTL", "%s", d.invalid)
-	case d.Duration < time.Minute:
-		v.addf("auth.sessionTTL", "must be at least 1m")
-	}
+	c.validateSignIn(&v)
 	return v.err()
 }
 

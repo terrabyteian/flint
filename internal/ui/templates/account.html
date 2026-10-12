@@ -1,11 +1,10 @@
 {{define "content"}}
-{{$d := .Data}}{{$csrf := .CSRF}}
+{{$d := .Data}}
 <h1>Account</h1>
 <dl class="facts">
   <dt>User</dt><dd>{{.User.User}}</dd>
   <dt>Groups</dt><dd>{{if $d.Groups}}{{$d.Groups}}{{else}}none{{end}}</dd>
   <dt>Administrator</dt><dd>{{if .User.Admin}}yes{{else}}no{{end}}</dd>
-  <dt>Signed in until</dt><dd>{{when .User.SessionExpires}}</dd>
 </dl>
 
 {{- if $d.Created}}
@@ -31,7 +30,6 @@
       <td>{{if .NeverExpire}}never{{else}}{{when .Expires}}{{end}}{{if .Expired}} <span class="badge note">expired</span>{{end}}</td>
       <td>
         <form method="post" action="{{.RevokeHref}}" class="inline">
-          <input type="hidden" name="csrf" value="{{$csrf}}">
           <button type="submit" class="danger" data-confirm="Revoke the token “{{.Name}}”? Clients using it stop working at once.">Revoke<span class="visually-hidden"> {{.Name}}</span></button>
         </form>
       </td>
@@ -44,7 +42,6 @@
   <h3 id="new-token">Create a token</h3>
   {{- if $d.TokenMessage}}<p class="alert error" role="alert">{{$d.TokenMessage}}</p>{{end}}
   <form method="post" action="/ui/account/tokens" class="stack card">
-    <input type="hidden" name="csrf" value="{{$csrf}}">
     <label for="token-name">Name</label>
     <input id="token-name" name="name" required maxlength="128" placeholder="such as ci-deploy or laptop" value="{{$d.Form.Name}}">
     <label for="token-expiry">Expires after</label>
@@ -80,7 +77,6 @@
   {{- if $d.PasswordMessage}}<p class="alert{{if not $d.PasswordOK}} error{{end}}" role="{{if $d.PasswordOK}}status{{else}}alert{{end}}">{{$d.PasswordMessage}}</p>{{end}}
   {{- if $d.HasPassword}}
   <form method="post" action="/ui/account/password" class="stack card">
-    <input type="hidden" name="csrf" value="{{$csrf}}">
     <input type="text" name="username" value="{{.User.User}}" autocomplete="username" hidden>
     <label for="current">Current password</label>
     <input id="current" name="current" type="password" autocomplete="current-password" required>

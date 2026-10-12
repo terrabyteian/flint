@@ -217,6 +217,21 @@
         "role": "admin",
         "users": ["alice"]
       }
+    ],
+    "sessionTTL": "8h",
+    "oidc": [
+      {
+        "name": "corp",
+        "displayName": "Corp SSO",
+        "issuer": "https://sso.example.com/realms/corp",
+        "clientId": "flint",
+        "clientSecretFile": "/etc/flint/oidc/corp/client-secret",
+        "allowedDomains": ["example.com"],
+        "groupMappings": {
+          "engineering": ["ci", "team-a"]
+        },
+        "adminGroups": ["flint-admins"]
+      }
     ]
   }
 }

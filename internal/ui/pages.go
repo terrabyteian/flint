@@ -23,7 +23,6 @@ const (
 	navRepos   = "repos"
 	navAccount = "account"
 	navAdmin   = "admin"
-	navSignIn  = "signin"
 )
 
 func (h *Handler) funcs() template.FuncMap {
@@ -482,14 +481,6 @@ func (h *Handler) manifestPage(rq *request) {
 	rq.render(http.StatusOK, "manifest", rc.Name+"/"+name+"@"+shortDigest(m.Digest), d)
 }
 
-type loginData struct {
-	Next    string
-	User    string
-	Message string
-}
-
-func (loginData) nav() string { return navSignIn }
-
 // nextPath returns the page to go to after signing in: next if it is a
 // UI page, else the UI's home page.
 func nextPath(next string) string {
@@ -499,42 +490,15 @@ func nextPath(next string) string {
 	return Prefix
 }
 
+// loginPage sends /ui/login, with an optional "next" page, to the sign-in
+// page.
 func (h *Handler) loginPage(rq *request) {
 	next := nextPath(rq.r.URL.Query().Get("next"))
 	if rq.signedIn() {
 		http.Redirect(rq.w, rq.r, next, http.StatusSeeOther)
 		return
 	}
-	rq.render(http.StatusOK, "login", "Sign in", loginData{Next: next})
-}
-
-func (h *Handler) login(rq *request) {
-	user := strings.TrimSpace(rq.r.PostFormValue("username"))
-	next := nextPath(rq.r.PostFormValue("next"))
-	secret, expires, err := h.auth.SignIn(detach(rq.r.Context()), user, rq.r.PostFormValue("password"))
-	if err != nil {
-		msg, ok := auth.Message(err)
-		if !ok {
-			h.serverError(rq, err)
-			return
-		}
-		rq.render(http.StatusUnauthorized, "login", "Sign in", loginData{Next: next, User: user, Message: msg})
-		return
-	}
-	h.setCookie(rq.w, rq.r, &http.Cookie{Name: sessionCookie, Value: secret}, expires)
-	h.clearCookie(rq.w, rq.r, csrfCookie)
-	http.Redirect(rq.w, rq.r, next, http.StatusSeeOther)
-}
-
-func (h *Handler) logout(rq *request) {
-	if rq.secret != "" {
-		if err := h.auth.EndSession(detach(rq.r.Context()), rq.secret); err != nil {
-			h.serverError(rq, err)
-			return
-		}
-	}
-	h.clearCookie(rq.w, rq.r, sessionCookie)
-	http.Redirect(rq.w, rq.r, Prefix, http.StatusSeeOther)
+	http.Redirect(rq.w, rq.r, signInHref(next), http.StatusSeeOther)
 }
 
 type tokenRow struct {

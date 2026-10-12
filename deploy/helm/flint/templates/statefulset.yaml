@@ -121,6 +121,12 @@ spec:
               mountPath: /etc/flint/upstream/{{ .name }}
               readOnly: true
             {{- end }}
+            {{- range .Values.oidcSecrets }}
+            # Mounted without subPath, so flint sees a rotated secret.
+            - name: oidc-{{ .name }}
+              mountPath: /etc/flint/oidc/{{ .name }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -172,6 +178,12 @@ spec:
             items:
               - key: password
                 path: password
+        {{- end }}
+        {{- range .Values.oidcSecrets }}
+        - name: oidc-{{ .name }}
+          secret:
+            secretName: {{ .existingSecret }}
+            defaultMode: 288 # 0440
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

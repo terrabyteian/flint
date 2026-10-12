@@ -62,5 +62,7 @@ config.backup.directory=/backups
 backup.enabled=true
 upstreamSecrets[0].name=Bad_Name,upstreamSecrets[0].existingSecret=x
 upstreamSecrets[0].name=dockerhub
+oidcSecrets[0].name=Bad_Name,oidcSecrets[0].existingSecret=x
+oidcSecrets[0].name=corp
 INVALID
 exit "$status"

@@ -6,23 +6,20 @@
 //
 // # Sessions
 //
-// Users sign in with their password, or with a sign-in provider that
-// another package registers (see SignInProvider and Handler.SignInAs),
-// and get a session from the auth package, held in the flint_session
-// cookie: HttpOnly, SameSite=Lax, Secure when the client reached flint
-// over TLS, and scoped to /ui/, so the API and package routes never see
-// it. Anonymous visitors see the repositories that allow anonymous
-// pulls.
+// Users sign in on the auth package's sign-in page, auth.SignInPath,
+// with a password or through an OIDC provider, and get the sign-in
+// session that auth keeps in its cookie; the UI reads that session and
+// sends users there to sign in and out. Anonymous visitors see the
+// repositories that allow anonymous pulls.
 //
 // # Requests
 //
 // Every page answers with a strict Content-Security-Policy that allows
 // only the UI's own scripts, styles, and images, so the pages hold no
-// inline script or style. Every form that changes state is a POST that
-// must carry a CSRF token, an HMAC keyed by the session's secret (or,
-// for the sign-in form, by the flint_csrf cookie's random value), and
-// is refused when the browser says it comes from another site. Pages
-// are never cached.
+// inline script or style. Every form that changes state is a POST, which
+// is refused when the browser says it comes from another origin
+// (auth.Service.CheckCrossOrigin), the protection every request
+// authenticated with a sign-in session gets. Pages are never cached.
 //
 // Every page checks the permission model as the package routes do: a
 // repository is shown to those who may read it, a virtual repository
@@ -34,11 +31,8 @@ package ui
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"embed"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -57,21 +51,10 @@ import (
 	"github.com/terrabyteian/flint/internal/browse"
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/gc"
-	"github.com/terrabyteian/flint/internal/server"
 )
 
 // Prefix is the path the UI is served under.
 const Prefix = "/ui/"
-
-// Cookie names.
-const (
-	sessionCookie = "flint_session"
-	csrfCookie    = "flint_csrf"
-)
-
-// minCSRFCookie is the shortest flint_csrf cookie accepted: the length
-// of rand.Text, 128 random bits.
-const minCSRFCookie = 26
 
 // contentSecurityPolicy allows only the UI's own scripts, styles, and
 // images, forms that post to the UI, and no framing.
@@ -80,15 +63,6 @@ const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 
 
 //go:embed templates static
 var assets embed.FS
-
-// SignInProvider is a way to sign in besides a password, such as an
-// OpenID Connect provider: the sign-in page links to URL with a button
-// labeled "Sign in with <Name>". The package serving URL signs the user
-// in with Handler.SignInAs.
-type SignInProvider struct {
-	Name string
-	URL  string
-}
 
 // Status is what the administrators' status page shows of the server's
 // background work. Every field is optional.
@@ -128,8 +102,6 @@ type Options struct {
 	Cache browse.Files
 	// Status feeds the administrators' status page.
 	Status Status
-	// SignIn are the sign-in providers besides passwords.
-	SignIn []SignInProvider
 	// Version is flint's version, shown in the footer.
 	Version string
 	// Logger receives errors; nil means slog.Default().
@@ -148,9 +120,6 @@ type Handler struct {
 	// assetVersion is a hash of the static files, appended to their URLs
 	// so browsers may cache them indefinitely.
 	assetVersion string
-	// csrfKey keys the sign-in form's CSRF tokens before a session
-	// exists, with the flint_csrf cookie's value.
-	csrfKey []byte
 }
 
 type staticFile struct {
@@ -171,9 +140,6 @@ func New(opts Options) (*Handler, error) {
 	for i := range h.repos {
 		h.byName[h.repos[i].Name] = &h.repos[i]
 	}
-	h.csrfKey = make([]byte, 32)
-	rand.Read(h.csrfKey)
-
 	sum := sha256.New()
 	err := fs.WalkDir(assets, "static", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -222,8 +188,6 @@ func (h *Handler) Register(srv interface{ Handle(string, http.Handler) }) {
 	for pattern, f := range map[string]func(*request){
 		"GET /ui/{$}":                 h.home,
 		"GET /ui/login":               h.loginPage,
-		"POST /ui/login":              h.login,
-		"POST /ui/logout":             h.logout,
 		"GET /ui/repositories/{repo}": h.repository,
 		"GET /ui/repositories/{repo}/packages/{name...}":           h.packagePage,
 		"GET /ui/repositories/{repo}/images/{name...}":             h.imagePage,
@@ -248,8 +212,6 @@ type request struct {
 	h *Handler
 	// p is the signed-in principal, or an anonymous one.
 	p *auth.Principal
-	// secret is the session's secret, "" without a session.
-	secret string
 }
 
 func (rq *request) signedIn() bool { return rq.p.User != "" }
@@ -265,117 +227,30 @@ func (h *Handler) wrap(f func(*request)) http.Handler {
 		hdr.Set("Referrer-Policy", "same-origin")
 		hdr.Set("Cache-Control", "no-store")
 		rq := &request{w: w, r: r, h: h, p: &auth.Principal{}}
-		if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
-			p, err := h.auth.SessionPrincipal(c.Value)
-			switch {
-			case err == nil:
-				rq.p, rq.secret = p, c.Value
-				server.LogAttrs(r.Context(), slog.String("user", p.User))
-			case errors.Is(err, auth.ErrInvalidCredentials):
-				h.clearCookie(w, r, sessionCookie)
-			default:
-				h.serverError(rq, err)
-				return
-			}
+		switch p, err := h.auth.SessionPrincipal(r); {
+		case err == nil && p != nil:
+			rq.p = p
+		case err != nil && !errors.Is(err, auth.ErrInvalidCredentials):
+			// An ended or expired session is the same as none.
+			h.serverError(rq, err)
+			return
 		}
 		if r.Method == http.MethodPost {
 			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-			if !sameOrigin(r) || !h.validCSRF(rq, r.PostFormValue("csrf")) {
+			if h.auth.CheckCrossOrigin(r) != nil {
 				rq.render(http.StatusForbidden, "error", "Request refused", errorData{
 					Heading: "Request refused",
-					Message: "The form expired or came from another site. Go back, reload the page, and try again."})
+					Message: "The form came from another site. Go back to flint's own page and try again."})
+				return
+			}
+			if err := r.ParseForm(); err != nil {
+				rq.render(http.StatusBadRequest, "error", "Bad request", errorData{
+					Heading: "Bad request", Message: "The form could not be read."})
 				return
 			}
 		}
 		f(rq)
 	})
-}
-
-// sameOrigin reports whether a browser's request comes from the UI's own
-// origin, as Sec-Fetch-Site or else Origin says; a request with neither,
-// from a client that is not a browser, passes, and the CSRF token still
-// guards it.
-func sameOrigin(r *http.Request) bool {
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
-		return site == "same-origin" || site == "none"
-	}
-	o := r.Header.Get("Origin")
-	if o == "" {
-		return true
-	}
-	u, err := url.Parse(o)
-	if err != nil {
-		return false
-	}
-	return u.Host == r.Host || o == server.Origin(r) || o == server.BaseURL(r)
-}
-
-// csrfToken returns the CSRF token for the forms of rq's pages, setting
-// the flint_csrf cookie it is keyed by if the client has no session.
-func (rq *request) csrfToken() string {
-	if rq.secret != "" {
-		return mac([]byte(rq.secret), "csrf")
-	}
-	c, err := rq.r.Cookie(csrfCookie)
-	if err != nil || len(c.Value) < minCSRFCookie {
-		c = &http.Cookie{Name: csrfCookie, Value: rand.Text()}
-		rq.h.setCookie(rq.w, rq.r, c, time.Time{})
-		// Later reads in this request see the new value.
-		rq.r.AddCookie(c)
-	}
-	return mac(rq.h.csrfKey, c.Value)
-}
-
-// validCSRF checks a form's CSRF token.
-func (h *Handler) validCSRF(rq *request, token string) bool {
-	var want string
-	if rq.secret != "" {
-		want = mac([]byte(rq.secret), "csrf")
-	} else if c, err := rq.r.Cookie(csrfCookie); err == nil && len(c.Value) >= minCSRFCookie {
-		want = mac(h.csrfKey, c.Value)
-	}
-	return want != "" && hmac.Equal([]byte(token), []byte(want))
-}
-
-func mac(key []byte, msg string) string {
-	m := hmac.New(sha256.New, key)
-	m.Write([]byte(msg))
-	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
-}
-
-// secure reports whether the client reached flint over TLS.
-func secure(r *http.Request) bool {
-	if s := server.Info(r.Context()).Scheme; s != "" {
-		return s == "https"
-	}
-	return r.TLS != nil
-}
-
-func (h *Handler) setCookie(w http.ResponseWriter, r *http.Request, c *http.Cookie, expires time.Time) {
-	c.Path = Prefix
-	c.HttpOnly = true
-	c.Secure = secure(r)
-	c.SameSite = http.SameSiteLaxMode
-	c.Expires = expires
-	http.SetCookie(w, c)
-}
-
-func (h *Handler) clearCookie(w http.ResponseWriter, r *http.Request, name string) {
-	h.setCookie(w, r, &http.Cookie{Name: name, MaxAge: -1}, time.Time{})
-}
-
-// SignInAs signs user in, whom the caller has authenticated, as a sign-in
-// provider's callback does: it starts a session, recorded as started by
-// method, such as "oidc", and sets its cookie on w. The caller then
-// redirects to the UI, such as to Prefix. It returns
-// auth.ErrInvalidCredentials if the user does not exist.
-func (h *Handler) SignInAs(w http.ResponseWriter, r *http.Request, user, method string) error {
-	secret, expires, err := h.auth.StartSession(r.Context(), user, method)
-	if err != nil {
-		return err
-	}
-	h.setCookie(w, r, &http.Cookie{Name: sessionCookie, Value: secret}, expires)
-	return nil
 }
 
 // serveStatic serves an embedded static file.
@@ -400,24 +275,22 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request) {
 type page struct {
 	Title string
 	// Nav names the active navigation entry.
-	Nav       string
-	User      *auth.Principal
-	Version   string
-	AssetVer  string
-	Providers []SignInProvider
-	Data      any
-	rq        *request
+	Nav      string
+	User     *auth.Principal
+	Version  string
+	AssetVer string
+	// SignIn and SignOut are the sign-in page, returning to this page, and
+	// the sign-out endpoint.
+	SignIn, SignOut string
+	Data            any
 }
-
-// CSRF returns the CSRF token for the page's forms.
-func (pg *page) CSRF() string { return pg.rq.csrfToken() }
 
 // render renders template name with data as the page's body.
 func (rq *request) render(status int, name, title string, data any) {
 	h := rq.h
 	t := h.pages[name]
 	pg := &page{Title: title, User: rq.p, Version: h.opts.Version, AssetVer: h.assetVersion,
-		Providers: h.opts.SignIn, Data: data, rq: rq}
+		SignIn: signInHref(rq.r.URL.RequestURI()), SignOut: auth.SignOutPath, Data: data}
 	if !rq.signedIn() {
 		pg.User = nil
 	}
@@ -453,7 +326,12 @@ func (rq *request) denied() {
 		rq.notFound()
 		return
 	}
-	http.Redirect(rq.w, rq.r, "/ui/login?next="+url.QueryEscape(rq.r.URL.RequestURI()), http.StatusSeeOther)
+	http.Redirect(rq.w, rq.r, signInHref(rq.r.URL.RequestURI()), http.StatusSeeOther)
+}
+
+// signInHref is the sign-in page, which returns to path after signing in.
+func signInHref(path string) string {
+	return auth.SignInPath + "?return=" + url.QueryEscape(path)
 }
 
 func (h *Handler) serverError(rq *request, err error) {

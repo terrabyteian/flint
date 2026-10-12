@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -236,16 +235,21 @@ func newEnv(t *testing.T) *env {
 			},
 			Space: fakeSpace{},
 		},
-		SignIn:  []SignInProvider{{Name: "Example SSO", URL: "/auth/oidc/login"}},
 		Version: "test",
 		Logger:  quiet,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux := http.NewServeMux()
-	e.h.Register(mux)
-	e.srv = httptest.NewServer(mux)
+	// The sign-in endpoints and the admin API are served beside the UI,
+	// as flint serves them.
+	srv, err := server.New(server.Options{Addr: "127.0.0.1:0", Logger: quiet, Metrics: metrics.NewRegistry()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.auth.Register(srv)
+	e.h.Register(srv)
+	e.srv = httptest.NewServer(srv.Handler())
 	t.Cleanup(e.srv.Close)
 	e.addUser("alice", "alice-password")
 	e.addUser("bob", "bob-password")
@@ -260,14 +264,7 @@ func (fakeSpace) Pressure() bool { return true }
 // addUser creates a user through the admin API, as root.
 func (e *env) addUser(name, password string) {
 	e.t.Helper()
-	srv, err := server.New(server.Options{Addr: "127.0.0.1:0", Logger: quiet, Metrics: metrics.NewRegistry()})
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	e.auth.Register(srv)
-	api := httptest.NewServer(srv.Handler())
-	defer api.Close()
-	req, _ := http.NewRequest("POST", api.URL+"/api/v1/users",
+	req, _ := http.NewRequest("POST", e.srv.URL+"/api/v1/users",
 		strings.NewReader(`{"name": "`+name+`", "password": "`+password+`"}`))
 	req.SetBasicAuth("root", "root-password")
 	resp, err := http.DefaultClient.Do(req)
@@ -337,34 +334,21 @@ func (b *browser) expect(path string, status int) response {
 	return r
 }
 
-var csrfRE = regexp.MustCompile(`name="csrf" value="([^"]+)"`)
-
-// csrf returns the CSRF token of the forms on page path.
-func (b *browser) csrf(path string) string {
-	b.e.t.Helper()
-	m := csrfRE.FindStringSubmatch(b.expect(path, http.StatusOK).body)
-	if m == nil {
-		b.e.t.Fatalf("%s has no CSRF token", path)
-	}
-	return m[1]
-}
-
-// post submits a form from page from, with that page's CSRF token.
-func (b *browser) post(from, path string, form url.Values) response {
+// post submits a form.
+func (b *browser) post(path string, form url.Values) response {
 	b.e.t.Helper()
 	if form == nil {
 		form = url.Values{}
 	}
-	form.Set("csrf", b.csrf(from))
 	return b.do("POST", path, form)
 }
 
-// signIn signs a user in.
+// signIn signs a user in on the sign-in page.
 func (b *browser) signIn(user, password string) {
 	b.e.t.Helper()
-	r := b.post("/ui/login", "/ui/login", url.Values{"username": {user}, "password": {password}})
-	if r.StatusCode != http.StatusSeeOther {
-		b.e.t.Fatalf("signing in %s: %d\n%s", user, r.StatusCode, r.body)
+	r := b.post(auth.SignInPath, url.Values{"username": {user}, "password": {password}, "return": {"/ui/"}})
+	if r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/ui/" {
+		b.e.t.Fatalf("signing in %s: %d to %q\n%s", user, r.StatusCode, r.Header.Get("Location"), r.body)
 	}
 }
 

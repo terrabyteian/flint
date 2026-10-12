@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/terrabyteian/flint/internal/meta"
 )
 
 // The account operations serve a signed-in user managing their own
 // account, as the web UI does: the same rules as the admin API's, for a
-// principal the caller has authenticated. Unlike the admin API, they
-// accept a web UI session for creating tokens, because a session is an
-// interactive sign-in rather than a token; changing the password needs
+// principal the caller has authenticated, such as with a sign-in
+// session. A token cannot create another; changing the password needs
 // the current one.
 
 // TokenInfo describes an API token, without its secret.
@@ -29,8 +30,12 @@ type TokenInfo struct {
 }
 
 func (s *Service) tokenInfo(t *token) TokenInfo {
-	return TokenInfo{ID: t.ID, Name: t.Name, Owner: t.Owner, Created: t.Created.UTC(), Expires: t.Expires,
+	info := TokenInfo{ID: t.ID, Name: t.Name, Owner: t.Owner, Created: t.Created.UTC(),
 		Expired: t.expired(s.now()), Admin: t.Admin, Scopes: t.Scopes}
+	if !t.Expires.IsZero() {
+		info.Expires = t.Expires.UTC()
+	}
+	return info
 }
 
 // Tokens returns p's own API tokens, oldest first.
@@ -55,7 +60,7 @@ func (s *Service) Tokens(p *Principal) ([]TokenInfo, error) {
 func (s *Service) CreateToken(ctx context.Context, p *Principal, name string, ttl time.Duration, admin bool, scopes []Scope) (TokenInfo, string, error) {
 	switch {
 	case p.TokenID != "":
-		return TokenInfo{}, "", errNeedsPassword
+		return TokenInfo{}, "", errNeedsSignIn
 	case ttl < 0:
 		return TokenInfo{}, "", invalidf("the expiry must be in the future")
 	case scopes != nil && len(scopes) == 0:
@@ -86,12 +91,12 @@ func (s *Service) RevokeToken(ctx context.Context, p *Principal, id string) erro
 }
 
 // ChangePassword sets p's password to password after checking current,
-// p's current password, and ends p's other web UI sessions. It returns
+// p's current password, and ends p's other sign-in sessions. It returns
 // ErrInvalidCredentials if current is wrong, and an error that Message
 // describes if password is unacceptable.
 func (s *Service) ChangePassword(ctx context.Context, p *Principal, current, password string) error {
 	if p.User == "" || p.TokenID != "" {
-		return errNeedsPassword
+		return errNeedsSignIn
 	}
 	if _, err := s.checkPassword(ctx, p.User, current); err != nil {
 		return err
@@ -123,8 +128,21 @@ func Message(err error) (string, bool) {
 		return "incorrect user name or password", true
 	case errors.Is(err, errNoSuchToken):
 		return "no such token", true
-	case errors.Is(err, errNeedsPassword), errors.Is(err, errLastAdmin):
+	case errors.Is(err, errNeedsSignIn), errors.Is(err, errLastAdmin):
 		return err.Error(), true
 	}
 	return "", false
+}
+
+// endUserSessions adds to b the deletion of every sign-in session of user
+// but keep, which may be "".
+func endUserSessions(v meta.View, b *meta.Batch, user, keep string) {
+	prefix := []byte(userSessionPrefix + user + "\x00")
+	v.Scan(prefix, nil, func(key []byte, _ meta.Record) bool {
+		if id := string(key[len(prefix):]); id != keep {
+			b.Delete(key)
+			b.Delete(sessionKey(id))
+		}
+		return true
+	})
 }

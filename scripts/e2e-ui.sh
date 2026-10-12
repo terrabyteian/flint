@@ -5,8 +5,7 @@
 # with a password, browses the image, its manifest, layers, and signature,
 # and the package, creates an API token and checks that it works, revokes it
 # and checks that it no longer does, checks that state-changing forms are
-# refused without their CSRF token or from another site, and signs out. It
-# fails on the first mismatch.
+# refused from another site, and signs out. It fails on the first mismatch.
 #
 # Usage: E2E_USERNAME=<user> E2E_PASSWORD=<password> \
 #          scripts/e2e-ui.sh <host:port> <oci> <pypi> <public>
@@ -62,8 +61,6 @@ has() { grep -qF -- "$1" "$work/body" || fail "$2: the page lacks \"$1\""; }
 lacks() { ! grep -qF -- "$1" "$work/body" || fail "$2: the page shows \"$1\""; }
 # location prints the last response's Location header.
 location() { tr -d '\r' <"$work/headers" | awk 'tolower($1) == "location:" { print $2 }'; }
-# csrf prints the CSRF token of the last page's forms.
-csrf() { sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p' "$work/body" | head -n1; }
 
 # push_blob uploads file $2 to OCI repository name $1 and prints its digest.
 push_blob() {
@@ -128,24 +125,25 @@ grep -qi '^content-security-policy: default-src .none.; script-src .self.' "$wor
 	fail "the UI sends no strict Content-Security-Policy"
 code=$(ui "$base/ui/repositories/$oci")
 [ "$code" = 303 ] || fail "anonymous GET of $oci: $code, want 303"
-case $(location) in /ui/login\?next=*) ;; *) fail "anonymous GET of $oci redirects to $(location)" ;; esac
+case $(location) in /auth/login\?return=*) ;; *) fail "anonymous GET of $oci redirects to $(location)" ;; esac
 code=$(ui "$base/ui/account")
 [ "$code" = 303 ] || fail "anonymous GET of the account page: $code"
 page "/ui/repositories/$public"
 
 step "sign in"
-page /ui/login
-token=$(csrf)
-[ -n "$token" ] || fail "the sign-in page has no CSRF token"
-code=$(ui -d "csrf=$token" --data-urlencode "username=$user" --data-urlencode "password=wrong-$password" "$base/ui/login")
-[ "$code" = 401 ] || fail "signing in with a wrong password: $code"
-has "incorrect user name or password" "wrong password"
-code=$(ui --data-urlencode "username=$user" --data-urlencode "password=$password" "$base/ui/login")
-[ "$code" = 403 ] || fail "signing in without the CSRF token: $code"
-code=$(ui -d "csrf=$token" --data-urlencode "username=$user" --data-urlencode "password=$password" \
-	-d "next=/ui/repositories/$oci" "$base/ui/login")
+page /ui/
+grep -qF 'href="/auth/login?return=%2Fui%2F"' "$work/body" || fail "the UI has no sign-in link"
+code=$(ui --data-urlencode "username=$user" --data-urlencode "password=wrong-$password" \
+	-d "return=/ui/repositories/$oci" "$base/auth/login")
+[ "$code" = 303 ] && case $(location) in *error=invalid*) true ;; *) false ;; esac ||
+	fail "signing in with a wrong password: $code to $(location)"
+code=$(ui -H 'Sec-Fetch-Site: cross-site' --data-urlencode "username=$user" --data-urlencode "password=$password" \
+	"$base/auth/login")
+[ "$code" = 403 ] || fail "signing in from another site: $code"
+code=$(ui --data-urlencode "username=$user" --data-urlencode "password=$password" \
+	-d "return=/ui/repositories/$oci" "$base/auth/login")
 [ "$code" = 303 ] && [ "$(location)" = "/ui/repositories/$oci" ] || fail "signing in: $code to $(location)"
-grep -qi '^set-cookie: flint_session=flints_.*HttpOnly' "$work/headers" || fail "no HttpOnly session cookie"
+grep -qi '^set-cookie: flint_session=.*HttpOnly' "$work/headers" || fail "no HttpOnly session cookie"
 grep -qi '^set-cookie: flint_session=.*SameSite=Lax' "$work/headers" || fail "the session cookie is not SameSite=Lax"
 
 step "browse the OCI image, its manifest, layers, and signature"
@@ -177,8 +175,7 @@ has "/pypi/$pypi/files/e2e-ui/e2e_ui-1.0.tar.gz" "package download link"
 
 step "create an API token, use it, and revoke it"
 page /ui/account
-token=$(csrf)
-code=$(ui -d "csrf=$token" -d name=e2e-ui -d expiry=7d -d scope=selected -d "repositories=$oci" -d role=read \
+code=$(ui -d name=e2e-ui -d expiry=7d -d scope=selected -d "repositories=$oci" -d role=read \
 	"$base/ui/account/tokens")
 [ "$code" = 200 ] || fail "creating a token: $code"
 grep -qi '^cache-control: no-store' "$work/headers" || fail "the page showing the token may be cached"
@@ -193,16 +190,13 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -u "__token__:$api_token" "$base/
 id=$(echo "$api_token" | cut -d_ -f2)
 page /ui/account
 has "$id" "token list"
-token=$(csrf)
-code=$(ui -X POST "$base/ui/account/tokens/$id/revoke")
-[ "$code" = 403 ] || fail "revoking without the CSRF token: $code"
-code=$(ui -H 'Sec-Fetch-Site: cross-site' -d "csrf=$token" "$base/ui/account/tokens/$id/revoke")
+code=$(ui -H 'Sec-Fetch-Site: cross-site' -X POST "$base/ui/account/tokens/$id/revoke")
 [ "$code" = 403 ] || fail "revoking from another site: $code"
-code=$(ui -H 'Origin: https://evil.example' -d "csrf=$token" "$base/ui/account/tokens/$id/revoke")
+code=$(ui -H 'Origin: https://evil.example' -X POST "$base/ui/account/tokens/$id/revoke")
 [ "$code" = 403 ] || fail "revoking with another origin: $code"
 code=$(curl -sS -o /dev/null -w '%{http_code}' -u "__token__:$api_token" "$base/v2/$image/manifests/v1")
 [ "$code" = 200 ] || fail "a refused revoke revoked the token: $code"
-code=$(ui -H 'Sec-Fetch-Site: same-origin' -d "csrf=$token" "$base/ui/account/tokens/$id/revoke")
+code=$(ui -H 'Sec-Fetch-Site: same-origin' -X POST "$base/ui/account/tokens/$id/revoke")
 [ "$code" = 303 ] || fail "revoking: $code"
 code=$(curl -sS -o /dev/null -w '%{http_code}' -u "__token__:$api_token" "$base/v2/$image/manifests/v1")
 [ "$code" = 401 ] || fail "pulling with the revoked token: $code"
@@ -210,9 +204,8 @@ page /ui/account
 lacks "$id" "token list after revoking"
 
 step "sign out"
-token=$(csrf)
-code=$(ui -d "csrf=$token" "$base/ui/logout")
-[ "$code" = 303 ] || fail "signing out: $code"
+code=$(ui -d return=/ui/ "$base/auth/logout")
+[ "$code" = 303 ] && [ "$(location)" = /ui/ ] || fail "signing out: $code to $(location)"
 code=$(ui "$base/ui/account")
 [ "$code" = 303 ] || fail "the account page after signing out: $code"
 

@@ -23,12 +23,12 @@
     <a href="/ui/admin"{{if eq .Nav "admin"}} aria-current="page"{{end}}>Status</a>
     {{- end}}
     <a href="/ui/account"{{if eq .Nav "account"}} aria-current="page"{{end}} title="Account">{{.User.User}}</a>
-    <form method="post" action="/ui/logout" class="inline">
-      <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <form method="post" action="{{.SignOut}}" class="inline">
+      <input type="hidden" name="return" value="/ui/">
       <button type="submit" class="link">Sign out</button>
     </form>
     {{- else}}
-    <a href="/ui/login"{{if eq .Nav "signin"}} aria-current="page"{{end}}>Sign in</a>
+    <a href="{{.SignIn}}">Sign in</a>
     {{- end}}
     <button type="button" class="theme" data-theme-toggle hidden>Theme: auto</button>
   </nav>
