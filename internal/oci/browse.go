@@ -98,7 +98,8 @@ func imageSummary(v meta.View, rn *repoName) (browse.Image, error) {
 
 // Image implements browse.Images. It reads each index's body for its
 // children and their platforms, which the records do not keep: a small
-// blob read per index.
+// blob read per index. An index whose body cannot be read or parsed is
+// listed without children, which then appear on their own.
 func (h *Handler) Image(ctx context.Context, repo, name string) (*browse.ImageDetail, error) {
 	if _, err := h.browseRepo(repo); err != nil {
 		return nil, err
@@ -119,10 +120,10 @@ func (h *Handler) Image(ctx context.Context, repo, name string) (*browse.ImageDe
 		}
 		body, err := h.readBlob(ctx, d, m.Size)
 		if err != nil {
-			return nil, fmt.Errorf("oci: reading manifest %s: %w", d, err)
+			continue
 		}
-		if m.Children, err = indexChildren(body); err != nil {
-			return nil, fmt.Errorf("oci: manifest %s: %w", d, err)
+		if c, err := indexChildren(body); err == nil {
+			m.Children = c
 		}
 	}
 	v := h.view()

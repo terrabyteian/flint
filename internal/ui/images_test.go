@@ -113,3 +113,78 @@ func TestGroupImage(t *testing.T) {
 		t.Errorf("stats %+v", st)
 	}
 }
+
+func TestSchemeTag(t *testing.T) {
+	hex := strings.Repeat("ab", 32)
+	for tag, want := range map[string]string{
+		"sha256-" + hex + ".sig":                  kindSignature,
+		"sha256-" + hex + ".att":                  kindAttestation,
+		"sha256-" + hex + ".sbom":                 kindSBOM,
+		"sha256-" + hex + ".txt":                  "",
+		"sha256-" + hex:                           "",
+		"sha256-" + hex[:62] + ".sig":             "",
+		"sha256-" + strings.ToUpper(hex) + ".sig": "",
+		"sha512-" + hex + ".sig":                  "",
+		"v1.sig":                                  "",
+	} {
+		d, k, ok := schemeTag(tag)
+		if ok != (want != "") || k != want || ok && d != "sha256:"+hex {
+			t.Errorf("schemeTag(%q) = %q, %q, %v; want kind %q", tag, d, k, ok, want)
+		}
+	}
+}
+
+// TestGroupImageCosignTags recognizes cosign's tag-scheme artifacts as
+// proofs of the manifest they name, groups them under it, and does not
+// count their tags as releases.
+func TestGroupImageCosignTags(t *testing.T) {
+	app := "sha256:" + strings.Repeat("a", 64)
+	old := "sha256:" + strings.Repeat("b", 64)
+	scheme := func(d, ext string) string { return "sha256-" + strings.TrimPrefix(d, "sha256:") + "." + ext }
+	img := &browse.ImageDetail{
+		Tags: []browse.ImageTag{
+			{Name: "latest", Digest: app}, {Name: "v1", Digest: app}, {Name: "v0", Digest: old},
+			{Name: scheme(app, "sig"), Digest: "sig"}, {Name: scheme(app, "att"), Digest: "att"},
+			{Name: scheme(app, "sbom"), Digest: "sbom"},
+			// An artifact of a manifest not stored here.
+			{Name: scheme("sha256:"+strings.Repeat("c", 64), "sig"), Digest: "stray"},
+		},
+		Manifests: []browse.ManifestSummary{
+			{Digest: app}, {Digest: old},
+			{Digest: "sig", ArtifactType: "application/vnd.oci.image.config.v1+json"},
+			{Digest: "att"}, {Digest: "sbom"}, {Digest: "stray"},
+		},
+	}
+	tags, rows, st := groupImage(img, func(d string) string { return "/m/" + d })
+
+	var got []string
+	for _, r := range rows {
+		s := strings.Repeat(">", r.Depth) + r.Digest
+		if r.Kind != "" {
+			s += "=" + r.Kind
+		}
+		got = append(got, s)
+	}
+	want := []string{app, ">sig=signature", ">att=attestation", ">sbom=SBOM", old, "stray"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("rows\n got %v\nwant %v", got, want)
+	}
+
+	if len(tags) != 7 {
+		t.Fatalf("tags %+v", tags)
+	}
+	for _, i := range []int{0, 1} {
+		if p := strings.Join(tags[i].Proofs, ","); p != "SBOM,attestation,signature" {
+			t.Errorf("tag %s proofs %q", tags[i].Name, p)
+		}
+	}
+	for _, tr := range tags[2:] {
+		if len(tr.Proofs) != 0 {
+			t.Errorf("tag %s proofs %v", tr.Name, tr.Proofs)
+		}
+	}
+	// The artifact tags are listed but are not releases.
+	if st.Tags != 7 || st.Tagged != 2 || st.Signed != 1 {
+		t.Errorf("stats %+v", st)
+	}
+}

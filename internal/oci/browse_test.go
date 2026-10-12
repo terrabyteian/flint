@@ -139,6 +139,19 @@ func TestBrowseImages(t *testing.T) {
 	if got, _, err := e.h.ListImages("other", browse.Query{}); err != nil || len(got) != 0 {
 		t.Errorf("empty repository: %v, %v", got, err)
 	}
+
+	// An index whose body cannot be read is listed without children
+	// rather than failing the listing.
+	if err := e.blobs.Delete(ctx, indexDigest); err != nil {
+		t.Fatal(err)
+	}
+	img, err = e.h.Image(ctx, "hosted", "team/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(img.Manifests) != 4 || img.Manifests[0].Digest != indexDigest.String() || img.Manifests[0].Children != nil {
+		t.Errorf("manifests without the index body %+v", img.Manifests)
+	}
 }
 
 func equal(a, b []string) bool {
