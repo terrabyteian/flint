@@ -104,10 +104,10 @@ Tokens from the Docker token endpoint are not accepted.
 ## Cargo clients
 
 Cargo sends an API token as the `Authorization` header as it is, which flint accepts, with or without a `Bearer` scheme.
-A request without valid credentials that needs them gets `401` with `WWW-Authenticate: Cargo login_url="..."`, naming flint's [public URL](configuration.md#public-url), or else the scheme and host the client used; one whose credentials lack the permission gets `403`.
+A request without valid credentials that needs them gets `401` with `WWW-Authenticate: Cargo login_url="..."`, naming the [web UI](ui.md#your-account)'s account page under flint's [public URL](configuration.md#public-url), or else the scheme and host the client used; one whose credentials lack the permission gets `403`.
 Errors carry Cargo's `{"errors": [{"detail": "..."}]}`, whose detail Cargo shows.
 A repository's `config.json` says `"auth-required": true` unless it has `anonymousPull`, which makes Cargo send its token with every request, not only to publish; that needs Cargo 1.74 or later, with `credential-provider = "cargo:token"`.
-`cargo login` only stores a token Cargo is given, so create one with the [admin API](#tokens) first.
+`cargo login` only stores a token Cargo is given, so create one first, on the [web UI](ui.md#your-account)'s account page, which `cargo login` points to, or with the [admin API](#api-tokens).
 Crates have no owners in flint: `cargo owner` fails, and who may publish, yank, and delete is decided by permission grants.
 [Cargo](cargo.md#configuring-cargo) shows how to configure it.
 

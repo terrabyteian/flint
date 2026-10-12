@@ -260,6 +260,7 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `auth.permissions` | array | `[]` | Permission grants; see below. |
 | `auth.bootstrapAdmin` | object | none | Create the first administrator at startup if none exists; see below. |
 | `auth.loginTokenTTL` | duration string | `"2160h"` | How long an API token minted by a package client's login command stays valid (90 days by default); see [authentication](auth.md#tokens-from-client-login-commands). Must be positive. |
+| `auth.sessionTTL` | duration string | `"12h"` | How long a [web UI](ui.md#signing-in) sign-in lasts before the user must sign in again. At least `1m`. |
 | `backup.directory` | string | none | Absolute path of the [backup](backup.md) directory, outside the data directory and not containing it. Without it, backups are disabled. |
 | `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
 | `gc.gracePeriod` | duration string | `"24h"` | How long [garbage collection](#garbage-collection) keeps a blob that nothing references after the blob was stored, and a blob link that no manifest references after it was last written or read with a blob `HEAD` or `GET`, or after flint started; so also how long a push may take between uploading or checking its blobs and pushing its manifest. At least `"1h"`. |
@@ -291,7 +292,7 @@ Some package protocols put absolute URLs into the metadata clients store, such a
 `publicURL` is the base of every absolute URL flint writes into served metadata, so those URLs stay the same however a client reached flint: through an ingress, a port forward, or an internal service name.
 It is an `http` or `https` URL without credentials, a query, or a fragment; it may have a path, when a reverse proxy serves flint under one and strips it before forwarding.
 Without it, absolute URLs are built from the scheme and host of each request, as seen through [trusted proxies](#trusted-proxies).
-It is also the base of the login URLs flint gives clients, such as Cargo's `login_url`.
+It is also the base of the login URLs flint gives clients, such as Cargo's `login_url`, which names the [web UI](ui.md#your-account)'s account page, and of the URLs in the UI's client setup.
 The Docker token realm, the token endpoint named in a registry's `401` challenge, does not use it and always follows the host the client used, so a client that reached flint by an internal name gets its token from that same host.
 Where a protocol allows relative URLs, such as PyPI's project pages and the classic Helm index, flint writes relative ones and `publicURL` does not matter.
 Cached upstream content is stored as the upstream sent it and rewritten when served, so changing `publicURL` takes effect at once.
@@ -536,6 +537,7 @@ These authenticate themselves, as [authentication](auth.md) describes:
 | `GET, POST /auth/token` | The Docker token endpoint: issues short-lived bearer tokens for registry requests. |
 | `/api/v1/...` | The admin API: users, groups, API tokens, [backups](backup.md), the [audit log](operations.md#audit-log), yanking and deleting PyPI files, and deleting crate versions. |
 | `PUT /npm/<repository>/-/user/org.couchdb.user:<user>` | npm's legacy login, which mints an API token for a user name and password; see [npm](npm.md#logging-in-with-npm-login). |
+| `/ui/...` | The [web UI](ui.md), with its own sign-in; `GET /` redirects to it. |
 
 ## Signals and shutdown
 

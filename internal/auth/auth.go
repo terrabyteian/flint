@@ -17,6 +17,17 @@
 // owner's global admin role applies only if the token was created with
 // it.
 //
+// # Web UI sessions
+//
+// The web UI signs users in to sessions: SignIn checks a password, and
+// StartSession serves sign-in providers that authenticate users
+// themselves. A session is a random secret, stored only as its hash,
+// that SessionPrincipal resolves to its user as the user is now, until
+// it expires after auth.sessionTTL or is ended by EndSession, a new
+// password, or the user's deletion; see session.go. The account
+// operations, such as CreateToken and ChangePassword, serve the UI's
+// account page; see account.go.
+//
 // # Permissions
 //
 // Repository roles are ordered read < write < delete < admin and come from

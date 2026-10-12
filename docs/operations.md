@@ -60,6 +60,7 @@ Actions:
 | `auth.user.create`, `auth.user.update`, `auth.user.password`, `auth.user.delete` | A user created, its admin flag or groups changed, its password set, or the user deleted. |
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |
+| `auth.session.create`, `auth.session.delete` | A user signed in to the [web UI](ui.md), the target naming how, such as `(password)`, or signed out. Sessions a password change, an expiry, or the user's deletion ends are part of that change. |
 
 Further package formats add their own actions under their own prefix; their proxy repositories record `<format>.proxy.cache`, `<format>.proxy.pulled`, and `<format>.proxy.evict` like the ones above.
 
