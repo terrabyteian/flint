@@ -173,6 +173,13 @@ func (s *Service) createUser(ctx context.Context, actor *Principal, name, passwo
 // return an error to abandon the change. It refuses a change that leaves
 // no administrator.
 func (s *Service) updateUser(ctx context.Context, actor *Principal, name, action string, fn func(*user) error) (*user, error) {
+	return s.changeUser(ctx, actor, name, action, func(_ meta.View, _ *meta.Batch, u *user) error { return fn(u) })
+}
+
+// changeUser is updateUser for a change that also writes other records:
+// fn may add operations to the batch, reading what they depend on from
+// the view the batch is built on.
+func (s *Service) changeUser(ctx context.Context, actor *Principal, name, action string, fn func(meta.View, *meta.Batch, *user) error) (*user, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.store.View()
@@ -182,10 +189,10 @@ func (s *Service) updateUser(ctx context.Context, actor *Principal, name, action
 		return nil, err
 	}
 	wasAdmin := u.Admin
-	if err := fn(u); err != nil {
+	b := new(meta.Batch)
+	if err := fn(v, b, u); err != nil {
 		return nil, err
 	}
-	b := new(meta.Batch)
 	if wasAdmin && !u.Admin {
 		n, err := requireAdmins(v, b)
 		if err != nil {
@@ -203,7 +210,8 @@ func (s *Service) updateUser(ctx context.Context, actor *Principal, name, action
 	return u, nil
 }
 
-// setPassword replaces a user's password.
+// setPassword replaces a user's password and ends the user's web UI
+// sessions, except the actor's own if the user is the actor.
 func (s *Service) setPassword(ctx context.Context, actor *Principal, name, password string) error {
 	if err := checkPassword(password); err != nil {
 		return &invalidError{err.Error()}
@@ -212,14 +220,18 @@ func (s *Service) setPassword(ctx context.Context, actor *Principal, name, passw
 	if err != nil {
 		return err
 	}
-	_, err = s.updateUser(ctx, actor, name, "auth.user.password", func(u *user) error {
+	keep := ""
+	if actor != nil && actor.User == name {
+		keep = actor.SessionID
+	}
+	_, err = s.changeUser(ctx, actor, name, "auth.user.password", func(v meta.View, b *meta.Batch, u *user) error {
 		u.Password = hash
-		return nil
+		return endUserSessions(v, b, name, keep)
 	})
 	return err
 }
 
-// deleteUser deletes a user and the user's tokens.
+// deleteUser deletes a user, the user's tokens, and the user's sessions.
 func (s *Service) deleteUser(ctx context.Context, actor *Principal, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -247,6 +259,9 @@ func (s *Service) deleteUser(ctx context.Context, actor *Principal, name string)
 		b.Delete(tokenKey(string(key[len(prefix):])))
 		return true
 	})
+	if err := endUserSessions(v, b, name, ""); err != nil {
+		return err
+	}
 	return s.commit(ctx, b, actor, "auth.user.delete", "user "+name)
 }
 

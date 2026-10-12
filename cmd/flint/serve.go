@@ -17,6 +17,7 @@ import (
 	"github.com/terrabyteian/flint/internal/auth"
 	"github.com/terrabyteian/flint/internal/backup"
 	"github.com/terrabyteian/flint/internal/blob"
+	"github.com/terrabyteian/flint/internal/browse"
 	"github.com/terrabyteian/flint/internal/cargo"
 	"github.com/terrabyteian/flint/internal/config"
 	"github.com/terrabyteian/flint/internal/flock"
@@ -32,6 +33,7 @@ import (
 	"github.com/terrabyteian/flint/internal/pypi"
 	"github.com/terrabyteian/flint/internal/repo"
 	"github.com/terrabyteian/flint/internal/server"
+	"github.com/terrabyteian/flint/internal/ui"
 	"github.com/terrabyteian/flint/internal/upstream"
 )
 
@@ -357,7 +359,9 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 		Repositories: cfg.Repositories,
 		// Cargo sends its token as the raw Authorization header, and is
 		// told where tokens are made by its own challenge.
-		Authorizer:      authz.Authorizer(auth.Challenge{Style: auth.ChallengeCargo}),
+		Authorizer: authz.Authorizer(auth.Challenge{Style: auth.ChallengeCargo,
+			// cargo login tells the user to get a token here.
+			LoginURL: func(r *http.Request) string { return server.BaseURL(r) + ui.Prefix + "account#tokens" }}),
 		AdminAuthorizer: authz.Authorizer(auth.Challenge{Style: auth.ChallengeBasic, WriteError: cargo.WriteAdminError}),
 		Actor:           authz.Actor,
 		Logger:          logger,
@@ -474,6 +478,31 @@ func newServer(ctx context.Context, cfg *config.Config, logger *slog.Logger, fsy
 	}
 	authz.HandleAdmin(srv, gc.StatusPattern, collector.HandleStatus)
 	authz.HandleAdmin(srv, gc.StartPattern, collector.HandleStart)
+
+	status := ui.Status{GC: collector.Status, Backup: func() (backup.Status, bool) {
+		if backups == nil {
+			return backup.Status{}, false
+		}
+		return backups.Status(), true
+	}}
+	if space != nil {
+		status.Space = space
+	}
+	web, err := ui.New(ui.Options{
+		Auth:     authz,
+		Config:   cfg,
+		Images:   registry,
+		Packages: map[string]browse.Packages{config.FormatPyPI: index, config.FormatNPM: npmRegistry, config.FormatMaven: mvn, config.FormatCargo: crates},
+		Files:    map[string]browse.Files{config.FormatGeneric: files},
+		Cache:    upstream.CacheView{Meta: store},
+		Status:   status,
+		Version:  version,
+		Logger:   logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	web.Register(srv)
 	return &app{srv: srv, oci: registry, pypi: index, cargo: crates, maven: mvn, space: space, audit: auditLog,
 		backups: backups, gc: collector, docs: docs, revalidate: revalidate, paths: paths}, nil
 }

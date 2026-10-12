@@ -24,9 +24,12 @@ func TestMinimalDefaults(t *testing.T) {
 		DataDir:         "/data",
 		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout, set: true},
 		Log:             Log{Level: DefaultLogLevel},
-		Auth:            Auth{LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true}},
-		ProxyCache:      ProxyCache{MinFreeSpace: FreeSpace{Percent: 5, text: "5%"}},
-		GC:              GC{GracePeriod: Duration{Duration: DefaultGCGracePeriod, set: true}},
+		Auth: Auth{
+			LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true},
+			SessionTTL:    Duration{Duration: DefaultSessionTTL, set: true},
+		},
+		ProxyCache: ProxyCache{MinFreeSpace: FreeSpace{Percent: 5, text: "5%"}},
+		GC:         GC{GracePeriod: Duration{Duration: DefaultGCGracePeriod, set: true}},
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("got %+v, want %+v", c, want)
@@ -203,6 +206,9 @@ func TestValidation(t *testing.T) {
 		{"zero login token ttl", `{"dataDir": "/d", "auth": {"loginTokenTTL": "0s"}}`, []string{"auth.loginTokenTTL: must be positive"}},
 		{"negative login token ttl", `{"dataDir": "/d", "auth": {"loginTokenTTL": "-1h"}}`, []string{"auth.loginTokenTTL: must be positive"}},
 		{"login token ttl syntax", `{"dataDir": "/d", "auth": {"loginTokenTTL": "90d"}}`, []string{`auth.loginTokenTTL: "90d" is not a duration`}},
+		{"session ttl", `{"dataDir": "/d", "auth": {"sessionTTL": "30m"}}`, nil},
+		{"short session ttl", `{"dataDir": "/d", "auth": {"sessionTTL": "30s"}}`, []string{"auth.sessionTTL: must be at least 1m"}},
+		{"session ttl syntax", `{"dataDir": "/d", "auth": {"sessionTTL": "1d"}}`, []string{`auth.sessionTTL: "1d" is not a duration`}},
 		{"bad level", `{"dataDir": "/d", "log": {"level": "verbose"}}`, []string{`log.level: "verbose" is not one of`}},
 		{"repo bad name", `{"dataDir": "/d", "repositories": [{"name": "Docker", "format": "oci", "type": "hosted"}]}`,
 			[]string{`repositories[0].name: "Docker" is not a valid repository name`}},

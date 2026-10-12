@@ -134,6 +134,7 @@ type Service struct {
 	urlKey     []byte      // signs download URLs
 	docker     *Authorizer // the registry API's authorizer
 	loginTTL   time.Duration
+	sessionTTL time.Duration
 	log        *slog.Logger
 	now        func() time.Time
 	iterations int
@@ -184,12 +185,16 @@ func New(opts Options) (*Service, error) {
 		now:        opts.Now,
 		iterations: opts.PasswordIterations,
 		loginTTL:   config.DefaultLoginTokenTTL,
+		sessionTTL: config.DefaultSessionTTL,
 		verified:   newVerifiedCache(passwordCacheTTL, 10000),
 		hashing:    make(chan struct{}, runtime.GOMAXPROCS(0)),
 	}
 	s.docker = s.Authorizer(Challenge{Style: ChallengeDocker})
 	if opts.Config != nil && opts.Config.Auth.LoginTokenTTL.Duration > 0 {
 		s.loginTTL = opts.Config.Auth.LoginTokenTTL.Duration
+	}
+	if opts.Config != nil && opts.Config.Auth.SessionTTL.Duration > 0 {
+		s.sessionTTL = opts.Config.Auth.SessionTTL.Duration
 	}
 	var urlKeyCreated bool
 	if s.urlKey, urlKeyCreated, err = loadOrCreateURLKey(opts.FS, opts.KeyDir); err != nil {
@@ -232,6 +237,10 @@ type Principal struct {
 	TokenID string
 	// Password reports whether the client authenticated with a password.
 	Password bool
+	// SessionID identifies the web UI session the client authenticated
+	// with, if any, and SessionExpires is when it expires.
+	SessionID      string
+	SessionExpires time.Time
 
 	userAdmin bool    // the user's own admin flag, which a token's scopes then cap
 	scopes    []Scope // the token's scopes

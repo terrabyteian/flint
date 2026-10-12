@@ -21,6 +21,7 @@ func TestGCMarker(t *testing.T) {
 	e.addUser("carol", "carol-password", false, "ci")
 	e.addToken("carol", false, time.Time{})
 	e.addToken("root", true, e.clock.Now().Add(time.Hour))
+	e.signIn("carol", "carol-password")
 	if refs := gctest.CheckMarked(t, e.store, GCMarker()); len(refs) != 0 {
 		t.Errorf("auth records reference blobs: %v", refs)
 	}

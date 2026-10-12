@@ -1,0 +1,97 @@
+{{define "content"}}
+{{$d := .Data}}{{$csrf := .CSRF}}
+<h1>Account</h1>
+<dl class="facts">
+  <dt>User</dt><dd>{{.User.User}}</dd>
+  <dt>Groups</dt><dd>{{if $d.Groups}}{{$d.Groups}}{{else}}none{{end}}</dd>
+  <dt>Administrator</dt><dd>{{if .User.Admin}}yes{{else}}no{{end}}</dd>
+  <dt>Signed in until</dt><dd>{{when .User.SessionExpires}}</dd>
+</dl>
+
+{{- if $d.Created}}
+<section class="card created" aria-labelledby="created-heading">
+  <h2 id="created-heading">Token “{{$d.Created.Name}}” created</h2>
+  <p class="alert" role="status">Copy the token now. It is shown only once; flint stores only its hash.</p>
+  <div class="code"><pre><code>{{$d.CreatedSecret}}</code></pre><button type="button" class="copy" data-copy hidden>Copy</button></div>
+</section>
+{{- end}}
+
+<section aria-labelledby="tokens-heading" id="tokens">
+  <h2 id="tokens-heading">API tokens</h2>
+  <p>Clients use API tokens in place of your password. A token carries at most your own permissions, and you can narrow it to some repositories and a role.</p>
+  {{- if $d.Tokens}}
+  <table>
+    <thead><tr><th scope="col">Name</th><th scope="col">Permissions</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>
+    {{- range $d.Tokens}}
+    <tr{{if .Expired}} class="expired"{{end}}>
+      <td>{{.Name}}<div class="sub mono">{{.ID}}</div></td>
+      <td>{{join .Scopes "; "}}{{if .Admin}}; <span class="badge note">global admin</span>{{end}}</td>
+      <td>{{when .Created}}</td>
+      <td>{{if .NeverExpire}}never{{else}}{{when .Expires}}{{end}}{{if .Expired}} <span class="badge note">expired</span>{{end}}</td>
+      <td>
+        <form method="post" action="{{.RevokeHref}}" class="inline">
+          <input type="hidden" name="csrf" value="{{$csrf}}">
+          <button type="submit" class="danger" data-confirm="Revoke the token “{{.Name}}”? Clients using it stop working at once.">Revoke<span class="visually-hidden"> {{.Name}}</span></button>
+        </form>
+      </td>
+    </tr>
+    {{- end}}
+    </tbody>
+  </table>
+  {{- else}}<p class="empty">You have no API tokens.</p>{{end}}
+
+  <h3 id="new-token">Create a token</h3>
+  {{- if $d.TokenMessage}}<p class="alert error" role="alert">{{$d.TokenMessage}}</p>{{end}}
+  <form method="post" action="/ui/account/tokens" class="stack card">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <label for="token-name">Name</label>
+    <input id="token-name" name="name" required maxlength="128" placeholder="such as ci-deploy or laptop" value="{{$d.Form.Name}}">
+    <label for="token-expiry">Expires after</label>
+    <select id="token-expiry" name="expiry">
+      {{- range $d.Expiries}}
+      <option value="{{.Value}}"{{if eq .Value $d.Form.Expiry}} selected{{end}}>{{.Label}}</option>
+      {{- end}}
+    </select>
+    <fieldset>
+      <legend>Permissions</legend>
+      <label class="choice"><input type="radio" name="scope" value="all"{{if not $d.Form.Scoped}} checked{{end}}> All of my repository permissions</label>
+      <label class="choice"><input type="radio" name="scope" value="selected"{{if $d.Form.Scoped}} checked{{end}}> Only on these repositories:</label>
+      <div class="scoped">
+        <label for="token-repos">Repositories or patterns, separated by commas</label>
+        <input id="token-repos" name="repositories" placeholder="docker-local, team-a-*" value="{{$d.Form.Repositories}}">
+        <label for="token-role">Role</label>
+        <select id="token-role" name="role">
+          {{- range $r := (list "read" "write" "delete" "admin")}}
+          <option value="{{$r}}"{{if eq $r $d.Form.Role}} selected{{end}}>{{$r}}</option>
+          {{- end}}
+        </select>
+      </div>
+    </fieldset>
+    {{- if .User.Admin}}
+    <label class="choice"><input type="checkbox" name="admin"{{if $d.Form.Admin}} checked{{end}}> Also allow the global admin role</label>
+    {{- end}}
+    <button type="submit" class="primary">Create token</button>
+  </form>
+</section>
+
+<section aria-labelledby="password-heading" id="password">
+  <h2 id="password-heading">Password</h2>
+  {{- if $d.PasswordMessage}}<p class="alert{{if not $d.PasswordOK}} error{{end}}" role="{{if $d.PasswordOK}}status{{else}}alert{{end}}">{{$d.PasswordMessage}}</p>{{end}}
+  {{- if $d.HasPassword}}
+  <form method="post" action="/ui/account/password" class="stack card">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <input type="text" name="username" value="{{.User.User}}" autocomplete="username" hidden>
+    <label for="current">Current password</label>
+    <input id="current" name="current" type="password" autocomplete="current-password" required>
+    <label for="new">New password</label>
+    <input id="new" name="new" type="password" autocomplete="new-password" minlength="8" required>
+    <label for="confirm">New password again</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="8" required>
+    <button type="submit" class="primary">Change password</button>
+  </form>
+  {{- else}}
+  <p>You sign in without a password here; your sign-in provider manages it.</p>
+  {{- end}}
+</section>
+{{end}}

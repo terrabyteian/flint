@@ -46,6 +46,8 @@ const (
 	// DefaultLoginTokenTTL is how long an API token minted by a client's
 	// login command stays valid.
 	DefaultLoginTokenTTL = 90 * 24 * time.Hour
+	// DefaultSessionTTL is how long a web UI sign-in lasts.
+	DefaultSessionTTL = 12 * time.Hour
 )
 
 // Config is the configuration file.
@@ -278,6 +280,9 @@ type Auth struct {
 	// LoginTokenTTL is how long an API token minted by a package
 	// client's login command stays valid. Default 2160h (90 days).
 	LoginTokenTTL Duration `json:"loginTokenTTL,omitzero"`
+	// SessionTTL is how long a web UI sign-in lasts before the user must
+	// sign in again. Default 12h.
+	SessionTTL Duration `json:"sessionTTL,omitzero"`
 }
 
 // BootstrapAdmin names the first administrator and the file holding its
@@ -353,7 +358,10 @@ func Load(path string) (*Config, error) {
 func Parse(b []byte) (*Config, error) {
 	c := Config{
 		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout, set: true},
-		Auth:            Auth{LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true}},
+		Auth: Auth{
+			LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true},
+			SessionTTL:    Duration{Duration: DefaultSessionTTL, set: true},
+		},
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -647,6 +655,12 @@ func (c *Config) Validate() error {
 		v.addf("auth.loginTokenTTL", "%s", d.invalid)
 	case d.Duration <= 0:
 		v.addf("auth.loginTokenTTL", "must be positive")
+	}
+	switch d := c.Auth.SessionTTL; {
+	case d.invalid != "":
+		v.addf("auth.sessionTTL", "%s", d.invalid)
+	case d.Duration < time.Minute:
+		v.addf("auth.sessionTTL", "must be at least 1m")
 	}
 	return v.err()
 }

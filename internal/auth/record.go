@@ -15,18 +15,25 @@ const (
 	userPrefix      = "auth\x00user\x00"      // + name: user record
 	tokenPrefix     = "auth\x00token\x00"     // + id: token record
 	userTokenPrefix = "auth\x00usertoken\x00" // + user + "\x00" + id: empty, indexes a user's tokens
+
+	sessionPrefix     = "auth\x00session\x00"     // + hex SHA-256 of the secret: web UI session record
+	userSessionPrefix = "auth\x00usersession\x00" // + user + "\x00" + id: empty, indexes a user's sessions
 )
 
-// GCMarker returns the auth marker for the garbage collector: users and
-// tokens reference no blobs.
+// GCMarker returns the auth marker for the garbage collector: users,
+// tokens, and sessions reference no blobs.
 func GCMarker() gc.Marker {
-	return gc.Marker{userPrefix: nil, tokenPrefix: nil, userTokenPrefix: nil}
+	return gc.Marker{userPrefix: nil, tokenPrefix: nil, userTokenPrefix: nil, sessionPrefix: nil, userSessionPrefix: nil}
 }
 
 func userKey(name string) []byte { return []byte(userPrefix + name) }
 func tokenKey(id string) []byte  { return []byte(tokenPrefix + id) }
 func userTokenKey(user, id string) []byte {
 	return []byte(userTokenPrefix + user + "\x00" + id)
+}
+func sessionKey(id string) []byte { return []byte(sessionPrefix + id) }
+func userSessionKey(user, id string) []byte {
+	return []byte(userSessionPrefix + user + "\x00" + id)
 }
 
 // Record schema versions: the first byte of each value.
