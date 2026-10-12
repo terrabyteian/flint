@@ -127,6 +127,11 @@ spec:
               mountPath: /etc/flint/oidc/{{ .name }}
               readOnly: true
             {{- end }}
+            {{- if .Values.googleSignIn.enabled }}
+            - name: oidc-google
+              mountPath: /etc/flint/oidc/google
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -184,6 +189,15 @@ spec:
           secret:
             secretName: {{ .existingSecret }}
             defaultMode: 288 # 0440
+        {{- end }}
+        {{- if .Values.googleSignIn.enabled }}
+        - name: oidc-google
+          secret:
+            secretName: {{ .Values.googleSignIn.existingSecret }}
+            defaultMode: 288 # 0440
+            items:
+              - key: client-secret
+                path: client-secret
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

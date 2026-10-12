@@ -64,6 +64,9 @@ type env struct {
 	reg   *metrics.Registry
 	srv   *httptest.Server
 	cfg   *config.Config
+	// oidcTransport, if set, carries the service's requests to OIDC
+	// providers.
+	oidcTransport http.RoundTripper
 }
 
 const testConfig = `{
@@ -110,6 +113,7 @@ func (e *env) newService() *Service {
 		Metrics:            e.reg,
 		Now:                e.clock.Now,
 		PasswordIterations: testIterations,
+		OIDCTransport:      e.oidcTransport,
 	})
 	if err != nil {
 		e.t.Fatal(err)
@@ -213,7 +217,7 @@ func (e *env) serve() *httptest.Server {
 
 func (e *env) addUser(name, password string, admin bool, groups ...string) {
 	e.t.Helper()
-	if _, err := e.svc.createUser(context.Background(), nil, name, password, admin, groups); err != nil {
+	if _, err := e.svc.createUser(context.Background(), nil, name, password, admin, groups, nil); err != nil {
 		e.t.Fatalf("createUser %s: %v", name, err)
 	}
 }

@@ -231,6 +231,12 @@
           "engineering": ["ci", "team-a"]
         },
         "adminGroups": ["flint-admins"]
+      },
+      {
+        "type": "google",
+        "clientId": "1234567890-abc.apps.googleusercontent.com",
+        "clientSecretFile": "/etc/flint/oidc/google/client-secret",
+        "hostedDomains": ["example.com"]
       }
     ]
   }

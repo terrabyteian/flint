@@ -166,6 +166,12 @@ upstreamSecrets:
 oidcSecrets:
   - name: corp
     existingSecret: flint-oidc-corp
+googleSignIn:
+  enabled: true
+  clientId: 1234567890-abc.apps.googleusercontent.com
+  existingSecret: flint-google
+  hostedDomains: [example.com]
+  allowedEmails: [contractor@gmail.com]
 containerPort: 8443
 service:
   type: LoadBalancer

@@ -91,6 +91,18 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and .Values.bootstrapAdmin.enabled (not .Values.bootstrapAdmin.existingSecret) }}
 {{- fail "bootstrapAdmin.enabled needs bootstrapAdmin.existingSecret, a Secret holding the password" }}
 {{- end }}
+{{- with .Values.googleSignIn }}
+{{- if and .enabled (or (not .clientId) (not .existingSecret)) }}
+{{- fail "googleSignIn.enabled needs googleSignIn.clientId and googleSignIn.existingSecret, a Secret holding the client secret" }}
+{{- end }}
+{{- end }}
+{{- if .Values.googleSignIn.enabled }}
+{{- range .Values.oidcSecrets }}
+{{- if eq .name "google" }}
+{{- fail "oidcSecrets[].name google is taken by googleSignIn" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{/* flint's JSON configuration: the config value plus the fields the chart owns. */}}
@@ -108,6 +120,20 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- $auth := get $config "auth" | default dict }}
 {{- $_ = set $auth "bootstrapAdmin" (dict "username" .Values.bootstrapAdmin.username "passwordFile" "/etc/flint/admin/password") }}
 {{- $_ = set $config "auth" $auth }}
+{{- end }}
+{{- with .Values.googleSignIn }}
+{{- if .enabled }}
+{{- $google := dict "type" "google" "clientId" .clientId "clientSecretFile" "/etc/flint/oidc/google/client-secret" }}
+{{- with .hostedDomains }}
+{{- $_ = set $google "hostedDomains" . }}
+{{- end }}
+{{- with .allowedEmails }}
+{{- $_ = set $google "allowedEmails" . }}
+{{- end }}
+{{- $auth := get $config "auth" | default dict }}
+{{- $_ = set $auth "oidc" (append (get $auth "oidc" | default list) $google) }}
+{{- $_ = set $config "auth" $auth }}
+{{- end }}
 {{- end }}
 {{- toPrettyJson $config }}
 {{- end }}

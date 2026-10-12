@@ -84,6 +84,8 @@ The main ones:
 | `bootstrapAdmin.enabled`, `bootstrapAdmin.existingSecret` | `false`, none | Create the first administrator from a password in a Secret; see below. |
 | `upstreamSecrets` | none | Secrets with proxy repositories' upstream passwords; see below. |
 | `oidcSecrets` | none | Secrets with OIDC providers' client secrets and CA certificates; see below. |
+| `googleSignIn.enabled`, `googleSignIn.clientId`, `googleSignIn.existingSecret` | `false`, none, none | Sign in with Google; see below. |
+| `googleSignIn.hostedDomains`, `googleSignIn.allowedEmails` | none | Restrict Google sign-in to Workspace domains or emails. |
 | `persistence.enabled` | `true` | Keep data on a volume; disabled, it is an `emptyDir` lost with the pod. |
 | `persistence.size`, `persistence.storageClass` | `10Gi`, cluster default | The claim template. Kubernetes does not let a StatefulSet's claim template change after install: to grow the volume, resize the claim directly if its storage class allows it. |
 | `persistence.existingClaim` | none | Use this claim instead of the claim template. |
@@ -176,6 +178,30 @@ oidcSecrets:
   - name: corp
     existingSecret: flint-oidc-corp
 ```
+
+### Google sign-in
+
+For [Google sign-in](auth.md#google-sign-in), create an OAuth client at Google as [configuration](configuration.md#google) describes, with the redirect URI `https://<flint's hostname>/auth/oidc/google/callback`.
+Google accepts only `https` on a real hostname there, not an IP address, so expose flint under such a name, for example through an Ingress or with `tls` and a DNS name for the Service, and set `config.publicURL` to it.
+Put the client secret in a Secret under the key `client-secret`, and enable `googleSignIn`; the chart adds the provider to `config.auth.oidc` and mounts the secret at `/etc/flint/oidc/google/client-secret`:
+
+```sh
+kubectl create secret generic flint-google --namespace flint \
+  --from-literal=client-secret="$GOOGLE_CLIENT_SECRET"
+```
+
+```yaml
+config:
+  publicURL: https://flint.example.com
+googleSignIn:
+  enabled: true
+  clientId: 1234567890-abc.apps.googleusercontent.com
+  existingSecret: flint-google
+  hostedDomains: [example.com]
+```
+
+The name `google` is then taken: do not also list a provider named `google` in `config.auth.oidc` or `oidcSecrets`.
+Google sends no groups, so give Google users their groups through the [admin API](auth.md#assigning-users-by-email).
 
 Register `https://flint.example.com/auth/oidc/corp/callback` as the client's redirect URI at the provider.
 flint reads the client secret at every sign-in, so rotating the Secret takes effect without a restart once the kubelet updates the mount.

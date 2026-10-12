@@ -58,6 +58,10 @@ const (
 	maxSubjectLen = 255
 )
 
+// googleBareIssuer is the other form of Google's issuer that its ID
+// tokens may carry.
+const googleBareIssuer = "accounts.google.com"
+
 // oidcProvider is one configured provider.
 type oidcProvider struct {
 	cfg    config.OIDCProvider
@@ -445,7 +449,8 @@ func (p *oidcProvider) checkClaims(payload []byte, nonce string) (*idClaims, err
 		return int64(math.Floor(f)), true, nil
 	}
 
-	if iss, _ := str("iss"); iss != p.cfg.Issuer {
+	// Google's ID tokens may name its issuer without the scheme.
+	if iss, _ := str("iss"); iss != p.cfg.Issuer && !(p.cfg.IsGoogle() && iss == googleBareIssuer) {
 		return nil, fmt.Errorf("issuer %q is not %q", iss, p.cfg.Issuer)
 	}
 	var aud []string

@@ -21,7 +21,17 @@ var (
 	errNoSuchToken = errors.New("no such token")
 	errUserExists  = errors.New("the user already exists")
 	errLastAdmin   = errors.New("the last administrator cannot be removed or demoted")
+	// errEmailAssigned is an OIDC provider's email that another user is
+	// already assigned.
+	errEmailAssigned = errors.New("the email is already assigned")
 )
+
+// oidcAssignment assigns a new user to the identity at an OIDC provider
+// with a verified email.
+type oidcAssignment struct {
+	Provider string `json:"provider"`
+	Email    string `json:"email"`
+}
 
 // invalidError is a request the caller must correct.
 type invalidError struct{ msg string }
@@ -140,7 +150,9 @@ func (s *Service) commit(ctx context.Context, b *meta.Batch, actor *Principal, a
 }
 
 // createUser creates a user. An empty password disables password login.
-func (s *Service) createUser(ctx context.Context, actor *Principal, name, password string, admin bool, groups []string) (*user, error) {
+// With assign, the user signs in through that OIDC provider instead: its
+// first sign-in with the verified email links the user to the identity.
+func (s *Service) createUser(ctx context.Context, actor *Principal, name, password string, admin bool, groups []string, assign *oidcAssignment) (*user, error) {
 	if !config.ValidUserName(name) {
 		return nil, invalidf("%q is not a valid user name: use 1 to 64 lowercase letters, digits, \".\", \"_\", \"-\", or \"@\", starting with a letter or digit", name)
 	}
@@ -149,6 +161,22 @@ func (s *Service) createUser(ctx context.Context, actor *Principal, name, passwo
 		return nil, err
 	}
 	u := &user{Name: name, Admin: admin, Created: s.now().Truncate(time.Second), Groups: groups}
+	if assign != nil {
+		var p *oidcProvider
+		if s.oidc != nil {
+			p = s.oidc.providers[assign.Provider]
+		}
+		email := strings.ToLower(assign.Email)
+		switch {
+		case p == nil:
+			return nil, invalidf("there is no OIDC provider %q", assign.Provider)
+		case !config.ValidEmail(email):
+			return nil, invalidf("%q is not an email address", assign.Email)
+		case password != "":
+			return nil, invalidf("a user who signs in through an OIDC provider cannot have a password")
+		}
+		u.OIDC = &oidcIdentity{Provider: p.cfg.Name, Issuer: p.cfg.Issuer, Email: email}
+	}
 	if password != "" {
 		if err := checkPassword(password); err != nil {
 			return nil, &invalidError{err.Error()}
@@ -160,6 +188,16 @@ func (s *Service) createUser(ctx context.Context, actor *Principal, name, passwo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b := new(meta.Batch)
+	if u.OIDC != nil {
+		v := s.store.View()
+		rec, taken := v.Get(oidcEmailKey(u.OIDC.Issuer, u.OIDC.Email))
+		v.Release()
+		if taken {
+			return nil, fmt.Errorf("%w: %s is already assigned to user %s", errEmailAssigned, u.OIDC.Email, rec.Value)
+		}
+		b.Require(oidcEmailKey(u.OIDC.Issuer, u.OIDC.Email), 0)
+		b.Put(oidcEmailKey(u.OIDC.Issuer, u.OIDC.Email), []byte(name))
+	}
 	b.Require(userKey(name), 0)
 	b.Put(userKey(name), u.encode())
 	err = s.commit(ctx, b, actor, "auth.user.create", "user "+name)
@@ -271,8 +309,11 @@ func (s *Service) deleteUser(ctx context.Context, actor *Principal, name string)
 		b.Delete(sessionKey(string(key[len(prefix):])))
 		return true
 	})
-	if u.OIDC != nil {
+	switch {
+	case u.OIDC != nil && u.OIDC.Subject != "":
 		b.Delete(oidcKey(u.OIDC.Issuer, u.OIDC.Subject))
+	case u.OIDC != nil:
+		b.Delete(oidcEmailKey(u.OIDC.Issuer, u.OIDC.Email))
 	}
 	return s.commit(ctx, b, actor, "auth.user.delete", "user "+name)
 }

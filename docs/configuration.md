@@ -250,6 +250,12 @@ Repositories and permission grants declared here are read-only through the API.
           "engineering": ["ci", "team-a"]
         },
         "adminGroups": ["flint-admins"]
+      },
+      {
+        "type": "google",
+        "clientId": "1234567890-abc.apps.googleusercontent.com",
+        "clientSecretFile": "/etc/flint/oidc/google/client-secret",
+        "hostedDomains": ["example.com"]
       }
     ]
   }
@@ -439,14 +445,16 @@ The file is read only while no administrator exists, so it can be removed after 
 
 ### OIDC providers
 
-Each entry of `auth.oidc` is an OpenID Connect provider, such as Keycloak, Dex, Okta, Microsoft Entra ID, or Google, that users sign in through on the [sign-in page](auth.md#signing-in).
+Each entry of `auth.oidc` is an OpenID Connect provider, such as Keycloak, Dex, Okta, or Microsoft Entra ID, that users sign in through on the [sign-in page](auth.md#signing-in).
+Google is built in as `"type": "google"`; see [Google](#google).
 [Authentication](auth.md#oidc-sign-in) describes how users are created and their groups synced.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `name` | string | required | Names the provider in flint's URLs, such as `/auth/oidc/<name>/callback`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique. |
-| `displayName` | string | `name` | Shown on the sign-in page, as in "Sign in with Corp SSO". |
-| `issuer` | string | required | The provider's issuer URL, exactly as its discovery document and ID tokens name it, including any trailing `/`. flint fetches `<issuer>/.well-known/openid-configuration`. It must be `https`; `http` is allowed only for `localhost` and loopback addresses. |
+| `type` | string | `"oidc"` | `oidc` for any OpenID Connect provider, or `google` for [Google](#google), which presets the issuer and the name and takes no group settings. |
+| `name` | string | required; `"google"` for Google | Names the provider in flint's URLs, such as `/auth/oidc/<name>/callback`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique. |
+| `displayName` | string | `name`; `"Google"` for Google | Shown on the sign-in page, as in "Sign in with Corp SSO". |
+| `issuer` | string | required; preset for Google | The provider's issuer URL, exactly as its discovery document and ID tokens name it, including any trailing `/`. flint fetches `<issuer>/.well-known/openid-configuration`. It must be `https`; `http` is allowed only for `localhost` and loopback addresses. For Google it is `https://accounts.google.com` and may be left out. |
 | `clientId` | string | required | flint's client ID at the provider. |
 | `clientSecretFile` | string | none | Absolute path of a file holding the client secret, such as a mounted Kubernetes Secret, read at every sign-in so a rotated secret takes effect; one trailing newline is ignored. Without it, flint is a public client and relies on PKCE alone. |
 | `caFile` | string | none | Absolute path of PEM certificates of the authorities that the provider's TLS certificates are checked against, instead of the system's. |
@@ -454,6 +462,8 @@ Each entry of `auth.oidc` is an OpenID Connect provider, such as Keycloak, Dex, 
 | `usernameClaim` | string | `"email"` | The ID token claim that a new user's flint name is made from, lowercased. With `email`, the provider must say the email is verified (`email_verified`). |
 | `groupsClaim` | string | `"groups"` | The ID token claim that lists the user's groups at the provider: an array of strings, or one string. |
 | `allowedDomains` | array of strings | `[]` | If set, only users with a verified email in one of these lowercase domains may sign in. |
+| `allowedEmails` | array of strings | `[]` | If set, users with one of these verified lowercase emails may sign in. With `allowedDomains` or `hostedDomains`, a user who matches any of the three may sign in; alone, only these users may. |
+| `hostedDomains` | array of strings | `[]` | Google only. If set, only users of these Google Workspace domains, as the ID token's `hd` claim names them, may sign in (and those `allowedEmails` admits). With a single domain, Google's account chooser offers only accounts of that domain. |
 | `allowedGroups` | array of strings | `[]` | If set, only users in one of these groups at the provider may sign in. |
 | `groupMappings` | object | `{}` | Maps a group at the provider to an array of flint groups its members belong to, such as `{"engineering": ["ci", "team-a"]}`. Grants in [permissions](#permissions) name the flint groups. |
 | `importGroups` | boolean | `false` | Also make the user a member of each of the user's groups at the provider whose name, lowercased, is a valid flint group name, by that name. |
@@ -463,6 +473,37 @@ Each entry of `auth.oidc` is an OpenID Connect provider, such as Keycloak, Dex, 
 Register `<publicURL>/auth/oidc/<name>/callback` as the client's redirect URI at the provider, or, without a [public URL](#public-url), the scheme and host users reach flint at with that path.
 The provider's discovery document and keys are fetched when a user first signs in through it, not at startup, so flint starts while a provider is down.
 `caFile` is read at startup, which fails if it cannot be; `clientSecretFile` is read at every sign-in.
+
+#### Google
+
+Google sign-in needs only an OAuth client:
+
+```json
+"oidc": [
+  {
+    "type": "google",
+    "clientId": "1234567890-abc.apps.googleusercontent.com",
+    "clientSecretFile": "/etc/flint/oidc/google/client-secret",
+    "hostedDomains": ["example.com"]
+  }
+]
+```
+
+The provider is named `google`, so its callback is `/auth/oidc/google/callback`, and the sign-in page shows "Sign in with Google".
+`clientSecretFile` is required, and `scopes`, if set, must include `email`: only users whose email Google says is verified may sign in.
+Google's ID tokens carry no groups, so `groupsClaim`, `groupMappings`, `importGroups`, `allowedGroups`, and `adminGroups` are refused; the groups and the admin flag of Google users are managed in flint, as described in [Google sign-in](auth.md#google-sign-in).
+Without `hostedDomains` or `allowedEmails`, anyone with a Google account can sign in and becomes a flint user, though with no groups and so only the permissions grants give that user by name, so set one of them unless the OAuth client itself is limited to your organization (an internal consent screen).
+
+To create the OAuth client, in the [Google Cloud console](https://console.cloud.google.com/apis/credentials):
+
+1. Pick or create a project, and configure its OAuth consent screen (Google Auth Platform): the app name users see, a support email, and the audience. **Internal** admits only users of your Google Workspace organization; **External** admits any Google account, and while the app's publishing status is **Testing**, only the test users you list. flint asks only for the `openid`, `email`, and `profile` scopes, which need no verification by Google.
+2. Under **Clients**, create a client of type **Web application**.
+3. Under **Authorized redirect URIs**, add `<publicURL>/auth/oidc/google/callback`, such as `https://flint.example.com/auth/oidc/google/callback`. No JavaScript origins are needed.
+4. Create the client, and copy the client ID into `clientId` and the client secret into the file `clientSecretFile` names. Copy the secret when it is shown: Google may not show it again, and a new one can be added to the client later.
+
+Google accepts a redirect URI only with `https` on a real hostname under a public top-level domain, such as `flint.example.com`; a raw IP address, private or not, or a name such as `flint.local`, is refused, and `http` is allowed only for `localhost`.
+So users must reach flint at such a name over HTTPS, directly or through a reverse proxy, and [`publicURL`](#public-url) should be that URL, so the redirect URI flint sends matches the registered one exactly.
+For trying flint on one machine, `http://localhost:5000/auth/oidc/google/callback` works too.
 
 ### Garbage collection
 

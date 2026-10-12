@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/terrabyteian/flint/internal/config"
 )
 
 // testKey is a signing key of the test provider.
@@ -174,6 +176,11 @@ type idp struct {
 	algs []string
 	// authError, if set, is returned by the authorization endpoint.
 	authError string
+	// google makes the provider mimic Google: its issuer, endpoints,
+	// discovery document, and ID token claims (newGoogleIdP).
+	google bool
+	// tokenIssuer, if set, replaces the issuer in ID tokens.
+	tokenIssuer string
 
 	codes        map[string]idpCode
 	discoveries  int
@@ -202,12 +209,67 @@ func newIdP(t *testing.T, now func() time.Time) *idp {
 	mux.HandleFunc("GET /keys", p.jwks)
 	mux.HandleFunc("GET /authorize", p.authorize)
 	mux.HandleFunc("POST /token", p.token)
+	// Google's paths, at its hosts (googleTransport).
+	mux.HandleFunc("GET /oauth2/v3/certs", p.jwks)
+	mux.HandleFunc("GET /o/oauth2/v2/auth", p.authorize)
 	p.srv = httptest.NewServer(mux)
 	t.Cleanup(p.srv.Close)
 	return p
 }
 
-func (p *idp) issuer() string { return p.srv.URL }
+// Google's endpoints, as its discovery document lists them.
+const (
+	googleAuthEndpoint  = "https://accounts.google.com/o/oauth2/v2/auth"
+	googleTokenEndpoint = "https://oauth2.googleapis.com/token"
+	googleJWKSURI       = "https://www.googleapis.com/oauth2/v3/certs"
+)
+
+// newGoogleIdP returns an in-test provider that mimics Google: it
+// answers at Google's issuer and endpoints through googleTransport,
+// publishes a discovery document shaped like Google's, and issues ID
+// tokens with Google's claims, including the hosted domain (hd) and a
+// numeric subject. Its client ID looks like a Google one.
+func newGoogleIdP(t *testing.T, now func() time.Time) *idp {
+	p := newIdP(t, now)
+	p.google = true
+	p.subject = "110169484474386276334"
+	p.clientID = "1234567890-abc.apps.googleusercontent.com"
+	p.secret = "GOCSPX-client-secret"
+	p.authMethods = []string{"client_secret_post", "client_secret_basic"}
+	p.algs = []string{"RS256"}
+	p.claims = map[string]any{
+		"email": "alice@example.com", "email_verified": true, "hd": "example.com",
+		"azp": p.clientID, "at_hash": "HK6E_P6Dh8Y93mRNtsDB1Q",
+		"name": "Alice Example", "given_name": "Alice", "family_name": "Example",
+		"picture": "https://lh3.googleusercontent.com/a/photo",
+	}
+	return p
+}
+
+// googleTransport carries requests to Google's hosts to the in-test
+// provider p, and every other request as usual.
+func googleTransport(p *idp) http.RoundTripper {
+	target, _ := url.Parse(p.srv.URL)
+	return roundTripper(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Host {
+		case "accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com":
+			r = r.Clone(r.Context())
+			r.URL.Scheme, r.URL.Host = target.Scheme, target.Host
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})
+}
+
+type roundTripper func(*http.Request) (*http.Response, error)
+
+func (f roundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func (p *idp) issuer() string {
+	if p.google {
+		return config.GoogleIssuer
+	}
+	return p.srv.URL
+}
 
 func (p *idp) discovery(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
@@ -222,6 +284,23 @@ func (p *idp) discovery(w http.ResponseWriter, r *http.Request) {
 		"authorization_endpoint": p.issuer() + "/authorize",
 		"token_endpoint":         p.issuer() + "/token",
 		"jwks_uri":               p.issuer() + "/keys",
+	}
+	if p.google {
+		doc = map[string]any{
+			"issuer":                           iss,
+			"authorization_endpoint":           googleAuthEndpoint,
+			"device_authorization_endpoint":    "https://oauth2.googleapis.com/device/code",
+			"token_endpoint":                   googleTokenEndpoint,
+			"userinfo_endpoint":                "https://openidconnect.googleapis.com/v1/userinfo",
+			"revocation_endpoint":              "https://oauth2.googleapis.com/revoke",
+			"jwks_uri":                         googleJWKSURI,
+			"response_types_supported":         []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token", "none"},
+			"subject_types_supported":          []string{"public"},
+			"scopes_supported":                 []string{"openid", "email", "profile"},
+			"claims_supported":                 []string{"aud", "email", "email_verified", "exp", "family_name", "given_name", "iat", "iss", "name", "picture", "sub"},
+			"code_challenge_methods_supported": []string{"plain", "S256"},
+			"grant_types_supported":            []string{"authorization_code", "refresh_token"},
+		}
 	}
 	if p.algs != nil {
 		doc["id_token_signing_alg_values_supported"] = p.algs
@@ -307,6 +386,9 @@ func (p *idp) idClaims(nonce string) map[string]any {
 	c := map[string]any{
 		"iss": p.issuer(), "sub": p.subject, "aud": p.clientID,
 		"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "nonce": nonce,
+	}
+	if p.tokenIssuer != "" {
+		c["iss"] = p.tokenIssuer
 	}
 	for k, v := range p.claims {
 		if v == nil {

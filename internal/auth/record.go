@@ -21,6 +21,9 @@ const (
 	userSessionPrefix = "auth\x00usersession\x00"
 	// + issuer + "\x00" + subject: the name of the user an OIDC identity signs in as
 	oidcPrefix = "auth\x00oidc\x00"
+	// + issuer + "\x00" + email: the name of the user an administrator
+	// assigned that verified email to, until its first sign-in
+	oidcEmailPrefix = "auth\x00oidcemail\x00"
 )
 
 // GCMarker returns the auth marker for the garbage collector: users and
@@ -28,7 +31,7 @@ const (
 func GCMarker() gc.Marker {
 	return gc.Marker{
 		userPrefix: nil, tokenPrefix: nil, userTokenPrefix: nil,
-		sessionPrefix: nil, userSessionPrefix: nil, oidcPrefix: nil,
+		sessionPrefix: nil, userSessionPrefix: nil, oidcPrefix: nil, oidcEmailPrefix: nil,
 	}
 }
 
@@ -44,15 +47,21 @@ func userSessionKey(user, id string) []byte {
 func oidcKey(issuer, subject string) []byte {
 	return []byte(oidcPrefix + issuer + "\x00" + subject)
 }
+func oidcEmailKey(issuer, email string) []byte {
+	return []byte(oidcEmailPrefix + issuer + "\x00" + email)
+}
 
 // Record schema versions: the first byte of each value. A user record
-// is version 1 for a local user and version 2, which adds the OIDC
-// identity, for a user who signs in through an OIDC provider.
+// is version 1 for a local user, version 2, which adds the OIDC
+// identity, for a user who signs in through an OIDC provider, and
+// version 3, which adds the email, for a user assigned to an OIDC
+// identity by email that has not signed in yet.
 const (
-	userVersion     = 1
-	oidcUserVersion = 2
-	tokenVersion    = 1
-	sessionVersion  = 1
+	userVersion            = 1
+	oidcUserVersion        = 2
+	oidcPendingUserVersion = 3
+	tokenVersion           = 1
+	sessionVersion         = 1
 )
 
 const flagAdmin = 1 << 0
@@ -68,16 +77,22 @@ type user struct {
 	OIDC     *oidcIdentity // nil for a local user
 }
 
-// oidcIdentity is the OIDC identity a user signs in with.
+// oidcIdentity is the OIDC identity a user signs in with. A user an
+// administrator assigned by email has no subject but the email until
+// its first sign-in links it to the identity with that verified email.
 type oidcIdentity struct {
 	Provider string // the configured provider's name when the user was created
 	Issuer   string
 	Subject  string
+	Email    string // the assigned email, until the first sign-in
 }
 
 func (u *user) encode() []byte {
 	b := []byte{userVersion, 0}
-	if u.OIDC != nil {
+	switch {
+	case u.OIDC != nil && u.OIDC.Email != "":
+		b[0] = oidcPendingUserVersion
+	case u.OIDC != nil:
 		b[0] = oidcUserVersion
 	}
 	if u.Admin {
@@ -93,6 +108,9 @@ func (u *user) encode() []byte {
 		b = appendBytes(b, []byte(u.OIDC.Provider))
 		b = appendBytes(b, []byte(u.OIDC.Issuer))
 		b = appendBytes(b, []byte(u.OIDC.Subject))
+		if u.OIDC.Email != "" {
+			b = appendBytes(b, []byte(u.OIDC.Email))
+		}
 	}
 	return b
 }
@@ -100,7 +118,7 @@ func (u *user) encode() []byte {
 func decodeUser(name string, b []byte) (*user, error) {
 	d := decoder{b: b}
 	v := d.byte()
-	if v != userVersion && v != oidcUserVersion {
+	if v != userVersion && v != oidcUserVersion && v != oidcPendingUserVersion {
 		return nil, errVersion(v)
 	}
 	u := &user{Name: name}
@@ -111,8 +129,11 @@ func decodeUser(name string, b []byte) (*user, error) {
 	for range n {
 		u.Groups = append(u.Groups, string(d.bytes()))
 	}
-	if v == oidcUserVersion {
+	if v != userVersion {
 		u.OIDC = &oidcIdentity{Provider: string(d.bytes()), Issuer: string(d.bytes()), Subject: string(d.bytes())}
+	}
+	if v == oidcPendingUserVersion {
+		u.OIDC.Email = string(d.bytes())
 	}
 	return u, d.done()
 }

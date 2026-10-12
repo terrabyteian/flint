@@ -57,14 +57,14 @@ The cookie holds the sign-in's nonce, PKCE verifier, return path, and expiry, se
 Sign-ins in progress survive a restart; deleting the key file invalidates them at the next start, and their users sign in again.
 
 **Users.** A user who signs in through a provider is identified by the provider's issuer and the user's subject (`sub`), never by email or name.
-On the first sign-in, flint creates the user, named after the provider's `usernameClaim` (by default the verified email), lowercased.
+On the first sign-in, flint creates the user, named after the provider's `usernameClaim` (by default the verified email), lowercased, unless an administrator [assigned the identity's email](#assigning-users-by-email) to a user beforehand.
 If a user of that name already exists, local or from another identity, the sign-in is refused rather than take it over; an administrator resolves the conflict, for example by deleting the other user.
 Later sign-ins find the user by issuer and subject, so a changed email or name at the provider does not change the flint user.
 Users from a provider have no password and cannot be given one, and password sign-in never works for them; local users never sign in through a provider.
 Deleting such a user deletes its tokens and sessions, and the identity's next sign-in creates the user anew.
-The user's creation and each change a sign-in makes are recorded in the audit log as `auth.oidc.user.create` and `auth.oidc.user.sync`.
+The user's creation, its link to an assigned user, and each change a sign-in makes are recorded in the audit log as `auth.oidc.user.create`, `auth.oidc.user.link`, and `auth.oidc.user.sync`.
 
-**Groups.** At every sign-in, the user's flint groups are replaced by those the provider's groups claim maps to through `groupMappings`, plus, with `importGroups`, the provider's groups themselves.
+**Groups.** For providers other than [Google](#google-sign-in), at every sign-in the user's flint groups are replaced by those the provider's groups claim maps to through `groupMappings`, plus, with `importGroups`, the provider's groups themselves.
 With `adminGroups`, the global `admin` flag is set at every sign-in too: on for members of those groups, off for everyone else, except that the last administrator is never demoted.
 Groups set through the admin API for such a user last until the next sign-in.
 The groups claim must be in the ID token; some providers send it only when asked for a scope such as `groups`, which `scopes` then lists.
@@ -72,6 +72,39 @@ The groups claim must be in the ID token; some providers send it only when asked
 **Removing access.** Group changes at the provider take effect at the user's next sign-in through it.
 Until then, the user's sessions and API tokens keep the groups and permissions of the last sign-in.
 To cut a user off at once, delete the user in flint, which ends its sessions and revokes its tokens, or revoke its tokens; disabling the user at the provider only stops new sign-ins.
+
+**Restricting who signs in.** `allowedDomains`, `allowedEmails`, and, for Google, `hostedDomains` restrict sign-in to users with a verified email in a domain, a verified email from a list, or a Google Workspace domain: with any of them set, a user must match at least one.
+`allowedGroups` additionally requires membership of a group at the provider.
+
+### Google sign-in
+
+Google is built in: a provider of `"type": "google"` in [`auth.oidc`](configuration.md#google) needs only an OAuth client's ID and secret, and appears on the sign-in page as "Sign in with Google".
+[Configuration](configuration.md#google) describes how to create the OAuth client at Google and its redirect URI, which must be `https` on a real hostname, not an IP address.
+
+Google signs in only users whose email it says is verified, and the user's flint name is that email, lowercased.
+`hostedDomains` admits only accounts of your Google Workspace domains, by the ID token's `hd` claim, and `allowedEmails` admits individual accounts, such as a contractor's Gmail address, alongside them or alone.
+flint accepts Google's ID tokens with the issuer `https://accounts.google.com` or, as Google sometimes sends it, `accounts.google.com`.
+
+Google's ID tokens carry no groups, so the groups and the `admin` flag of a user who signs in through Google are flint's own: they start empty, are set through the [admin API](#users) (`PATCH /api/v1/users/{name}` and the [group endpoints](#groups)), and are kept at every sign-in.
+To give a user groups before its first sign-in, [assign](#assigning-users-by-email) its email.
+Removing a Google user's access works as for any user from a provider: delete the user, or remove its groups, which takes effect for its sessions and tokens at once.
+
+### Assigning users by email
+
+An administrator can create a user for an identity at a provider ahead of its first sign-in, by the identity's verified email, with its name, groups, and `admin` flag:
+
+```sh
+curl -u admin https://registry.example/api/v1/users -d '{
+  "name": "alice",
+  "groups": ["ci", "team-a"],
+  "oidc": {"provider": "google", "email": "alice@example.com"}
+}'
+```
+
+The first sign-in through that provider whose email is verified and equal to the assigned one, compared lowercased, signs in as that user instead of creating one, and links the user to the identity's issuer and subject; from then on the user is matched by them like any other, and the email no longer matters.
+An email can be assigned to one user per provider issuer, and a user assigned an email has no password.
+Assignment applies only to an identity's first sign-in: an identity that already signed in has its user, which an administrator deletes first to assign the email anew.
+With a provider that syncs groups, the linked user's groups are replaced by the provider's at sign-in as usual; with Google, they are kept.
 
 ## Permissions
 
@@ -260,7 +293,7 @@ The [classic Helm chart repository view](helm-repository.md#access) at `/helm/<r
 The admin API serves JSON under `/api/v1/`.
 Every request authenticates with a password or an API token, in any of the [forms above](#api-tokens), or with a [sign-in session](#signing-in)'s cookie; tokens from the Docker token endpoint are not accepted.
 Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`, except for a request with a session cookie whose session has ended, which gets `401` without the challenge so a browser does not ask for a password.
-Errors are `{"error": "message"}` with status `400` (invalid request, such as setting a password for a user from an OIDC provider), `403` (not allowed, or a cross-origin request with a session), `404` (no such user, token, repository, project, release, or file, or backups are not configured), `405` (yanking or deleting in a repository that is not hosted), `409` (the user exists, the change would remove the last administrator, a backup is already running, or a garbage collection is in progress), `413` (the body is over 64 KiB), or `503` (the server is shutting down).
+Errors are `{"error": "message"}` with status `400` (invalid request, such as setting a password for a user from an OIDC provider), `403` (not allowed, or a cross-origin request with a session), `404` (no such user, token, repository, project, release, or file, or backups are not configured), `405` (yanking or deleting in a repository that is not hosted), `409` (the user exists, the email is already assigned to another user, the change would remove the last administrator, a backup is already running, or a garbage collection is in progress), `413` (the body is over 64 KiB), or `503` (the server is shutting down).
 Request bodies are strict JSON: unknown fields are errors.
 
 | Request | Who | Does |
@@ -270,7 +303,7 @@ Request bodies are strict JSON: unknown fields are errors.
 | `POST /api/v1/users` | admin, signed in | Create a user. |
 | `GET /api/v1/users/{name}` | admin, or the user | Show a user. |
 | `PATCH /api/v1/users/{name}` | admin, signed in | Set the `admin` flag or the groups. |
-| `DELETE /api/v1/users/{name}` | admin | Delete a user and the user's tokens, sessions, and OIDC link. |
+| `DELETE /api/v1/users/{name}` | admin | Delete a user and the user's tokens, sessions, and OIDC link or assigned email. |
 | `PUT /api/v1/users/{name}/password` | admin or the user, signed in | Set a password. |
 | `GET /api/v1/groups` | admin | List groups and their members. |
 | `PUT /api/v1/groups/{group}/members/{name}` | admin, signed in | Add a user to a group. |
@@ -308,6 +341,7 @@ curl -u admin https://registry.example/api/v1/users -d '{
 ```
 
 `password` may be omitted to create a user who cannot log in with a password.
+Instead of a password, `"oidc": {"provider": "google", "email": "alice@example.com"}` assigns the user to the identity at a configured provider with that verified email; see [assigning users by email](#assigning-users-by-email).
 The response, here `201 Created`, and every other user response has this form:
 
 ```json
@@ -321,7 +355,7 @@ The response, here `201 Created`, and every other user response has this form:
 ```
 
 `password` reports whether password login is enabled.
-A user who signs in through an [OIDC provider](#oidc-sign-in) also has `"oidc": {"provider": "corp", "issuer": "https://sso.example.com/realms/corp", "subject": "..."}`, the identity it signs in with.
+A user who signs in through an [OIDC provider](#oidc-sign-in) also has `"oidc": {"provider": "corp", "issuer": "https://sso.example.com/realms/corp", "subject": "..."}`, the identity it signs in with; a user assigned by email that has not signed in yet has `"email"` there instead of `"subject"`.
 `PATCH /api/v1/users/{name}` takes `{"admin": true}`, `{"groups": ["ci"]}`, or both; a field left out is unchanged.
 `PUT /api/v1/users/{name}/password` takes `{"password": "..."}` and returns `204`; it ends the user's [sign-in sessions](#signing-in), except the one of the request that set it.
 

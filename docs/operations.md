@@ -61,7 +61,7 @@ Actions:
 | `auth.group.add`, `auth.group.remove` | A user added to or removed from a group. |
 | `auth.token.create`, `auth.token.revoke` | An API token created or revoked. |
 | `auth.session.create`, `auth.session.delete` | A user signed in, with a password or through an OIDC provider, or signed out. |
-| `auth.oidc.user.create`, `auth.oidc.user.sync` | A user created at its first sign-in through an OIDC provider, or its groups or admin flag changed by a later sign-in. |
+| `auth.oidc.user.create`, `auth.oidc.user.link`, `auth.oidc.user.sync` | A user created at its first sign-in through an OIDC provider, a user an administrator assigned by email linked to its identity at its first sign-in, or its groups or admin flag changed by a later sign-in. |
 
 Further package formats add their own actions under their own prefix; their proxy repositories record `<format>.proxy.cache`, `<format>.proxy.pulled`, and `<format>.proxy.evict` like the ones above.
 

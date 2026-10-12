@@ -64,5 +64,9 @@ upstreamSecrets[0].name=Bad_Name,upstreamSecrets[0].existingSecret=x
 upstreamSecrets[0].name=dockerhub
 oidcSecrets[0].name=Bad_Name,oidcSecrets[0].existingSecret=x
 oidcSecrets[0].name=corp
+googleSignIn.enabled=true
+googleSignIn.enabled=true,googleSignIn.clientId=x
+googleSignIn.enabled=true,googleSignIn.clientId=x,googleSignIn.existingSecret=x,oidcSecrets[0].name=google,oidcSecrets[0].existingSecret=x
+googleSignIn.hostedDomain=example.com
 INVALID
 exit "$status"
