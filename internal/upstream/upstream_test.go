@@ -336,6 +336,10 @@ func TestTokenRefusals(t *testing.T) {
 		// ghcr.io answers 400 NAME_INVALID for a one-part name.
 		{"anonymous 400", http.StatusBadRequest, false, upstream.ErrNotFound, false},
 		{"anonymous 404", http.StatusNotFound, false, upstream.ErrNotFound, false},
+		{"anonymous 410", http.StatusGone, false, upstream.ErrNotFound, false},
+		{"anonymous 451", http.StatusUnavailableForLegalReasons, false, upstream.ErrNotFound, false},
+		// A timeout says nothing about the name.
+		{"anonymous 408", http.StatusRequestTimeout, false, nil, false},
 		// ghcr.io answers 403 DENIED for a two-part name that does not exist.
 		{"anonymous 403", http.StatusForbidden, false, upstream.ErrDenied, false},
 		{"anonymous 401", http.StatusUnauthorized, false, upstream.ErrDenied, false},

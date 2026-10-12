@@ -1058,3 +1058,27 @@ func TestProxyTokenRefusedName(t *testing.T) {
 		pe.pull("hub/app", "v1", img)
 	}
 }
+
+// TestProxyTokenTimeoutServesCached checks that a token service answering
+// an anonymous request with a status that says nothing about the name,
+// such as 408, does not hide a cached tag.
+func TestProxyTokenTimeoutServesCached(t *testing.T) {
+	pe := newProxyEnv(t, 0)
+	img := pe.up.PutImage("app", "v1", []byte("x"))
+	pe.pull("hub/app", "v1", img)
+	tokens := pe.up.Count("GET", "/token")
+	pe.up.SetStatus(func(r *http.Request) int {
+		if r.URL.Path == "/token" {
+			return http.StatusRequestTimeout
+		}
+		return 0
+	})
+	pe.advance(time.Hour)
+	pe.pull("hub/app", "v1", img)
+	if pe.up.Count("GET", "/token") == tokens {
+		t.Error("the token was not requested again")
+	}
+	if got := pe.metric(`flint_proxy_requests_total{repository="hub",result="stale"}`); got != "1" {
+		t.Errorf("stale = %q, want 1", got)
+	}
+}
