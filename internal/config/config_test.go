@@ -94,7 +94,8 @@ func TestExampleConfig(t *testing.T) {
 	if b := c.Auth.BootstrapAdmin; b == nil || b.Username != "admin" || b.PasswordFile != "/etc/flint/admin/password" {
 		t.Errorf("unexpected auth settings: %+v", c.Auth)
 	}
-	if o := c.Auth.OIDC; c.Auth.SessionTTL.Duration != 8*time.Hour || len(o) != 1 || o[0].Display() != "Corp SSO" ||
+	if o := c.Auth.OIDC; c.Auth.SessionTTL.Duration != 8*time.Hour || len(o) != 2 || o[0].Display() != "Corp SSO" ||
+		o[1].Name != "google" || o[1].Issuer != GoogleIssuer || !slices.Equal(o[1].HostedDomains, []string{"example.com"}) ||
 		o[0].UsernameClaim != "email" || o[0].GroupsClaim != "groups" || !slices.Equal(o[0].Scopes, DefaultOIDCScopes) ||
 		!slices.Equal(o[0].GroupMappings["engineering"], []string{"ci", "team-a"}) {
 		t.Errorf("unexpected sign-in settings: %+v", c.Auth)
@@ -247,6 +248,37 @@ func TestValidation(t *testing.T) {
 				`auth.oidc[0].groupMappings[""]: the provider's group name must be non-empty`,
 				`auth.oidc[0].groupMappings["eng"]: must name at least one flint group`, `auth.oidc[0].groupMappings["ops"][0]: "Ops" is not a valid name`,
 				`auth.oidc[0].signingAlgorithms[0]: "HS256" is not supported`, `auth.oidc[0].signingAlgorithms[1]: "none" is not supported`}},
+		{"google minimal", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x.apps.googleusercontent.com",
+			"clientSecretFile": "/s", "hostedDomains": ["example.com"], "allowedEmails": ["bob@gmail.com"]}]}}`, nil},
+		{"google explicit issuer", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "name": "corp-google",
+			"issuer": "https://accounts.google.com", "clientId": "x", "clientSecretFile": "/s", "allowAnyGoogleAccount": true}]}}`, nil},
+		{"google allowed emails only", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x", "clientSecretFile": "/s",
+			"allowedEmails": ["bob@gmail.com"]}]}}`, nil},
+		{"google unrestricted", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x", "clientSecretFile": "/s"}]}}`,
+			[]string{`auth.oidc[0]: type "google" needs hostedDomains or allowedEmails to restrict who may sign in, or allowAnyGoogleAccount: true`}},
+		{"google any account and restricted", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x", "clientSecretFile": "/s",
+			"hostedDomains": ["example.com"], "allowAnyGoogleAccount": true}]}}`,
+			[]string{"auth.oidc[0].allowAnyGoogleAccount: contradicts hostedDomains and allowedEmails"}},
+		{"oidc any google account", `{"dataDir": "/d", "auth": {"oidc": [{"name": "c", "issuer": "https://idp.example", "clientId": "c",
+			"allowAnyGoogleAccount": true}]}}`,
+			[]string{`auth.oidc[0].allowAnyGoogleAccount: is only for providers of type "google"`}},
+		{"google invalid", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "issuer": "https://accounts.google.com/", "clientId": "x",
+			"scopes": ["openid"], "groupsClaim": "groups", "allowedGroups": ["a"], "groupMappings": {"a": ["b"]}, "importGroups": true,
+			"adminGroups": ["a"], "hostedDomains": ["Example.com"], "allowedEmails": ["Bob@gmail.com", "bob"]}]}}`,
+			[]string{`auth.oidc[0].issuer: must be "https://accounts.google.com" or left out`, `auth.oidc[0].scopes: must include "email"`,
+				"auth.oidc[0].clientSecretFile: is required", "auth.oidc[0].groupsClaim: does not apply", "auth.oidc[0].allowedGroups: does not apply",
+				"auth.oidc[0].groupMappings: does not apply", "auth.oidc[0].importGroups: does not apply", "auth.oidc[0].adminGroups: does not apply",
+				`auth.oidc[0].hostedDomains[0]: "Example.com" is not a lowercase domain name`,
+				`auth.oidc[0].allowedEmails[0]: "Bob@gmail.com" is not a lowercase email address`, `auth.oidc[0].allowedEmails[1]: "bob"`}},
+		{"oidc unknown type", `{"dataDir": "/d", "auth": {"oidc": [{"type": "saml", "name": "c", "issuer": "https://idp.example", "clientId": "c"}]}}`,
+			[]string{`auth.oidc[0].type: "saml" is not a provider type`}},
+		{"oidc hosted domains", `{"dataDir": "/d", "auth": {"oidc": [{"name": "c", "issuer": "https://idp.example", "clientId": "c",
+			"hostedDomains": ["example.com"], "allowedEmails": ["a@example.com"]}]}}`,
+			[]string{`auth.oidc[0].hostedDomains: is only for providers of type "google"`,
+				`auth.oidc[0].allowedEmails: is only for providers of type "google"`}},
+		{"google allowed domains", `{"dataDir": "/d", "auth": {"oidc": [{"type": "google", "clientId": "x", "clientSecretFile": "/s",
+			"allowedDomains": ["example.com"], "allowAnyGoogleAccount": true}]}}`,
+			[]string{`auth.oidc[0].allowedDomains: does not apply to type "google": use hostedDomains`}},
 		{"oidc empty algorithms", `{"dataDir": "/d", "auth": {"oidc": [{"name": "c", "issuer": "https://idp.example", "clientId": "c", "signingAlgorithms": []}]}}`,
 			[]string{"auth.oidc[0].signingAlgorithms: must not be empty if set"}},
 		{"bad level", `{"dataDir": "/d", "log": {"level": "verbose"}}`, []string{`log.level: "verbose" is not one of`}},
@@ -807,6 +839,35 @@ func TestNPMMergeBytes(t *testing.T) {
 	for i, want := range []int64{DefaultNPMMergeLimit, DefaultNPMMergeLimit, DefaultNPMMergeLimit, 4 << 20} {
 		if got := c.Repositories[i].NPM.MergeBytes(); got != want {
 			t.Errorf("repository %s: MergeBytes() = %d, want %d", c.Repositories[i].Name, got, want)
+		}
+	}
+}
+
+func TestGoogleDefaults(t *testing.T) {
+	c, err := Parse([]byte(`{"dataDir": "/d", "auth": {"oidc": [
+		{"type": "google", "clientId": "x.apps.googleusercontent.com", "clientSecretFile": "/s", "allowAnyGoogleAccount": true},
+		{"name": "corp", "issuer": "https://idp.example", "clientId": "c"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, o := c.Auth.OIDC[0], c.Auth.OIDC[1]
+	if g.Name != "google" || g.Display() != "Google" || g.Issuer != GoogleIssuer || !g.IsGoogle() || g.SyncsGroups() ||
+		g.GroupsClaim != "" || g.UsernameClaim != "email" || !slices.Equal(g.Scopes, DefaultOIDCScopes) {
+		t.Errorf("google provider %+v", g)
+	}
+	if o.Type != OIDCTypeGeneric || o.IsGoogle() || !o.SyncsGroups() || o.GroupsClaim != "groups" {
+		t.Errorf("generic provider %+v", o)
+	}
+}
+
+func TestValidEmail(t *testing.T) {
+	for s, want := range map[string]bool{
+		"a@example.com": true, "first.last+tag@sub.example.co": true, "a@b": true,
+		"": false, "a": false, "@example.com": false, "a@": false, "A@example.com": false,
+		"a b@example.com": false, "a@b@example.com": false, "a@exa_mple.com": false, "a\x00@example.com": false,
+	} {
+		if got := ValidEmail(s); got != want {
+			t.Errorf("ValidEmail(%q) = %v", s, got)
 		}
 	}
 }

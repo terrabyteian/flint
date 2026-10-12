@@ -181,6 +181,35 @@ Register `https://flint.example.com/auth/oidc/corp/callback` as the client's red
 flint reads the client secret at every sign-in, so rotating the Secret takes effect without a restart once the kubelet updates the mount.
 The Secret must exist before the pod starts.
 
+### Google sign-in
+
+[Google sign-in](auth.md#google-sign-in) is a provider of `type: google` in `config.auth.oidc`, whose client secret is mounted through `oidcSecrets` like any other provider's.
+Create an OAuth client at Google as [configuration](configuration.md#google) describes, with the redirect URI `https://<flint's hostname>/auth/oidc/google/callback`.
+Google accepts only `https` on a real hostname there, not an IP address, so expose flint under such a name, for example through an Ingress or with `tls` and a DNS name for the Service, and set `config.publicURL` to it.
+Put the client secret in a Secret under the key `client-secret`, and list it in `oidcSecrets` under the name `google`, which mounts it at `/etc/flint/oidc/google/client-secret`:
+
+```sh
+kubectl create secret generic flint-google --namespace flint \
+  --from-literal=client-secret="$GOOGLE_CLIENT_SECRET"
+```
+
+```yaml
+config:
+  publicURL: https://flint.example.com
+  auth:
+    oidc:
+      - type: google
+        clientId: 1234567890-abc.apps.googleusercontent.com
+        clientSecretFile: /etc/flint/oidc/google/client-secret
+        hostedDomains: [example.com]
+oidcSecrets:
+  - name: google
+    existingSecret: flint-google
+```
+
+flint validates the provider at startup: it needs `hostedDomains` or `allowedEmails`, or `allowAnyGoogleAccount: true` to let any Google account sign in.
+Google sends no groups, so give Google users their groups through the [admin API](auth.md#assigning-users-by-email).
+
 ### Backups
 
 flint writes [backups](backup.md) to a directory it can reach, normally a volume on other storage than its data.

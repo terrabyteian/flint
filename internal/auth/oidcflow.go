@@ -197,6 +197,12 @@ func (s *Service) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		"code_challenge":        {b64.EncodeToString(challenge[:])},
 		"code_challenge_method": {"S256"},
 	}
+	if hd := p.cfg.HostedDomains; len(hd) == 1 && len(p.cfg.AllowedEmails) == 0 {
+		// A hint for Google's account chooser, which would hide the
+		// accounts allowedEmails admits; the ID token's hd claim is what
+		// flint checks.
+		q.Set("hd", hd[0])
+	}
 	target := d.AuthorizationEndpoint
 	if strings.Contains(target, "?") {
 		target += "&" + q.Encode()
@@ -316,29 +322,38 @@ type signInDenied struct{ reason, msg string }
 func (e *signInDenied) Error() string { return e.reason }
 
 // oidcUser applies p's restrictions to a verified identity, then finds
-// the user the identity signs in as, creating it on the first sign-in,
-// and syncs its groups and, with adminGroups, its admin flag. It returns
-// the user's name.
+// the user the identity signs in as, linking the user an administrator
+// assigned its verified Google email to or creating one on the first
+// sign-in, and syncs its groups and, with adminGroups, its admin flag. It
+// returns the user's name.
 func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (string, error) {
 	cfg := &p.cfg
-	idpGroups, err := c.Groups(cfg.GroupsClaim)
-	if err != nil {
-		return "", &signInDenied{err.Error(), "The sign-in provider sent invalid group information."}
+	var idpGroups []string
+	if cfg.SyncsGroups() {
+		var err error
+		if idpGroups, err = c.Groups(cfg.GroupsClaim); err != nil {
+			return "", &signInDenied{err.Error(), "The sign-in provider sent invalid group information."}
+		}
 	}
 	email := strings.ToLower(c.String("email"))
-	if len(cfg.AllowedDomains) > 0 {
-		_, domain, _ := strings.Cut(email, "@")
-		if !c.EmailVerified() || !slices.Contains(cfg.AllowedDomains, domain) {
-			return "", &signInDenied{fmt.Sprintf("email %q is not verified or not in an allowed domain", email),
-				"Your account is not allowed to sign in here."}
-		}
+	verified := email != "" && c.EmailVerified()
+	if cfg.IsGoogle() && !verified {
+		return "", &signInDenied{fmt.Sprintf("email %q is missing or not verified", printable(email)),
+			"Your Google account's email address is not verified."}
+	}
+	// Google is authoritative only for the email of a Workspace account,
+	// which has an hd claim, or of a Gmail address; only such an email
+	// names its owner.
+	owned := cfg.IsGoogle() && verified && (c.String("hd") != "" || strings.HasSuffix(email, "@gmail.com"))
+	if !admitted(cfg, c, email, verified, owned) {
+		return "", &signInDenied{fmt.Sprintf("email %q (verified: %t, hosted domain %q) is not allowed", printable(email), verified,
+			printable(c.String("hd"))), "Your account is not allowed to sign in here."}
 	}
 	if len(cfg.AllowedGroups) > 0 && !slices.ContainsFunc(idpGroups, func(g string) bool { return slices.Contains(cfg.AllowedGroups, g) }) {
 		return "", &signInDenied{"the user is in none of the allowed groups", "Your account is not allowed to sign in here."}
 	}
 	groups, admin, setAdmin := mapGroups(cfg, idpGroups)
 
-	identity := oidcIdentity{Provider: cfg.Name, Issuer: cfg.Issuer, Subject: c.Subject}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.store.View()
@@ -346,6 +361,7 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 	b := new(meta.Batch)
 	var u *user
 	var ver meta.Seq
+	var err error
 	action := "auth.oidc.user.sync"
 	if rec, ok := v.Get(oidcKey(cfg.Issuer, c.Subject)); ok {
 		name := string(rec.Value)
@@ -353,9 +369,26 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 		if u, ver, err = readUser(v, name); err != nil {
 			return "", err
 		}
+	} else if rec, ok := v.Get(oidcEmailKey(cfg.Issuer, email)); ok && owned {
+		// An administrator assigned this Google email, which the identity
+		// owns, to a user, which its first sign-in links it to. Other
+		// identities are matched by issuer and subject only.
+		name := string(rec.Value)
+		if u, ver, err = readUser(v, name); err != nil {
+			return "", err
+		}
+		if u.OIDC == nil || u.OIDC.Issuer != cfg.Issuer || u.OIDC.Subject != "" || u.OIDC.Email != email {
+			return "", fmt.Errorf("user %q is not assigned the email that names it", name)
+		}
+		b.Require(oidcEmailKey(cfg.Issuer, email), rec.Version)
+		b.Delete(oidcEmailKey(cfg.Issuer, email))
+		b.Require(oidcKey(cfg.Issuer, c.Subject), 0)
+		b.Put(oidcKey(cfg.Issuer, c.Subject), []byte(name))
+		u.OIDC.Subject, u.OIDC.Email = c.Subject, ""
+		action = "auth.oidc.user.link"
 	} else {
 		name := c.String(cfg.UsernameClaim)
-		if cfg.UsernameClaim == "email" && !c.EmailVerified() {
+		if cfg.UsernameClaim == "email" && !verified {
 			name = ""
 		}
 		name = strings.ToLower(name)
@@ -369,7 +402,8 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 		} else if !errors.Is(err, errNoSuchUser) {
 			return "", err
 		}
-		u = &user{Name: name, Created: s.now().Truncate(time.Second), OIDC: &identity}
+		u = &user{Name: name, Created: s.now().Truncate(time.Second),
+			OIDC: &oidcIdentity{Provider: cfg.Name, Issuer: cfg.Issuer, Subject: c.Subject}}
 		b.Require(oidcKey(cfg.Issuer, c.Subject), 0)
 		b.Put(oidcKey(cfg.Issuer, c.Subject), []byte(name))
 		action = "auth.oidc.user.create"
@@ -378,7 +412,9 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 		return "", fmt.Errorf("user %q is not linked to the OIDC identity that names it", u.Name)
 	}
 	before := u.encode()
-	u.Groups = groups
+	if cfg.SyncsGroups() {
+		u.Groups = groups
+	}
 	u.OIDC.Provider = cfg.Name
 	if setAdmin && u.Admin && !admin {
 		n, err := requireAdmins(v, b)
@@ -394,7 +430,7 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 		u.Admin = admin
 	}
 	after := u.encode()
-	if ver != 0 && string(before) == string(after) {
+	if action == "auth.oidc.user.sync" && string(before) == string(after) {
 		return u.Name, nil
 	}
 	b.Require(userKey(u.Name), ver)
@@ -403,6 +439,19 @@ func (s *Service) oidcUser(ctx context.Context, p *oidcProvider, c *idClaims) (s
 		return "", err
 	}
 	return u.Name, nil
+}
+
+// admitted reports whether p's allowedDomains, or Google's allowedEmails
+// and hostedDomains, admit a user: if any is set, the user must match one
+// of them, with a verified email for allowedDomains and an owned one for
+// allowedEmails.
+func admitted(cfg *config.OIDCProvider, c *idClaims, email string, verified, owned bool) bool {
+	if len(cfg.AllowedDomains) == 0 && len(cfg.AllowedEmails) == 0 && len(cfg.HostedDomains) == 0 {
+		return true
+	}
+	_, domain, _ := strings.Cut(email, "@")
+	return verified && slices.Contains(cfg.AllowedDomains, domain) || owned && slices.Contains(cfg.AllowedEmails, email) ||
+		slices.Contains(cfg.HostedDomains, c.String("hd"))
 }
 
 // mapGroups maps a user's groups at a provider to flint groups, and

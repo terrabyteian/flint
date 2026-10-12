@@ -24,7 +24,7 @@ func (s *Service) Bootstrap(ctx context.Context, username, passwordFile string) 
 	if err := checkPassword(pw); err != nil {
 		return false, fmt.Errorf("auth: the bootstrap administrator's password in %s: %w", passwordFile, err)
 	}
-	_, err = s.createUser(ctx, nil, username, pw, true, nil)
+	_, err = s.createUser(ctx, nil, username, pw, true, nil, nil)
 	if errors.Is(err, errUserExists) {
 		return false, fmt.Errorf("auth: no administrator exists, and the bootstrap administrator %q already exists as a user "+
 			"who is not one; choose another auth.bootstrapAdmin.username", username)

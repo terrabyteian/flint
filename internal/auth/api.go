@@ -193,7 +193,7 @@ func (s *Service) apiErrorResponse(err error) (int, any) {
 		return http.StatusForbidden, apiError{err.Error()}
 	case errors.Is(err, errNoSuchUser), errors.Is(err, errNoSuchToken), errors.Is(err, errNotFound):
 		return http.StatusNotFound, apiError{err.Error()}
-	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin):
+	case errors.Is(err, errUserExists), errors.Is(err, errLastAdmin), errors.Is(err, errEmailAssigned):
 		return http.StatusConflict, apiError{err.Error()}
 	}
 	s.log.Error("admin API request failed", "err", err)
@@ -241,7 +241,11 @@ type userJSON struct {
 type oidcJSON struct {
 	Provider string `json:"provider"`
 	Issuer   string `json:"issuer"`
-	Subject  string `json:"subject"`
+	// Subject is the identity's subject, once the user has signed in.
+	Subject string `json:"subject,omitempty"`
+	// Email is the verified email the user was assigned by, until its
+	// first sign-in.
+	Email string `json:"email,omitempty"`
 }
 
 func toUserJSON(u *user) userJSON {
@@ -251,7 +255,7 @@ func toUserJSON(u *user) userJSON {
 	}
 	out := userJSON{Name: u.Name, Admin: u.Admin, Groups: g, Created: u.Created.UTC(), Password: len(u.Password) > 0}
 	if u.OIDC != nil {
-		out.OIDC = &oidcJSON{Provider: u.OIDC.Provider, Issuer: u.OIDC.Issuer, Subject: u.OIDC.Subject}
+		out.OIDC = &oidcJSON{Provider: u.OIDC.Provider, Issuer: u.OIDC.Issuer, Subject: u.OIDC.Subject, Email: u.OIDC.Email}
 	}
 	return out
 }
@@ -290,11 +294,14 @@ func (s *Service) apiCreateUser(r *http.Request, p *Principal) (int, any, error)
 		Password string   `json:"password"`
 		Admin    bool     `json:"admin"`
 		Groups   []string `json:"groups"`
+		// OIDC assigns the user to the identity at a Google provider with a
+		// verified email, which the identity's first sign-in links.
+		OIDC *oidcAssignment `json:"oidc"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		return 0, nil, err
 	}
-	u, err := s.createUser(r.Context(), p, req.Name, req.Password, req.Admin, req.Groups)
+	u, err := s.createUser(r.Context(), p, req.Name, req.Password, req.Admin, req.Groups, req.OIDC)
 	if err != nil {
 		return 0, nil, err
 	}

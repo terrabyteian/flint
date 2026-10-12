@@ -24,6 +24,18 @@ const (
 	DefaultOIDCGroupsClaim = "groups"
 )
 
+// Provider types of auth.oidc entries.
+const (
+	// OIDCTypeGeneric is any OpenID Connect provider, configured in full.
+	OIDCTypeGeneric = "oidc"
+	// OIDCTypeGoogle is Google, with its issuer and endpoints preset.
+	OIDCTypeGoogle = "google"
+)
+
+// GoogleIssuer is Google's issuer URL, from which its discovery document
+// gives its endpoints.
+const GoogleIssuer = "https://accounts.google.com"
+
 // DefaultOIDCScopes are the scopes requested from an OIDC provider.
 var DefaultOIDCScopes = []string{"openid", "email", "profile"}
 
@@ -35,6 +47,12 @@ var OIDCSigningAlgorithms = []string{"RS256", "RS384", "RS512", "PS256", "PS384"
 // Users who sign in are created on their first sign-in and identified by
 // the provider's issuer and their subject, never by email.
 type OIDCProvider struct {
+	// Type is the kind of provider: "oidc" (the default) for any OpenID
+	// Connect provider, or "google" for Google, whose issuer is preset
+	// and whose name defaults to "google". Google's ID tokens carry no
+	// groups, so its users' groups are managed in flint, and only users
+	// whose email Google says is verified may sign in.
+	Type string `json:"type,omitempty"`
 	// Name identifies the provider in flint's URLs, as in
 	// /auth/oidc/<name>/callback: 1 to 64 lowercase letters and digits,
 	// with single ".", "_", or "-" separators.
@@ -66,9 +84,21 @@ type OIDCProvider struct {
 	// GroupsClaim is the ID token claim that lists the user's groups at
 	// the provider: an array of strings, or one string. Default "groups".
 	GroupsClaim string `json:"groupsClaim,omitempty"`
-	// AllowedDomains, if set, admits only users whose verified email is
-	// in one of these domains.
+	// AllowedDomains, not for Google, if set, admits only users whose
+	// verified email is in one of these domains.
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
+	// AllowedEmails, for Google only, if set, admits users whose verified
+	// email is one of these, lowercase, if Google is authoritative for it:
+	// a Workspace account's, with an hd claim, or a Gmail address. With
+	// HostedDomains, a user matching either is admitted.
+	AllowedEmails []string `json:"allowedEmails,omitempty"`
+	// HostedDomains, for Google only, if set, admits only users of these
+	// Google Workspace domains, as the ID token's hd claim names them.
+	HostedDomains []string `json:"hostedDomains,omitempty"`
+	// AllowAnyGoogleAccount, for Google only, lets any Google account
+	// sign in. A provider of type google needs it, HostedDomains, or
+	// AllowedEmails, so an open sign-in is never configured by accident.
+	AllowAnyGoogleAccount bool `json:"allowAnyGoogleAccount,omitempty"`
 	// AllowedGroups, if set, admits only users in one of these groups at
 	// the provider.
 	AllowedGroups []string `json:"allowedGroups,omitempty"`
@@ -98,16 +128,38 @@ func (p *OIDCProvider) Display() string {
 	return p.Name
 }
 
+// IsGoogle reports whether the provider is Google.
+func (p *OIDCProvider) IsGoogle() bool { return p.Type == OIDCTypeGoogle }
+
+// SyncsGroups reports whether the provider's ID tokens set the user's
+// groups at every sign-in. Google's carry no groups, so the groups of
+// its users are managed in flint.
+func (p *OIDCProvider) SyncsGroups() bool { return !p.IsGoogle() }
+
 func (c *Config) setOIDCDefaults() {
 	for i := range c.Auth.OIDC {
 		p := &c.Auth.OIDC[i]
+		if p.Type == "" {
+			p.Type = OIDCTypeGeneric
+		}
+		if p.IsGoogle() {
+			if p.Name == "" {
+				p.Name = "google"
+			}
+			if p.DisplayName == "" {
+				p.DisplayName = "Google"
+			}
+			if p.Issuer == "" {
+				p.Issuer = GoogleIssuer
+			}
+		}
 		if p.Scopes == nil {
 			p.Scopes = slices.Clone(DefaultOIDCScopes)
 		}
 		if p.UsernameClaim == "" {
 			p.UsernameClaim = DefaultOIDCUsernameClaim
 		}
-		if p.GroupsClaim == "" {
+		if p.GroupsClaim == "" && p.SyncsGroups() {
 			p.GroupsClaim = DefaultOIDCGroupsClaim
 		}
 	}
@@ -125,6 +177,22 @@ func (c *Config) validateSignIn(v *validator) {
 	for i := range c.Auth.OIDC {
 		p := &c.Auth.OIDC[i]
 		path := fmt.Sprintf("auth.oidc[%d]", i)
+		switch p.Type {
+		case OIDCTypeGeneric:
+			if len(p.HostedDomains) > 0 {
+				v.addf(path+".hostedDomains", "is only for providers of type %q", OIDCTypeGoogle)
+			}
+			if len(p.AllowedEmails) > 0 {
+				v.addf(path+".allowedEmails", "is only for providers of type %q", OIDCTypeGoogle)
+			}
+			if p.AllowAnyGoogleAccount {
+				v.addf(path+".allowAnyGoogleAccount", "is only for providers of type %q", OIDCTypeGoogle)
+			}
+		case OIDCTypeGoogle:
+			validateGoogle(v, path, p)
+		default:
+			v.addf(path+".type", "%q is not a provider type: use %q or %q", p.Type, OIDCTypeGeneric, OIDCTypeGoogle)
+		}
 		if !validRepoName(p.Name) {
 			v.addf(path+".name", "%q is not a valid provider name: use 1 to 64 lowercase letters and digits, "+
 				"with single \".\", \"_\", or \"-\" separators between them", p.Name)
@@ -165,9 +233,11 @@ func (c *Config) validateSignIn(v *validator) {
 				v.addf(path+"."+f.field, "%q is not a claim name", f.value)
 			}
 		}
-		for j, d := range p.AllowedDomains {
-			if d != strings.ToLower(d) || !validHostname(d) {
-				v.addf(fmt.Sprintf("%s.allowedDomains[%d]", path, j), "%q is not a lowercase domain name", d)
+		checkDomains(v, path+".allowedDomains", p.AllowedDomains)
+		checkDomains(v, path+".hostedDomains", p.HostedDomains)
+		for j, e := range p.AllowedEmails {
+			if !ValidEmail(e) {
+				v.addf(fmt.Sprintf("%s.allowedEmails[%d]", path, j), "%q is not a lowercase email address", e)
 			}
 		}
 		checkIdPGroups(v, path+".allowedGroups", p.AllowedGroups)
@@ -197,6 +267,67 @@ func (c *Config) validateSignIn(v *validator) {
 			v.addf(path+".signingAlgorithms", "must not be empty if set")
 		}
 	}
+}
+
+// validateGoogle checks the settings of a provider of type google: its
+// issuer is preset, it needs a client secret, and since Google's ID
+// tokens carry no groups, the settings that read them do not apply.
+func validateGoogle(v *validator, path string, p *OIDCProvider) {
+	if p.Issuer != GoogleIssuer {
+		v.addf(path+".issuer", "must be %q or left out for type %q", GoogleIssuer, OIDCTypeGoogle)
+	}
+	if !slices.Contains(p.Scopes, "email") {
+		v.addf(path+".scopes", "must include \"email\" for type %q: only users with a verified email may sign in", OIDCTypeGoogle)
+	}
+	if len(p.AllowedDomains) > 0 {
+		v.addf(path+".allowedDomains", "does not apply to type %q: use hostedDomains, which Google's ID tokens name "+
+			"in the hd claim, or allowedEmails", OIDCTypeGoogle)
+	}
+	restricted := len(p.HostedDomains) > 0 || len(p.AllowedEmails) > 0
+	switch {
+	case !restricted && !p.AllowAnyGoogleAccount:
+		v.addf(path, "type %q needs hostedDomains or allowedEmails to restrict who may sign in, "+
+			"or allowAnyGoogleAccount: true to let any Google account sign in", OIDCTypeGoogle)
+	case restricted && p.AllowAnyGoogleAccount:
+		v.addf(path+".allowAnyGoogleAccount", "contradicts hostedDomains and allowedEmails; set one or the other")
+	}
+	if p.ClientSecretFile == "" {
+		v.addf(path+".clientSecretFile", "is required for type %q: Google web clients have a secret", OIDCTypeGoogle)
+	}
+	for _, f := range []struct {
+		field string
+		set   bool
+	}{
+		{"groupsClaim", p.GroupsClaim != ""},
+		{"allowedGroups", len(p.AllowedGroups) > 0},
+		{"groupMappings", len(p.GroupMappings) > 0},
+		{"importGroups", p.ImportGroups},
+		{"adminGroups", len(p.AdminGroups) > 0},
+	} {
+		if f.set {
+			v.addf(path+"."+f.field, "does not apply to type %q: Google's ID tokens carry no groups; "+
+				"manage the groups of its users in flint", OIDCTypeGoogle)
+		}
+	}
+}
+
+// checkDomains checks a list of lowercase domain names.
+func checkDomains(v *validator, path string, domains []string) {
+	for j, d := range domains {
+		if d != strings.ToLower(d) || !validHostname(d) {
+			v.addf(fmt.Sprintf("%s[%d]", path, j), "%q is not a lowercase domain name", d)
+		}
+	}
+}
+
+// ValidEmail reports whether s is a lowercase email address, as flint
+// compares the verified emails of OIDC users: a local part without
+// spaces or control characters, "@", and a domain name.
+func ValidEmail(s string) bool {
+	local, domain, ok := strings.Cut(s, "@")
+	return ok && len(s) <= 254 && local != "" && len(local) <= 64 && s == strings.ToLower(s) &&
+		!strings.ContainsFunc(local, func(r rune) bool { return r <= ' ' || r == 0x7f || r == '@' }) &&
+		validHostname(domain)
 }
 
 // checkIdPGroups checks a list of group names at a provider.
