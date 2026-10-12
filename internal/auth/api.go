@@ -14,12 +14,13 @@ import (
 )
 
 // The admin API serves JSON under /api/v1/. Every request authenticates
-// with a password or an API token, in any form authenticate accepts;
-// tokens from the Docker token service are not accepted. Managing
-// users and groups needs the global admin role. Creating an API token,
-// creating or updating a user or its groups, and setting a password need
-// a password, even with an admin token: a token cannot mint further
-// tokens or take over its owner's or anyone else's account.
+// with a password or an API token, in any form authenticate accepts, or
+// with a sign-in session's cookie; tokens from the Docker token service
+// are not accepted. Managing users and groups needs the global admin
+// role. Creating an API token, creating or updating a user or its
+// groups, and setting a password need the client to have signed in, with
+// a password or a session, even with an admin token: a token cannot mint
+// further tokens or take over its owner's or anyone else's account.
 
 const apiPrefix = "/api/v1"
 
@@ -30,16 +31,16 @@ func (s *Service) registerAPI(srv *server.Server) {
 	for pattern, h := range map[string]apiHandler{
 		"GET /api/v1/user":                             s.apiWhoami,
 		"GET /api/v1/users":                            s.admin(s.apiListUsers),
-		"POST /api/v1/users":                           s.admin(s.withPassword(s.apiCreateUser)),
+		"POST /api/v1/users":                           s.admin(s.signedIn(s.apiCreateUser)),
 		"GET /api/v1/users/{name}":                     s.apiGetUser,
-		"PATCH /api/v1/users/{name}":                   s.admin(s.withPassword(s.apiUpdateUser)),
+		"PATCH /api/v1/users/{name}":                   s.admin(s.signedIn(s.apiUpdateUser)),
 		"DELETE /api/v1/users/{name}":                  s.admin(s.apiDeleteUser),
-		"PUT /api/v1/users/{name}/password":            s.withPassword(s.apiSetPassword),
+		"PUT /api/v1/users/{name}/password":            s.signedIn(s.apiSetPassword),
 		"GET /api/v1/groups":                           s.admin(s.apiListGroups),
-		"PUT /api/v1/groups/{group}/members/{name}":    s.admin(s.withPassword(s.apiAddMember)),
-		"DELETE /api/v1/groups/{group}/members/{name}": s.admin(s.withPassword(s.apiRemoveMember)),
+		"PUT /api/v1/groups/{group}/members/{name}":    s.admin(s.signedIn(s.apiAddMember)),
+		"DELETE /api/v1/groups/{group}/members/{name}": s.admin(s.signedIn(s.apiRemoveMember)),
 		"GET /api/v1/tokens":                           s.apiListTokens,
-		"POST /api/v1/tokens":                          s.withPassword(s.apiCreateToken),
+		"POST /api/v1/tokens":                          s.signedIn(s.apiCreateToken),
 		"DELETE /api/v1/tokens/{id}":                   s.apiRevokeToken,
 		apiPrefix + "/":                                s.apiNotFound,
 	} {
@@ -89,12 +90,31 @@ func (s *Service) api(h apiHandler) http.Handler {
 func (s *Service) apiAuthenticate(w http.ResponseWriter, r *http.Request) (*Principal, bool) {
 	w.Header().Set("Cache-Control", "no-store")
 	c, err := s.authenticate(r, false)
+	// challenge is false for a request whose session has ended, so a
+	// browser's request from a page does not make it ask for a password.
+	challenge := true
 	if err == nil && c.kind == credNone {
-		err = ErrInvalidCredentials
+		var p *Principal
+		switch p, err = s.checkSession(r); {
+		case errors.Is(err, errNoSession):
+			err = ErrInvalidCredentials
+		case errors.Is(err, ErrInvalidCredentials):
+			challenge = false
+		case err == nil:
+			c = credentials{kind: credSession, principal: p}
+			if !safeMethod(r.Method) {
+				if cerr := s.CheckCrossOrigin(r); cerr != nil {
+					writeJSON(w, http.StatusForbidden, apiError{"cross-origin requests with a session are not allowed"})
+					return nil, false
+				}
+			}
+		}
 	}
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
-			w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
+			if challenge {
+				w.Header().Set("WWW-Authenticate", `Basic realm="`+Issuer+`"`)
+			}
 			writeJSON(w, http.StatusUnauthorized, apiError{"authentication required"})
 			return nil, false
 		}
@@ -105,6 +125,11 @@ func (s *Service) apiAuthenticate(w http.ResponseWriter, r *http.Request) (*Prin
 	logPrincipal(r.Context(), c.principal)
 	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBody)
 	return c.principal, true
+}
+
+// safeMethod reports whether an HTTP method changes nothing.
+func safeMethod(m string) bool {
+	return m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions
 }
 
 // AdminHandler serves h as an admin API endpoint of another package: it
@@ -135,20 +160,21 @@ func (s *Service) admin(h apiHandler) apiHandler {
 	}
 }
 
-// withPassword restricts h to clients authenticated with a password.
-func (s *Service) withPassword(h apiHandler) apiHandler {
+// signedIn restricts h to clients that signed in: authenticated with a
+// password or a sign-in session, not a token.
+func (s *Service) signedIn(h apiHandler) apiHandler {
 	return func(r *http.Request, p *Principal) (int, any, error) {
-		if !p.Password {
-			return 0, nil, errNeedsPassword
+		if !p.Password && p.SessionID == "" {
+			return 0, nil, errNeedsSignIn
 		}
 		return h(r, p)
 	}
 }
 
 var (
-	errForbidden     = errors.New("this requires the admin role")
-	errNeedsPassword = errors.New("this requires authenticating with a password, not a token")
-	errNotFound      = errors.New("not found")
+	errForbidden   = errors.New("this requires the admin role")
+	errNeedsSignIn = errors.New("this requires signing in with a password or a sign-in session, not a token")
+	errNotFound    = errors.New("not found")
 )
 
 type apiError struct {
@@ -163,7 +189,7 @@ func (s *Service) apiErrorResponse(err error) (int, any) {
 		return http.StatusBadRequest, apiError{inv.msg}
 	case errors.As(err, &mbe):
 		return http.StatusRequestEntityTooLarge, apiError{"the request body is too large"}
-	case errors.Is(err, errForbidden), errors.Is(err, errNeedsPassword):
+	case errors.Is(err, errForbidden), errors.Is(err, errNeedsSignIn):
 		return http.StatusForbidden, apiError{err.Error()}
 	case errors.Is(err, errNoSuchUser), errors.Is(err, errNoSuchToken), errors.Is(err, errNotFound):
 		return http.StatusNotFound, apiError{err.Error()}
@@ -206,6 +232,16 @@ type userJSON struct {
 	Groups   []string  `json:"groups"`
 	Created  time.Time `json:"created"`
 	Password bool      `json:"password"` // whether password login is enabled
+	// OIDC is the identity a user who signs in through an OIDC provider
+	// signs in with.
+	OIDC *oidcJSON `json:"oidc,omitempty"`
+}
+
+// oidcJSON is a user's OIDC identity as the API shows it.
+type oidcJSON struct {
+	Provider string `json:"provider"`
+	Issuer   string `json:"issuer"`
+	Subject  string `json:"subject"`
 }
 
 func toUserJSON(u *user) userJSON {
@@ -213,7 +249,11 @@ func toUserJSON(u *user) userJSON {
 	if g == nil {
 		g = []string{}
 	}
-	return userJSON{Name: u.Name, Admin: u.Admin, Groups: g, Created: u.Created.UTC(), Password: len(u.Password) > 0}
+	out := userJSON{Name: u.Name, Admin: u.Admin, Groups: g, Created: u.Created.UTC(), Password: len(u.Password) > 0}
+	if u.OIDC != nil {
+		out.OIDC = &oidcJSON{Provider: u.OIDC.Provider, Issuer: u.OIDC.Issuer, Subject: u.OIDC.Subject}
+	}
+	return out
 }
 
 // whoamiJSON describes the authenticated client.

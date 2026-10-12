@@ -278,6 +278,11 @@ type Auth struct {
 	// LoginTokenTTL is how long an API token minted by a package
 	// client's login command stays valid. Default 2160h (90 days).
 	LoginTokenTTL Duration `json:"loginTokenTTL,omitzero"`
+	// SessionTTL is how long a sign-in session, from the sign-in page or
+	// an OIDC provider, lasts. Default 12h.
+	SessionTTL Duration `json:"sessionTTL,omitzero"`
+	// OIDC lists the OpenID Connect providers users may sign in through.
+	OIDC []OIDCProvider `json:"oidc,omitempty"`
 }
 
 // BootstrapAdmin names the first administrator and the file holding its
@@ -353,7 +358,10 @@ func Load(path string) (*Config, error) {
 func Parse(b []byte) (*Config, error) {
 	c := Config{
 		ShutdownTimeout: Duration{Duration: DefaultShutdownTimeout, set: true},
-		Auth:            Auth{LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true}},
+		Auth: Auth{
+			LoginTokenTTL: Duration{Duration: DefaultLoginTokenTTL, set: true},
+			SessionTTL:    Duration{Duration: DefaultSessionTTL, set: true},
+		},
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -391,6 +399,7 @@ func (c *Config) setDefaults() {
 	if g := &c.GC.GracePeriod; !g.set && g.invalid == "" {
 		*g = Duration{Duration: DefaultGCGracePeriod, set: true}
 	}
+	c.setOIDCDefaults()
 }
 
 // decodeError turns a json decoding error into a message naming the field
@@ -648,6 +657,7 @@ func (c *Config) Validate() error {
 	case d.Duration <= 0:
 		v.addf("auth.loginTokenTTL", "must be positive")
 	}
+	c.validateSignIn(&v)
 	return v.err()
 }
 

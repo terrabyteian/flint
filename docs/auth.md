@@ -1,7 +1,7 @@
 # Authentication and the admin API
 
-flint authenticates clients against local users and API tokens, and authorizes them with per-repository roles.
-Users, their groups, and API tokens are runtime data in the metadata store, managed through the admin API below.
+flint authenticates clients against local users, users who sign in through OpenID Connect providers, and API tokens, and authorizes them with per-repository roles.
+Users, their groups, API tokens, and sign-in sessions are runtime data in the metadata store, managed through the admin API below.
 Permission grants, and which repositories allow anonymous pulls, are declared in the [configuration](configuration.md#permissions).
 
 ## Users and the first administrator
@@ -28,6 +28,47 @@ Without `bootstrapAdmin` and without an administrator, flint starts and logs a w
 
 flint never logs passwords, tokens, or hashes.
 The audit trail of the metadata store records who changed which user or token, never the values.
+
+## Signing in
+
+Browsers sign in on the sign-in page at `/auth/login`, with a user name and password or through an [OIDC provider](#oidc-sign-in), and get a sign-in session.
+The session is a cookie, `flint_session`, holding a random secret of which flint stores only the SHA-256 hash; it is `HttpOnly`, `SameSite=Lax`, and `Secure` when the browser reached flint over HTTPS.
+It lasts `auth.sessionTTL` (default 12 hours; see [configuration](configuration.md#fields)), and signing out (`POST /auth/logout`) ends it at once, as deleting the user does.
+A user keeps at most 50 sessions; signing in again beyond that ends the oldest.
+
+A session authenticates the [admin API](#admin-api) and the UI, never the registry or package endpoints: Docker, PyPI, npm, and every other package client use [API tokens](#api-tokens).
+A session counts as having signed in, as a password does, so a signed-in user can create API tokens for package clients, which is how a user who signs in only through an OIDC provider gets one.
+The sign-in page itself, until the UI serves its own pages, shows who is signed in and creates API tokens.
+
+A request with a session that changes anything must come from flint's own pages: a browser request from another origin, as the `Sec-Fetch-Site` or `Origin` header shows, gets `403`.
+Requests that are not from a browser carry neither header and are not affected, but they do not have the cookie unless given it.
+
+Every sign-in through `/auth/login` and an OIDC provider takes an optional `return` parameter, a path on flint to go to afterwards; anything else, such as another site's URL, goes to the sign-in page instead.
+Starting and ending a session are recorded in the audit log as `auth.session.create` and `auth.session.delete`.
+
+### OIDC sign-in
+
+Each provider configured in [`auth.oidc`](configuration.md#oidc-providers) gets a "Sign in with" button on the sign-in page.
+flint uses the authorization code flow with PKCE (`S256`), a state, and a nonce, and verifies the ID token itself: its signature, with a key from the provider's published key set and an algorithm from the allowed list (never `none` or an HMAC algorithm), and its issuer, audience, authorized party, expiry, issue time, not-before time, and nonce, allowing one minute of clock difference.
+The provider's discovery document and keys are cached for an hour; a token signed with a key flint has not seen makes it fetch the keys again, at most every 30 seconds, so the provider can rotate its keys.
+A sign-in in progress is bound to the browser that started it by a short-lived cookie, works once, and expires after 10 minutes.
+
+**Users.** A user who signs in through a provider is identified by the provider's issuer and the user's subject (`sub`), never by email or name.
+On the first sign-in, flint creates the user, named after the provider's `usernameClaim` (by default the verified email), lowercased.
+If a user of that name already exists, local or from another identity, the sign-in is refused rather than take it over; an administrator resolves the conflict, for example by deleting or renaming the other user.
+Later sign-ins find the user by issuer and subject, so a changed email or name at the provider does not change the flint user.
+Users from a provider have no password and cannot be given one, and password sign-in never works for them; local users never sign in through a provider.
+Deleting such a user deletes its tokens and sessions, and the identity's next sign-in creates the user anew.
+The user's creation and each change a sign-in makes are recorded in the audit log as `auth.oidc.user.create` and `auth.oidc.user.sync`.
+
+**Groups.** At every sign-in, the user's flint groups are replaced by those the provider's groups claim maps to through `groupMappings`, plus, with `importGroups`, the provider's groups themselves.
+With `adminGroups`, the global `admin` flag is set at every sign-in too: on for members of those groups, off for everyone else, except that the last administrator is never demoted.
+Groups set through the admin API for such a user last until the next sign-in.
+The groups claim must be in the ID token; some providers send it only when asked for a scope such as `groups`, which `scopes` then lists.
+
+**Removing access.** Group changes at the provider take effect at the user's next sign-in through it.
+Until then, the user's sessions and API tokens keep the groups and permissions of the last sign-in.
+To cut a user off at once, delete the user in flint, which ends its sessions and revokes its tokens, or revoke its tokens; disabling the user at the provider only stops new sign-ins.
 
 ## Permissions
 
@@ -214,25 +255,25 @@ The [classic Helm chart repository view](helm-repository.md#access) at `/helm/<r
 ## Admin API
 
 The admin API serves JSON under `/api/v1/`.
-Every request authenticates with a password or an API token, in any of the [forms above](#api-tokens); tokens from the Docker token endpoint are not accepted.
-Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`.
-Errors are `{"error": "message"}` with status `400` (invalid request), `403` (not allowed), `404` (no such user, token, repository, project, release, or file, or backups are not configured), `405` (yanking or deleting in a repository that is not hosted), `409` (the user exists, the change would remove the last administrator, a backup is already running, or a garbage collection is in progress), `413` (the body is over 64 KiB), or `503` (the server is shutting down).
+Every request authenticates with a password or an API token, in any of the [forms above](#api-tokens), or with a [sign-in session](#signing-in)'s cookie; tokens from the Docker token endpoint are not accepted.
+Without valid credentials the answer is `401` with `WWW-Authenticate: Basic realm="flint"`, except for a request with a session cookie whose session has ended, which gets `401` without the challenge so a browser does not ask for a password.
+Errors are `{"error": "message"}` with status `400` (invalid request, such as setting a password for a user from an OIDC provider), `403` (not allowed, or a cross-origin request with a session), `404` (no such user, token, repository, project, release, or file, or backups are not configured), `405` (yanking or deleting in a repository that is not hosted), `409` (the user exists, the change would remove the last administrator, a backup is already running, or a garbage collection is in progress), `413` (the body is over 64 KiB), or `503` (the server is shutting down).
 Request bodies are strict JSON: unknown fields are errors.
 
 | Request | Who | Does |
 | --- | --- | --- |
 | `GET /api/v1/user` | anyone | Describe the authenticated client. |
 | `GET /api/v1/users` | admin | List users. |
-| `POST /api/v1/users` | admin, with a password | Create a user. |
+| `POST /api/v1/users` | admin, signed in | Create a user. |
 | `GET /api/v1/users/{name}` | admin, or the user | Show a user. |
-| `PATCH /api/v1/users/{name}` | admin, with a password | Set the `admin` flag or the groups. |
+| `PATCH /api/v1/users/{name}` | admin, signed in | Set the `admin` flag or the groups. |
 | `DELETE /api/v1/users/{name}` | admin | Delete a user and the user's tokens. |
-| `PUT /api/v1/users/{name}/password` | admin or the user, with a password | Set a password. |
+| `PUT /api/v1/users/{name}/password` | admin or the user, signed in | Set a password. |
 | `GET /api/v1/groups` | admin | List groups and their members. |
-| `PUT /api/v1/groups/{group}/members/{name}` | admin, with a password | Add a user to a group. |
-| `DELETE /api/v1/groups/{group}/members/{name}` | admin, with a password | Remove a user from a group. |
+| `PUT /api/v1/groups/{group}/members/{name}` | admin, signed in | Add a user to a group. |
+| `DELETE /api/v1/groups/{group}/members/{name}` | admin, signed in | Remove a user from a group. |
 | `GET /api/v1/tokens` | anyone | List one's own tokens. |
-| `POST /api/v1/tokens` | anyone, with a password | Create a token for oneself. |
+| `POST /api/v1/tokens` | anyone, signed in | Create a token for oneself. |
 | `DELETE /api/v1/tokens/{id}` | the owner, or admin | Revoke a token. |
 | `GET /api/v1/backup` | admin | Report the running backup and the last ones; see [backups](backup.md#the-admin-api). |
 | `POST /api/v1/backup` | admin | Start a backup. |
@@ -247,8 +288,9 @@ Request bodies are strict JSON: unknown fields are errors.
 
 [Garbage collection](garbage-collection.md) describes the garbage-collection reports, and `flint gc` calls the `/api/v1/gc` endpoints.
 
-"admin" means the global admin role: an administrator authenticated with a password, or with a token created with `"admin": true`.
-Creating a token, creating or updating a user or its groups, and setting a password need a password, even for a token created with `"admin": true`, so a leaked token cannot mint longer-lived tokens or take over its owner's or anyone else's account.
+"admin" means the global admin role: an administrator authenticated with a password or a session, or with a token created with `"admin": true`.
+"Signed in" means authenticated with a password or a [sign-in session](#signing-in), not a token.
+Creating a token, creating or updating a user or its groups, and setting a password need the client to be signed in, even with a token created with `"admin": true`, so a leaked token cannot mint longer-lived tokens or take over its owner's or anyone else's account.
 The last administrator cannot be deleted or demoted.
 
 ### Users
@@ -276,6 +318,7 @@ The response, here `201 Created`, and every other user response has this form:
 ```
 
 `password` reports whether password login is enabled.
+A user who signs in through an [OIDC provider](#oidc-sign-in) also has `"oidc": {"provider": "corp", "issuer": "https://sso.example.com/realms/corp", "subject": "..."}`, the identity it signs in with.
 `PATCH /api/v1/users/{name}` takes `{"admin": true}`, `{"groups": ["ci"]}`, or both; a field left out is unchanged.
 `PUT /api/v1/users/{name}/password` takes `{"password": "..."}` and returns `204`.
 
@@ -325,7 +368,7 @@ The response, `201 Created`, is the only one that includes the token:
 
 | Metric | Meaning |
 | --- | --- |
-| `flint_auth_attempts_total{method, result}` | Credential checks by `method` (`password`, `token`, `jwt`, or `url` for a signed URL) and `result` (`success`, `failure`). |
+| `flint_auth_attempts_total{method, result}` | Credential checks by `method` (`password`, `token`, `jwt`, `url` for a signed URL, `session` for a sign-in session's cookie, or `oidc` for a sign-in through an OIDC provider) and `result` (`success`, `failure`). |
 | `flint_auth_tokens_issued_total` | Bearer tokens issued by the token endpoint. |
 
 Requests by an authenticated client carry `user` (and `token_id`, for an API token) in their log line.

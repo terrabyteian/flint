@@ -151,6 +151,16 @@ config:
   #     members: [goproxy]
   auth:
     permissions: []
+    # # Sign-in through OpenID Connect providers (docs/configuration.md);
+    # # the client secret comes from oidcSecrets below.
+    # oidc:
+    #   - name: corp
+    #     displayName: Corp SSO
+    #     issuer: https://sso.example.com/realms/corp
+    #     clientId: flint
+    #     clientSecretFile: /etc/flint/oidc/corp/client-secret
+    #     groupMappings:
+    #       engineering: [ci]
   # proxyCache:
   #   # Free space below which proxy repositories stop caching new content.
   #   minFreeSpace: 5%
@@ -181,6 +191,18 @@ upstreamSecrets: []
 #   # Such as one made with
 #   #   kubectl create secret generic dockerhub-credentials --from-literal=password=...
 #   existingSecret: dockerhub-credentials
+
+# Secrets of OIDC providers' clients. Each Secret is mounted at
+# /etc/flint/oidc/<name>, each of its keys a file: give
+# /etc/flint/oidc/<name>/client-secret as config.auth.oidc[].clientSecretFile,
+# and, if the Secret also holds the provider's CA certificates under ca.crt,
+# /etc/flint/oidc/<name>/ca.crt as caFile. flint reads the client secret at
+# every sign-in, so a rotated Secret takes effect without a restart.
+oidcSecrets: []
+# - name: corp
+#   # Such as one made with
+#   #   kubectl create secret generic flint-oidc-corp --from-literal=client-secret=...
+#   existingSecret: flint-oidc-corp
 
 # The first administrator, which flint creates at startup while no
 # administrator exists (docs/auth.md). Its password is the key "password" of

@@ -236,6 +236,21 @@ Repositories and permission grants declared here are read-only through the API.
         "role": "admin",
         "users": ["alice"]
       }
+    ],
+    "sessionTTL": "8h",
+    "oidc": [
+      {
+        "name": "corp",
+        "displayName": "Corp SSO",
+        "issuer": "https://sso.example.com/realms/corp",
+        "clientId": "flint",
+        "clientSecretFile": "/etc/flint/oidc/corp/client-secret",
+        "allowedDomains": ["example.com"],
+        "groupMappings": {
+          "engineering": ["ci", "team-a"]
+        },
+        "adminGroups": ["flint-admins"]
+      }
     ]
   }
 }
@@ -260,6 +275,8 @@ The smallest valid file is `{"dataDir": "/var/lib/flint"}`: plain HTTP on port 5
 | `auth.permissions` | array | `[]` | Permission grants; see below. |
 | `auth.bootstrapAdmin` | object | none | Create the first administrator at startup if none exists; see below. |
 | `auth.loginTokenTTL` | duration string | `"2160h"` | How long an API token minted by a package client's login command stays valid (90 days by default); see [authentication](auth.md#tokens-from-client-login-commands). Must be positive. |
+| `auth.sessionTTL` | duration string | `"12h"` | How long a [sign-in session](auth.md#signing-in) lasts, whether the user signed in with a password or through an OIDC provider. Must be positive. |
+| `auth.oidc` | array | `[]` | OpenID Connect providers users may sign in through; see [OIDC providers](#oidc-providers). |
 | `backup.directory` | string | none | Absolute path of the [backup](backup.md) directory, outside the data directory and not containing it. Without it, backups are disabled. |
 | `proxyCache.minFreeSpace` | string | `"5%"` | Free space on the data directory's filesystem below which [proxy repositories](#proxy-repositories) stop caching new content: a percentage of the filesystem's size, such as `"5%"`, or a size, such as `"20GiB"`. |
 | `gc.gracePeriod` | duration string | `"24h"` | How long [garbage collection](#garbage-collection) keeps a blob that nothing references after the blob was stored, and a blob link that no manifest references after it was last written or read with a blob `HEAD` or `GET`, or after flint started; so also how long a push may take between uploading or checking its blobs and pushing its manifest. At least `"1h"`. |
@@ -420,6 +437,33 @@ A user's role on a repository is the highest one any matching grant gives; [auth
 
 The file is read only while no administrator exists, so it can be removed after the first start, and changing it later does not reset the password.
 
+### OIDC providers
+
+Each entry of `auth.oidc` is an OpenID Connect provider, such as Keycloak, Dex, Okta, Microsoft Entra ID, or Google, that users sign in through on the [sign-in page](auth.md#signing-in).
+[Authentication](auth.md#oidc-sign-in) describes how users are created and their groups synced.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | required | Names the provider in flint's URLs, such as `/auth/oidc/<name>/callback`. 1 to 64 lowercase letters and digits, with single `.`, `_`, or `-` separators between them. Unique. |
+| `displayName` | string | `name` | Shown on the sign-in page, as in "Sign in with Corp SSO". |
+| `issuer` | string | required | The provider's issuer URL, exactly as its discovery document and ID tokens name it, including any trailing `/`. flint fetches `<issuer>/.well-known/openid-configuration`. It must be `https`; `http` is allowed only for `localhost` and loopback addresses. |
+| `clientId` | string | required | flint's client ID at the provider. |
+| `clientSecretFile` | string | none | Absolute path of a file holding the client secret, such as a mounted Kubernetes Secret, read at every sign-in so a rotated secret takes effect; one trailing newline is ignored. Without it, flint is a public client and relies on PKCE alone. |
+| `caFile` | string | none | Absolute path of PEM certificates of the authorities that the provider's TLS certificates are checked against, instead of the system's. |
+| `scopes` | array of strings | `["openid", "email", "profile"]` | The scopes requested. Must include `openid`; add the scope that makes the provider send groups, such as `groups` for Dex, if it needs one. |
+| `usernameClaim` | string | `"email"` | The ID token claim that a new user's flint name is made from, lowercased. With `email`, the provider must say the email is verified (`email_verified`). |
+| `groupsClaim` | string | `"groups"` | The ID token claim that lists the user's groups at the provider: an array of strings, or one string. |
+| `allowedDomains` | array of strings | `[]` | If set, only users with a verified email in one of these lowercase domains may sign in. |
+| `allowedGroups` | array of strings | `[]` | If set, only users in one of these groups at the provider may sign in. |
+| `groupMappings` | object | `{}` | Maps a group at the provider to an array of flint groups its members belong to, such as `{"engineering": ["ci", "team-a"]}`. Grants in [permissions](#permissions) name the flint groups. |
+| `importGroups` | boolean | `false` | Also make the user a member of each of the user's groups at the provider whose name, lowercased, is a valid flint group name, by that name. |
+| `adminGroups` | array of strings | `[]` | If set, members of these groups at the provider are global administrators and everyone else signing in through the provider is not, decided at every sign-in. Without it, the `admin` flag of the provider's users is managed through the admin API. |
+| `signingAlgorithms` | array of strings | from discovery | The only ID token signature algorithms accepted, from `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `ES512`, and `EdDSA`. By default, those the discovery document lists among these, or `RS256` if it lists none. |
+
+Register `<publicURL>/auth/oidc/<name>/callback` as the client's redirect URI at the provider, or, without a [public URL](#public-url), the scheme and host users reach flint at with that path.
+The provider's discovery document and keys are fetched when a user first signs in through it, not at startup, so flint starts while a provider is down.
+`caFile` is read at startup, which fails if it cannot be; `clientSecretFile` is read at every sign-in.
+
 ### Garbage collection
 
 Deleting an image or a blob hides it at once; garbage collection later deletes the blobs nothing references any more.
@@ -534,6 +578,8 @@ These authenticate themselves, as [authentication](auth.md) describes:
 | Endpoint | Meaning |
 | --- | --- |
 | `GET, POST /auth/token` | The Docker token endpoint: issues short-lived bearer tokens for registry requests. |
+| `GET, POST /auth/login`, `POST /auth/logout` | The [sign-in page](auth.md#signing-in): signs a browser in with a password, and out. |
+| `GET /auth/oidc/<provider>/login`, `GET /auth/oidc/<provider>/callback` | [Sign-in through an OIDC provider](auth.md#oidc-sign-in). |
 | `/api/v1/...` | The admin API: users, groups, API tokens, [backups](backup.md), the [audit log](operations.md#audit-log), yanking and deleting PyPI files, and deleting crate versions. |
 | `PUT /npm/<repository>/-/user/org.couchdb.user:<user>` | npm's legacy login, which mints an API token for a user name and password; see [npm](npm.md#logging-in-with-npm-login). |
 

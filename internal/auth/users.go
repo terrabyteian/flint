@@ -213,13 +213,18 @@ func (s *Service) setPassword(ctx context.Context, actor *Principal, name, passw
 		return err
 	}
 	_, err = s.updateUser(ctx, actor, name, "auth.user.password", func(u *user) error {
+		if u.OIDC != nil {
+			return invalidf("user %q signs in through OIDC provider %s and cannot have a password", name, u.OIDC.Provider)
+		}
 		u.Password = hash
 		return nil
 	})
 	return err
 }
 
-// deleteUser deletes a user and the user's tokens.
+// deleteUser deletes a user, the user's tokens and sessions, and the
+// link from the user's OIDC identity, if any, so the identity's next
+// sign-in creates the user anew.
 func (s *Service) deleteUser(ctx context.Context, actor *Principal, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -247,6 +252,15 @@ func (s *Service) deleteUser(ctx context.Context, actor *Principal, name string)
 		b.Delete(tokenKey(string(key[len(prefix):])))
 		return true
 	})
+	prefix = []byte(userSessionPrefix + name + "\x00")
+	v.Scan(prefix, nil, func(key []byte, _ meta.Record) bool {
+		b.Delete(key)
+		b.Delete(sessionKey(string(key[len(prefix):])))
+		return true
+	})
+	if u.OIDC != nil {
+		b.Delete(oidcKey(u.OIDC.Issuer, u.OIDC.Subject))
+	}
 	return s.commit(ctx, b, actor, "auth.user.delete", "user "+name)
 }
 
